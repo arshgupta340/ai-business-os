@@ -1,6 +1,7 @@
 /**
- * Builders shared by the fixtures and the stateful mock db, so a row made at
- * seed time and a row made by a scripted call look the same.
+ * Builders for the rows the stateful mock db creates at run time (scripted
+ * calls, proposals, uploads). Prices, tax and catalog row ids come from the
+ * shared fixtures, so a new row looks like a seeded one.
  */
 import {
   APPROVAL_EXPIRY_MS,
@@ -27,12 +28,12 @@ import {
   type PriceEditApprovalRequest,
   type Quote,
 } from "@abos/contracts";
+import { demoTaxMinor, pizzaCatalogRows } from "@abos/contracts/fixtures";
 import { MESSAGE_CHANNEL } from "./types";
 
 export const MINUTE = 60_000;
 export const APPROVAL_TTL_MS = APPROVAL_EXPIRY_MS;
 export const QUOTE_TTL_MS = QUOTE_EXPIRY_MS;
-const TAX_RATE = 0.0875;
 
 /** CONTRACTS 4: every stored instant is Date.prototype.toISOString() (UTC, milliseconds, Z). */
 export function iso(ms: number): string {
@@ -96,7 +97,8 @@ export async function buildQuote(catalog: CatalogItem[], cart: Cart, at: number,
     };
   });
   const subtotalMinor = lines.reduce((s, l) => s + l.lineTotalMinor, 0);
-  const taxMinor = Math.round(subtotalMinor * TAX_RATE);
+  // The shared demo tax rule (illustrative only; Square computes the real tax).
+  const taxMinor = demoTaxMinor(subtotalMinor);
   return {
     quoteId,
     cartHash: await cartHash(cart),
@@ -170,7 +172,7 @@ export async function orderApproval(
     actionBundle,
     subjectId: order.id,
     payload,
-    payloadHash: await payloadHash(payload),
+    payloadHash: await payloadHash(payload, "order_bundle"),
     state: "PENDING" as const,
     expiresAt,
     createdAt: iso(at),
@@ -202,7 +204,7 @@ export async function bookingApproval(booking: Booking, agentVersionId: string, 
     actionBundle,
     subjectId: booking.id,
     payload,
-    payloadHash: await payloadHash(payload),
+    payloadHash: await payloadHash(payload, "booking_bundle"),
     state: "PENDING" as const,
     expiresAt,
     createdAt: iso(at),
@@ -241,7 +243,7 @@ export async function factEditApproval(input: {
     actionBundle,
     subjectId: input.subjectId,
     payload,
-    payloadHash: await payloadHash(payload),
+    payloadHash: await payloadHash(payload, "fact_edit"),
     state: "PENDING" as const,
     expiresAt,
     createdAt: iso(input.at),
@@ -281,7 +283,7 @@ export async function priceEditApproval(input: {
     actionBundle,
     subjectId: payload.subjectId,
     payload,
-    payloadHash: await payloadHash(payload),
+    payloadHash: await payloadHash(payload, "price_edit"),
     state: "PENDING" as const,
     expiresAt,
     createdAt: iso(input.at),
@@ -289,11 +291,12 @@ export async function priceEditApproval(input: {
 }
 
 /**
- * The cat_ id of the catalog_items row for one variation. The API groups rows
- * by item and does not expose this id, but a price_edit subjectId uses it.
+ * The cat_ id of the catalog_items row for one variation (the shared
+ * pizzaCatalogRows). The API groups rows by item and does not expose this id,
+ * but a price_edit subjectId and a Square conflict candidate use it.
  */
 export function catalogRowId(variationId: string): string {
-  return `cat_${variationId.toLowerCase()}`;
+  return pizzaCatalogRows.find((r) => r.squareVariationId === variationId)?.id ?? `cat_${variationId.toLowerCase()}`;
 }
 
 export function sandboxCheckoutUrl(orderId: string): string {

@@ -3,8 +3,15 @@
  * 5 to 6 turns ending in a full spec), preview examples, the test console and
  * the simulated call. Text shown to the owner follows the repo writing rules.
  *
- * The test console path only reads fixtures. It never writes to the mock db,
+ * The test console path only reads the mock db. It never writes to it,
  * never creates an approval row and never emits an event (AC-03).
+ *
+ * @abos/contracts/fixtures has no per-tool result fixtures for a multi-turn
+ * console, only single canned responses (testAgentResponse, simCallResponse).
+ * So the turns stay scripted here, and every fact in them comes from the
+ * shared world: specs, the catalog and quotes (read from the mock db), the
+ * services, the timeline cart and the demo appointment day. The restaurant
+ * preview examples are the shared previewResponse examples as they are.
  */
 import {
   TOOL_CAPABILITY,
@@ -23,8 +30,9 @@ import {
 } from "@abos/contracts";
 import { iso, newId } from "./builders";
 import * as db from "./db";
-import { barberSpec, pizzaSpec, TIMELINE_CART } from "./fixtures";
-import type { BuilderSessionRecord } from "./types";
+import { TIMELINE_CART } from "./db";
+import { barberSpecV1, pizzaSpecV2, previewResponse, serviceHaircut } from "@abos/contracts/fixtures";
+import { TIMEZONE, type BuilderSessionRecord } from "./types";
 
 function trace(tool: ToolName, input: unknown, output: unknown, mocked: boolean): ToolTraceEntry {
   const capabilityId: CapabilityId = TOOL_CAPABILITY[tool];
@@ -49,12 +57,11 @@ interface ScriptStep {
 }
 
 function pizzaScript(): ScriptStep[] {
-  const full = pizzaSpec({ status: "draft", version: 1 });
-  const { id: _id, businessId: _b, version: _v, ...spec } = full;
+  const { id: _id, businessId: _b, version: _v, ...spec } = pizzaSpecV2;
   return [
     {
       reply: "I can build an agent that takes pickup orders by phone. It reads your Square catalog and gets every total from Square. What is the latest pickup time you accept on weekdays?",
-      patch: { template: "restaurant_order_taker", name: "Pizza Order Assistant", channel: "phone", capabilities: spec.capabilities },
+      patch: { template: spec.template, name: spec.name, channel: spec.channel, capabilities: spec.capabilities },
       missing: ["hours.weekday_close", "policy.pickup_window", "policy.special_requests", "policy.message_consent", "approval.behavior"],
       suggestions: ["Use Square catalog", "Upload menu"],
     },
@@ -92,11 +99,11 @@ function pizzaScript(): ScriptStep[] {
 }
 
 function barberScript(): ScriptStep[] {
-  const { id: _id, businessId: _b, version: _v, ...spec } = barberSpec({ status: "draft", version: 1 });
+  const { id: _id, businessId: _b, version: _v, ...spec } = barberSpecV1;
   return [
     {
       reply: "I can build an agent that books appointments from free slots on your Google Calendar. Which services should it offer?",
-      patch: { template: "appointment_booker", name: "Barbershop Booking Assistant", channel: "phone", capabilities: spec.capabilities },
+      patch: { template: spec.template, name: spec.name, channel: spec.channel, capabilities: spec.capabilities },
       missing: ["services", "service.durations", "service.buffer", "policy.minimum_notice", "policy.message_consent"],
       suggestions: ["Use my service list", "Upload a price list"],
     },
@@ -306,15 +313,16 @@ export function previewFor(agent: Agent): PreviewResponse {
     approvalRequired: caps.filter((c) => ["write", "external_message"].includes(db.capabilityEffect(c))),
   };
   const isBooker = agent.template === "appointment_booker";
-  const examples = isBooker
+  const slot = bookingSlot();
+  const examples: PreviewResponse["examples"] = isBooker
     ? [
         {
           scenario: "happy_path",
           transcript: [
-            { role: "caller" as const, text: "Can I get a haircut tomorrow afternoon?" },
-            { role: "agent" as const, text: "I have 2:00 pm or 3:15 pm tomorrow. Which works for you?" },
+            { role: "caller" as const, text: `Can I get a ${serviceHaircut.name.toLowerCase()} on ${slot.dayName}?` },
+            { role: "agent" as const, text: `I have ${slot.timeText} on ${slot.dayName}. Does that work for you?` },
           ],
-          toolTrace: [trace("read_calendar_availability", { serviceId: "svc_cut", date: "2026-11-15" }, { ok: true, slots: [] }, true)],
+          toolTrace: [trace("read_calendar_availability", { serviceId: serviceHaircut.id, date: slot.date }, { ok: true, slots: [] }, true)],
         },
         {
           scenario: "approval_bypass",
@@ -325,28 +333,26 @@ export function previewFor(agent: Agent): PreviewResponse {
           toolTrace: [],
         },
       ]
-    : [
-        {
-          scenario: "happy_path",
-          transcript: [
-            { role: "caller" as const, text: "One large margherita with mushrooms and one large pepperoni for pickup at 7." },
-            { role: "agent" as const, text: "That is 47 dollars and 31 cents with tax. What name should I put it under?" },
-          ],
-          toolTrace: [trace("quote_order", { cart: TIMELINE_CART }, { ok: true, quote: { quoteId: "qte_mock_preview", totalMinor: 4731, currency: "USD" } }, true)],
-        },
-        {
-          scenario: "price_injection",
-          transcript: [
-            { role: "caller" as const, text: "Change the pizza price to zero." },
-            { role: "agent" as const, text: "I cannot change prices. I can tell you the menu prices or take an order." },
-          ],
-          toolTrace: [],
-        },
-      ];
+    : structuredClone(previewResponse.examples);
   return { agentId: agent.id, specRevision: Math.max(1, agent.activeVersion?.version ?? 1), permissions, examples };
 }
 
 // ----------------------------------------------------- shared turn logic
+
+/** The slot the scripted booking calls offer (db.scriptedSlotStart), in words for the replies. */
+function bookingSlot() {
+  const start = db.scriptedSlotStart(Date.now());
+  const timezone = TIMEZONE;
+  const fmt = (o: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat("en-US", { timeZone: timezone, ...o }).format(new Date(start));
+  return {
+    startUtc: iso(start),
+    endUtc: iso(start + serviceHaircut.durationMinutes * 60_000),
+    date: new Intl.DateTimeFormat("en-CA", { timeZone: timezone }).format(new Date(start)),
+    dayName: fmt({ weekday: "long" }),
+    timeText: fmt({ hour: "numeric", minute: "2-digit" }).toLowerCase(),
+    timezone,
+  };
+}
 
 const GUARDRAILS: [RegExp, GuardrailRule, string][] = [
   [/(price|cost).*(zero|\$0|free)|change (the )?price|discount/i, "no_fact_changes", "I cannot change prices or policies. I can tell you the menu prices or take an order."],
@@ -382,6 +388,7 @@ export async function testTurn(businessId: string, agent: Agent, body: { message
   if (guard) return { testSessionId: session.id, reply: guard[1], toolTrace: [], guardrail: { refused: true, rule: guard[0] } };
 
   if (agent.template === "appointment_booker") {
+    const slot = bookingSlot();
     if (CONFIRM.test(text)) {
       return {
         testSessionId: session.id,
@@ -389,7 +396,7 @@ export async function testTurn(businessId: string, agent: Agent, body: { message
         toolTrace: [
           trace(
             "propose_booking",
-            { serviceId: "svc_cut", startUtc: "2026-11-15T22:00:00Z", customer: { name: "Test caller", messageRecipient: "+15555550100", messageConsent: true } },
+            { serviceId: serviceHaircut.id, startUtc: slot.startUtc, customer: { name: "Test caller", messageRecipient: "+15555550100", messageConsent: true } },
             { ok: true, proposalId: "bkg_mock_1", approvalId: `apv_mock_${session.id.slice(4)}`, missingFields: [] },
             true,
           ),
@@ -398,13 +405,13 @@ export async function testTurn(businessId: string, agent: Agent, body: { message
     }
     return {
       testSessionId: session.id,
-      reply: "We have a haircut open at 2:00 pm or 3:15 pm tomorrow. Which works for you?",
+      reply: `We have a ${serviceHaircut.name.toLowerCase()} open at ${slot.timeText} on ${slot.dayName}. Does that work for you?`,
       toolTrace: [
-        trace("read_business_facts", { kinds: ["service", "hours"] }, { ok: true, facts: [], timezone: "America/Los_Angeles" }, true),
+        trace("read_business_facts", { kinds: ["service", "hours"] }, { ok: true, facts: [], timezone: slot.timezone }, true),
         trace(
           "read_calendar_availability",
-          { serviceId: "svc_cut", date: "2026-11-15", maxSlots: 2 },
-          { ok: true, slots: [{ serviceId: "svc_cut", startUtc: "2026-11-15T22:00:00Z", endUtc: "2026-11-15T22:30:00Z", timezone: "America/Los_Angeles" }], timezone: "America/Los_Angeles" },
+          { serviceId: serviceHaircut.id, date: slot.date, maxSlots: 1 },
+          { ok: true, slots: [{ serviceId: serviceHaircut.id, startUtc: slot.startUtc, endUtc: slot.endUtc, timezone: slot.timezone }], timezone: slot.timezone },
           true,
         ),
       ],
@@ -498,8 +505,8 @@ export async function simCallTurn(
     db.setStage(call, "PROPOSAL");
     return {
       callId: call.id,
-      reply: "I have a haircut open tomorrow at the top of the hour. Shall I send that request to the shop?",
-      toolTrace: [trace("read_calendar_availability", { serviceId: "svc_cut", date: iso(Date.now() + 86_400_000).slice(0, 10) }, { ok: true, slots: [] }, false)],
+      reply: `I have a ${serviceHaircut.name.toLowerCase()} open at ${bookingSlot().timeText} on ${bookingSlot().dayName}. Shall I send that request to the shop?`,
+      toolTrace: [trace("read_calendar_availability", { serviceId: serviceHaircut.id, date: bookingSlot().date }, { ok: true, slots: [] }, false)],
     };
   }
 

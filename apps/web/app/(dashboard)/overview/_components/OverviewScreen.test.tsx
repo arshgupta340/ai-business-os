@@ -68,6 +68,18 @@ describe('OverviewScreen', () => {
   it('links each agent card to its agent page', async () => {
     renderOverview();
     const cards = await screen.findAllByRole('link', {name: /^Open /});
-    expect(cards.map((c) => c.getAttribute('href')).sort()).toEqual(['/agents/agt_pizza_01', '/agents/agt_pizza_faq_01']);
+    expect(cards.map((c) => c.getAttribute('href')).sort()).toEqual(['/agents/agt_pizza_01', '/agents/agt_pizza_faq_01', '/agents/agt_pizza_paused_88']);
+  });
+
+  it('a business with nothing yet shows empty blocks, each with a next step, and no error', async () => {
+    mockControls.simulateEmptyBusiness?.('biz_pizza_01');
+    renderOverview();
+    expect(await screen.findByText('No agents yet')).toBeTruthy();
+    const build = screen.getByRole('link', {name: 'Build an agent'});
+    expect(build.getAttribute('href')).toBe('/build');
+    expect(await screen.findByText('No orders yet')).toBeTruthy();
+    expect(await screen.findByText('No activity yet')).toBeTruthy();
+    await waitFor(() => expect(countText('overview-pending-approvals-count')).toBe('0'));
+    expect(screen.queryByText(/Could not load/)).toBeNull();
   });
 });

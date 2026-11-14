@@ -66,7 +66,7 @@ export function AgentsListScreen() {
   if (agents.isPending) {
     body = <LoadingState label="Loading agents" />;
   } else if (agents.error) {
-    body = <ErrorNotice error={agents.error} context="load" onRetry={() => void agents.refetch()} />;
+    body = <ErrorNotice error={agents.error} context="load" title="Could not load your agents" onRetry={() => void agents.refetch()} />;
   } else if (agents.data.items.length === 0) {
     body = (
       <EmptyState
@@ -81,7 +81,7 @@ export function AgentsListScreen() {
     body = (
       <VStack gap={3}>
         {owner ? <Text type="body">{numberOwnerSentence(owner)}</Text> : null}
-        {liveAgent.error ? <ErrorNotice error={liveAgent.error} context="load" onRetry={() => void liveAgent.refetch()} /> : null}
+        {liveAgent.error ? <ErrorNotice error={liveAgent.error} context="load" title="Could not check which agent answers the phone" onRetry={() => void liveAgent.refetch()} /> : null}
         <Card padding={2}>
           <List hasDividers edge="outset" header={<Text type="label">{`${sorted.length} ${sorted.length === 1 ? 'agent' : 'agents'}`}</Text>}>
             {sorted.map((agent) => (

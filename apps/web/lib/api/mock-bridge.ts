@@ -7,7 +7,7 @@
  *   useMockControls() reads them and returns null outside mock mode.
  */
 import { useSyncExternalStore } from "react";
-import type { ActivityEvent } from "@abos/contracts";
+import type { ActivityEvent, ErrorCode } from "@abos/contracts";
 import { isMockMode } from "./config";
 
 type Listener = (event: ActivityEvent) => void;
@@ -73,6 +73,34 @@ export interface MockControls {
    * and the order goes from PAYMENT_LINK_READY straight to PAYMENT_PENDING.
    */
   simulateQrOnlyChannel?(): void;
+  /** Mock only. Google Sheets reports `disconnected` (the shared integrationHealthDisconnected) until reset(). */
+  simulateSheetsDisconnected?(): void;
+  /**
+   * Mock only. One business has nothing yet: no agents, calls, orders,
+   * bookings, approvals, activity, facts, files, catalog or telemetry, until
+   * reset(). The business stays in the selector.
+   */
+  simulateEmptyBusiness?(businessId: string): void;
+  /**
+   * Mock only. Requests whose path starts with `path` (for example "/api/calls")
+   * fail until reset() or clearRequestFailures(). `mode: "error"` (default)
+   * answers with the error envelope and `code` (default INTERNAL, retryable);
+   * `mode: "invalid"` answers 200 with a body that does not match the
+   * contract. `method` defaults to GET. `times` limits how many requests fail.
+   */
+  simulateRequestFailure?(rule: MockRequestFailure): void;
+  /** Mock only. Removes every simulateRequestFailure rule. */
+  clearRequestFailures?(): void;
+}
+
+/** A simulateRequestFailure rule. */
+export interface MockRequestFailure {
+  path: string;
+  method?: string;
+  mode?: "error" | "invalid";
+  code?: ErrorCode;
+  message?: string;
+  times?: number;
 }
 
 let controls: MockControls | null = null;

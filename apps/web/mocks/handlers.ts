@@ -38,6 +38,14 @@ function route(fn: (ctx: Ctx) => unknown | Promise<unknown>, okStatus = 200): Ht
     try {
       await db.ready();
       db.sweepExpired();
+      const forced = db.takeRequestFailure(request.method, new URL(request.url).pathname);
+      if (forced?.mode === "invalid") {
+        // A 2xx body that does not match the contract, so the client reports invalid_response.
+        return HttpResponse.json({ unexpected: "mock invalid response" } as never, { status: 200, headers: { "X-Correlation-Id": correlationId } });
+      }
+      if (forced) {
+        throw new db.MockHttpError(forced.code ?? "INTERNAL", forced.message ?? "The server could not answer. This is a simulated failure.");
+      }
       const result = await fn({ url: new URL(request.url), request, params: params as Record<string, string>, correlationId });
       if (result instanceof Response) {
         result.headers.set("X-Correlation-Id", correlationId);
@@ -243,5 +251,5 @@ export const handlers = [
   http.get(`${A}/integrations/health`, route((ctx) => (biz(ctx), db.getHealth(q(ctx, "refresh") === "1")))),
   http.get(`${A}/calls`, route((ctx) => page(ctx, db.listCalls(biz(ctx), { agentId: q(ctx, "agentId"), since: q(ctx, "since") })))),
   http.get(`${A}/calls/:id`, route((ctx) => db.getCall(biz(ctx), ctx.params.id))),
-  http.get(`${A}/telemetry`, route((ctx) => (biz(ctx), db.getTelemetry()))),
+  http.get(`${A}/telemetry`, route((ctx) => db.getTelemetry(biz(ctx)))),
 ];

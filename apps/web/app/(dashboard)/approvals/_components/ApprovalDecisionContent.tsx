@@ -18,21 +18,24 @@ import {Card} from '@astryxdesign/core/Card';
 import {EmptyState} from '@/components/EmptyState';
 import {ErrorState} from '@/components/ErrorState';
 import {LoadingState} from '@/components/LoadingState';
+import {ProviderHealthNotice, providersForSteps} from '@/components/ProviderHealthNotice';
 import {SandboxBadge} from '@/components/SandboxBadge';
 import {StatusBadge} from '@/components/StatusBadge';
 import {
   isApiError,
   useApproval,
   useBooking,
+  useCatalog,
   useDecideApproval,
   useOrder,
   type ApprovalRequest,
   type ApprovalState,
   type Booking,
+  type CatalogItem,
   type DecideVariables,
   type Order,
 } from '@/lib/api';
-import {formatCountdown, formatDate, formatDateTime, formatMoney, formatTime, secondsUntil} from '@/lib/format';
+import {actorName, formatCountdown, formatDate, formatDateTime, formatMoney, formatTime, secondsUntil} from '@/lib/format';
 import {useBusiness as useSessionBusiness} from '@/lib/session';
 import {statusView} from '@/lib/status';
 import {
@@ -45,6 +48,7 @@ import {
   formatFactValue,
   recipientLabel,
   typedApproval,
+  variationName,
   type TypedApproval,
 } from '../_lib/approval-view';
 import {useNow} from '../_lib/useNow';
@@ -63,7 +67,7 @@ export type ApprovalDecisionContentProps = {
   onClose: () => void;
   /** Called once the server confirmed a decision, with the state it returned. */
   onDecided?: (outcome: DecisionOutcome) => void;
-  /** Where "Open Live operations" points. */
+  /** Where "Open Live operations" points. Default: Live operations, opened on this request's call when it is known. */
   liveOperationsHref?: string;
 };
 
@@ -74,7 +78,7 @@ export function ApprovalDecisionContent({
   approvalId,
   onClose,
   onDecided,
-  liveOperationsHref = '/activity',
+  liveOperationsHref,
 }: ApprovalDecisionContentProps) {
   const query = useApproval(businessId, approvalId);
   const {businesses} = useSessionBusiness();
@@ -153,7 +157,7 @@ type LoadedProps = {
   onClose: () => void;
   onDecided?: (outcome: DecisionOutcome) => void;
   refetch: () => Promise<{data?: ApprovalRequest}>;
-  liveOperationsHref: string;
+  liveOperationsHref?: string;
 };
 
 function LoadedDecision({approval, businessId, timeZone, onClose, onDecided, refetch, liveOperationsHref}: LoadedProps) {
@@ -175,7 +179,11 @@ function LoadedDecision({approval, businessId, timeZone, onClose, onDecided, ref
 
   const order = useOrder(businessId, t.bundleType === 'order_bundle' ? approval.subjectId : null);
   const booking = useBooking(businessId, t.bundleType === 'booking_bundle' ? approval.subjectId : null);
+  const catalog = useCatalog(t.bundleType === 'price_edit' ? businessId : null);
   const subjectMismatch = subjectDiffers(t, order.data, booking.data);
+  // Open Live operations on this request's call, so the owner sees the one they just approved.
+  const callId = order.data?.callId ?? booking.data?.callId;
+  const liveHref = liveOperationsHref ?? (callId ? `/activity?call=${encodeURIComponent(callId)}` : '/activity');
   const unknownStep = actionSteps(t).some((s) => s.isUnknown);
 
   const error = decide.error;
@@ -302,7 +310,7 @@ function LoadedDecision({approval, businessId, timeZone, onClose, onDecided, ref
         state={state}
         confirmedState={confirmed?.state}
         timeZone={timeZone}
-        liveOperationsHref={liveOperationsHref}
+        liveOperationsHref={liveHref}
         isFactEdit={isFactEdit}
       />
 
@@ -355,7 +363,18 @@ function LoadedDecision({approval, businessId, timeZone, onClose, onDecided, ref
         />
       ) : null}
 
-      <BundleDetails t={t} timeZone={timeZone} order={order.data} booking={booking.data} subjectLoading={order.isLoading || booking.isLoading} />
+      {state === 'PENDING' && !confirmed ? (
+        <ProviderHealthNotice businessId={businessId} providers={providersForSteps(t.payload.actionBundle)} showLink={false} />
+      ) : null}
+
+      <BundleDetails
+        t={t}
+        timeZone={timeZone}
+        order={order.data}
+        booking={booking.data}
+        subjectLoading={order.isLoading || booking.isLoading}
+        catalog={catalog.data?.items}
+      />
 
       <VStack gap={2}>
         <Heading level={3}>{state === 'PENDING' ? 'What happens if you approve' : 'Steps in this request'}</Heading>
@@ -404,7 +423,7 @@ function OutcomeNotice({
   const shown = confirmedState ?? state;
   const decided =
     approval.decidedAt !== undefined
-      ? `Decided ${formatDateTime(approval.decidedAt, timeZone)}${approval.decidedBy ? ` by ${approval.decidedBy}` : ''}.`
+      ? `Decided ${formatDateTime(approval.decidedAt, timeZone)}${approval.decidedBy ? ` by ${actorName(approval.decidedBy)}` : ''}.`
       : '';
   if (shown === 'APPROVED') {
     const view = statusView('approval', 'APPROVED');
@@ -452,7 +471,9 @@ function OutcomeNotice({
             <StatusBadge label={view.label} tone={view.tone} />
             <Text weight="semibold">This request expired. Nothing was sent.</Text>
           </HStack>
-          <Text type="supporting">{`It expired at ${formatDateTime(approval.expiresAt, timeZone)} and can no longer be approved.`}</Text>
+          <Text type="supporting">{`It expired at ${formatDateTime(approval.expiresAt, timeZone)} and can no longer be approved. Nothing needs undoing. ${
+            isFactEdit ? 'To make the change, start it again.' : 'If the customer still wants it, they need to call again.'
+          }`}</Text>
         </VStack>
       </Card>
     );
@@ -468,12 +489,14 @@ function BundleDetails({
   order,
   booking,
   subjectLoading,
+  catalog,
 }: {
   t: TypedApproval;
   timeZone: string;
   order?: Order;
   booking?: Booking;
   subjectLoading: boolean;
+  catalog?: readonly CatalogItem[];
 }) {
   switch (t.bundleType) {
     case 'order_bundle':
@@ -483,7 +506,7 @@ function BundleDetails({
     case 'fact_edit':
       return <FactEditDetails t={t} />;
     case 'price_edit':
-      return <PriceEditDetails t={t} />;
+      return <PriceEditDetails t={t} catalog={catalog} />;
   }
 }
 
@@ -662,17 +685,20 @@ function FactEditDetails({t}: {t: Extract<TypedApproval, {bundleType: 'fact_edit
   );
 }
 
-function PriceEditDetails({t}: {t: Extract<TypedApproval, {bundleType: 'price_edit'}>}) {
+function PriceEditDetails({t, catalog}: {t: Extract<TypedApproval, {bundleType: 'price_edit'}>; catalog?: readonly CatalogItem[]}) {
   const p = t.payload;
+  const name = variationName(catalog, p.squareItemId, p.variationId);
   return (
     <VStack gap={2}>
       <Heading level={3}>Price</Heading>
       <MetadataList>
         <MetadataListItem label="Item">
-          <Code>{p.squareItemId}</Code>
-        </MetadataListItem>
-        <MetadataListItem label="Variation">
-          <Code>{p.variationId}</Code>
+          <VStack gap={1}>
+            <Text weight="semibold">{name ?? 'Not in the catalog copy here. Check it in Square.'}</Text>
+            <Text type="supporting">
+              <Code color="secondary">{`${p.squareItemId} / ${p.variationId}`}</Code>
+            </Text>
+          </VStack>
         </MetadataListItem>
         <MetadataListItem label="Old price">
           <HStack gap={2} vAlign="center">
@@ -719,6 +745,14 @@ function StepsList({t}: {t: TypedApproval}) {
  * True when the order or booking the screen loaded does not match the hashed
  * payload. Then the itemized view would not be what the owner approves.
  */
+/**
+ * Payload times are in toISOString() form (CONTRACTS 4); a stored row may
+ * write the same instant without milliseconds. Compare instants, not text.
+ */
+function sameInstant(a: string, b: string): boolean {
+  return Date.parse(a) === Date.parse(b);
+}
+
 export function subjectDiffers(t: TypedApproval, order?: Order, booking?: Booking): boolean {
   if (t.bundleType === 'order_bundle' && order) {
     return (
@@ -733,8 +767,8 @@ export function subjectDiffers(t: TypedApproval, order?: Order, booking?: Bookin
       booking.id !== t.payload.subjectId ||
       booking.serviceId !== t.payload.serviceId ||
       booking.calendarId !== t.payload.calendarId ||
-      booking.startUtc !== t.payload.startUtc ||
-      booking.endUtc !== t.payload.endUtc
+      !sameInstant(booking.startUtc, t.payload.startUtc) ||
+      !sameInstant(booking.endUtc, t.payload.endUtc)
     );
   }
   return false;

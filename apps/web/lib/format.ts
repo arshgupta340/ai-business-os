@@ -53,3 +53,13 @@ export function formatRelative(iso: string, timeZone: string, now: number = Date
 export function lastFour(value: string): string {
   return value.slice(-4);
 }
+
+/**
+ * Who did something, for "Published ... by ..." lines. The API sends a user
+ * ID (`usr_...`) and no name, and every business has one owner (SPEC 2.1),
+ * so a user ID reads as "the owner". Never shows the raw ID.
+ */
+export function actorName(userId: string | undefined): string {
+  if (!userId) return 'the system';
+  return userId.startsWith('usr_') ? 'the owner' : 'the system';
+}

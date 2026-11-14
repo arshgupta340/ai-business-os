@@ -34,7 +34,7 @@ Real mode without `NEXT_PUBLIC_SUPABASE_URL` or `NEXT_PUBLIC_SUPABASE_ANON_KEY`:
 | `lib/session/` | `useBusiness()`, `BusinessProvider`, `ApiBusinessProvider`, seeded businesses, the sign-in notice. |
 | `lib/session/auth/` | `useAuth()`, `getAccessToken()`. |
 | `lib/supabase/client.ts` | `getSupabaseBrowserClient()`, null when not configured. |
-| `lib/api/`, `mocks/` | Typed API client, React Query hooks and the MSW mock layer. Read `lib/api/README.md`. |
+| `lib/api/`, `mocks/` | Typed API client, React Query hooks and the MSW mock layer. The mock data is the shared demo world from `@abos/contracts/fixtures` (`mocks/seed.ts`); `apps/web` keeps no fixture copies. Read `lib/api/README.md`. |
 
 ## Shared components
 

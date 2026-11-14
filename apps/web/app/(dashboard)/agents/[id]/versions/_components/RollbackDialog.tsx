@@ -113,7 +113,7 @@ function RollbackContent({
             }
           />
           {agent.state === 'paused' ? (
-            <ListItem label={<Text>This agent is paused. The rollback makes it live again on this version.</Text>} />
+            <ListItem label={<Text>This agent is paused. The rollback changes its version only. It stays paused until you publish it again.</Text>} />
           ) : null}
         </List>
       </VStack>

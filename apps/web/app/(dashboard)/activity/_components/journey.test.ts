@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import type {ActivityEvent, Booking, Call, Order} from '@/lib/api';
-import {deriveJourney, groupByCall, mergeEvents, rejectedWebhooks, syncFromEvents, syncStatusView} from './journey';
+import {deriveJourney, groupByCall, mergeEvents, rejectedWebhooks, syncFromEvents, syncStatusView, waitingOn} from './journey';
 import {messageCopy} from './CheckoutPanel';
 import {qrPath} from './QrCode';
 
@@ -366,5 +366,45 @@ describe('QR code', () => {
     const {size, path} = qrPath('https://sandbox.square.link/u/mock-abc');
     expect(size).toBeGreaterThanOrEqual(21 + 8);
     expect(path.length).toBeGreaterThan(100);
+  });
+});
+
+describe('waitingOn, the large line for the back of the room', () => {
+  it('names the owner while the approval is pending', () => {
+    const j = deriveJourney({callId: 'call_1', events: proposal(), call: call(), order: order('AWAITING_OWNER_APPROVAL')});
+    expect(waitingOn(j)).toEqual({who: 'You', what: 'Approve or reject the request.'});
+  });
+
+  it('names the caller while the call is still collecting', () => {
+    const j = deriveJourney({callId: 'call_1', events: [], call: call({status: 'IN_PROGRESS', stage: 'COLLECTING', endedAt: undefined, endReason: undefined})});
+    expect(waitingOn(j).who).toBe('The caller');
+  });
+
+  it('names the customer and Square for a sent link, and never says done before payment.verified', () => {
+    const sent = deriveJourney({callId: 'call_1', events: approved(), call: call(), order: order('PAYMENT_PENDING')});
+    expect(waitingOn(sent).who).toBe('The customer');
+    const claimed = deriveJourney({callId: 'call_1', events: approved(), call: call(), order: order('PAID_VERIFIED')});
+    expect(waitingOn(claimed)).toEqual({who: 'Square (sandbox)', what: 'Confirming the payment.'});
+    const paid = deriveJourney({callId: 'call_1', events: [...approved(), verified()], call: call(), order: order('FULFILLMENT_READY')});
+    expect(waitingOn(paid).who).toBe('Nothing');
+  });
+
+  it('names Google Sheets while the report is retrying after a verified payment', () => {
+    const events = [
+      ...approved(),
+      verified(),
+      ev('sync.failed', {jobId: 'syn_1', target: 'google_sheets', recordId: 'ord_1', attempts: 1, final: false, errorCode: 'INTEGRATION_UNAVAILABLE'}),
+    ];
+    const j = deriveJourney({callId: 'call_1', events, call: call(), order: order('FULFILLMENT_READY')});
+    expect(waitingOn(j).who).toBe('Google Sheets');
+  });
+
+  it('names the owner for a booking that needs review and for a taken slot', () => {
+    const review = deriveJourney({callId: 'call_1', events: [], call: call(), booking: booking('RETRY_REQUIRED')});
+    expect(waitingOn(review).who).toBe('You');
+    const taken = deriveJourney({callId: 'call_1', events: [], call: call(), booking: booking('SLOT_CONFLICT')});
+    expect(waitingOn(taken).who).toBe('You');
+    const checking = deriveJourney({callId: 'call_1', events: [], call: call(), booking: booking('RECHECKING_SLOT')});
+    expect(waitingOn(checking).who).toBe('Google Calendar');
   });
 });
