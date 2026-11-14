@@ -2,9 +2,9 @@ DRAFT
 
 # Demo runbook
 
-**Task:** S-06. **Written:** 2026-11-14. **Describes:** the code on branch `arsh/integration` at commit `7486c7e`.
+**Task:** S-06. **Written:** 2026-11-14. **Describes:** the code on branch `arsh/integration` at commit `73ac456`.
 
-An earlier version of this file described commit `1588eaa`. The integration branch then moved 20 commits, and this version was checked again against the new code.
+The integration branch moved twice while this file was being written: 20 commits after `1588eaa`, then 21 more after `7486c7e`. This version was checked against `73ac456`. If the branch has moved again, check the steps below against the newer code before a rehearsal.
 
 This is a draft script. It is not a record of a demo that happened. No step in it has been rehearsed against the deployed integration server, and every step is marked "Not rehearsed". Where one part of a step was checked against a real service, the step says which part. The complete list of real checks is in `SECURITY_NOTES.md` section 2.
 
@@ -14,16 +14,15 @@ Keep this file marked DRAFT until three full rehearsals have been run and their 
 
 These things block the live demo today. Each is a task for a person.
 
-1. Migration 0005 was not applied to the real database when the list of real checks was made. This branch cannot run an approved order without it.
+1. Migrations 0005 and 0006 were not applied to the real database when the list of real checks was made. Without 0006 the server on this branch refuses to start. Without 0005 it cannot run an approved order.
 2. The integration branch is not deployed. Render serves `main`, which has only the health route and the builder.
 3. No phone call has reached the voice worker.
 4. No Square sandbox link has been paid, and no webhook has been received.
 5. There are no Google credentials. The booking and Sheets segments cannot run, and the pizza agent cannot be published, because publish refuses while Google Sheets is not connected.
 
-Three things about this branch change what the demo can show, even when everything above is done.
+Two things about this branch change what the demo can show, even when everything above is done.
 
 - **No message is sent from a call.** The agent does not ask for a phone number. Every order and booking it proposes uses the QR code. The customer pays by scanning the code on the owner's screen. Do not promise a text message.
-- **Pause does not stop the phone agent.** The pause route answers "paused" but does not store it. To stop the agent answering, switch the live agent or stop the server.
 - **Human fallback is switched off.** A call is never handed to a person on this branch.
 
 If a blocker is still open at demo time, use the fallback written under the step it blocks, and say on stage which part is not live.
@@ -58,14 +57,14 @@ Values live in `.env.local` on the laptop and in the host's variable settings. N
 
 Notes that follow from the code on this branch:
 
-- **Set `MESSAGE_CHANNEL` to `qr_only`.** No message is sent from a call whatever the value. Any other channel has no health check, reads as disconnected, and stops a publish. `android_gateway` makes the server's provider setup throw.
+- **Set `MESSAGE_CHANNEL` to `qr_only`.** No message is sent from a call whatever the value. Any other channel has no health check, reads as disconnected, and stops a publish.
 - Do not set `BUILDER_DEV_AUTH` on the host.
 - The Square signature is checked over `PUBLIC_SERVER_URL` plus `/webhooks/square`. `SQUARE_WEBHOOK_URL` must describe the same address so `npm run check-env` agrees.
 - The phone path needs all four of `PUBLIC_SERVER_URL`, `TWILIO_AUTH_TOKEN`, `OPENAI_API_KEY` and `DATABASE_URL`. If any one is missing, the phone path is off and the voice webhook answers 503.
 
 ### 2.3 Database and seed
 
-1. **Not rehearsed.** Apply migration 0005 from the laptop.
+1. **Not rehearsed.** Apply migrations 0005 and 0006 from the laptop. Do this before the integration branch is deployed, because the server checks its database role at startup with a routine that 0006 adds.
 
    ```bash
    npm run migrate -w @abos/db
@@ -73,7 +72,7 @@ Notes that follow from the code on this branch:
 
    The runner reads `DATABASE_URL`. For this one command that variable must hold the owner connection, not the `abos_app` login. The runner skips files it has recorded in `public.schema_migrations`. I do not know whether 0001 to 0004 were applied with this runner. Look at that table first. If it is empty or missing, do not run the command, because it would try to apply 0001 again. Ask the lead how the first four were applied. If an earlier version of 0005 was applied, the runner stops, because the file changed. Ask the lead before doing anything else.
 
-   If it fails: stop. Do not paste SQL by hand in a hurry. Without 0005 the live order segment cannot run. Show the builder, the preview and the mock test console, and say so.
+   If it fails: stop. Do not paste SQL by hand in a hurry. Without both migrations the integration server cannot run. The demo then has only what `main` serves on Render: the builder. Say so.
 
 2. **Not rehearsed** for this document. The real database is already seeded (one owner, two businesses, 33 facts, two agents with published versions, 6 catalog items). Seed again only after a reset or on a new database.
 
@@ -147,7 +146,7 @@ If a signed request is refused with 401 or 403, the address the provider signed 
 
    It exits with an error if `DATABASE_ADMIN_URL` is set on the host.
 
-3. **Not rehearsed** on the integration server. Sign in to the web app as the seeded owner and open Integrations. Ask for a fresh check (the route is `GET /api/integrations/health?businessId=biz_pizza_01&refresh=1`). Every provider the demo needs must say connected, and Square must say sandbox. A provider that is not configured names the missing variable. This fresh check must have run before any publish, because publish reads its stored result.
+3. **Not rehearsed** on the integration server. Sign in to the web app as the seeded owner and open Integrations. Ask for a fresh check (the route is `GET /api/integrations/health?businessId=biz_pizza_01&refresh=1`). Every provider the demo needs must say connected, and Square must say sandbox. A provider that is not configured names the missing variable.
 4. **Not rehearsed.** Place one short test call. The Render log must show `POST /webhooks/twilio/voice`.
 5. **Not rehearsed.** Put one busy event in the demo Google calendar at a time you will ask for in the booking segment.
 
@@ -163,14 +162,14 @@ The screen labels quoted in the tables below come from `docs/FLOWS.md` section 3
 | P2 | **Not rehearsed.** Open Build an Agent and say or type: "I run a pizza shop and want an AI that takes pickup orders." Answer the questions. | The builder asks for what is missing and fills the spec panel. An answer that changes a fact opens a confirmation. | If the microphone fails, type. Typed chat on the real model was run from the UI lead's machine. Browser voice is not verified. |
 | P3 | **Not rehearsed.** Upload the demo menu. Resolve the price conflict by keeping the Square price. | A conflict banner appears and clears. | Skip the upload and say so. On this branch uploads are kept in server memory and are lost on a restart. |
 | P4 | **Not rehearsed.** Open the preview and run one turn in the test console. | Tool traces are marked mock. Nothing is written. | None needed. The test console on the real model was run from the UI lead's machine. |
-| P5 | **Not rehearsed.** Click Publish and confirm. | A new version is written and the agent card shows live. | Publish answers "a provider this agent needs is not reachable" when Square, Google Sheets or the message channel is not connected in the last health check. Run the fresh check in 2.6 step 3 and try again. If Google has no credentials, publish cannot work: say so, and say the phone is answered by the seeded published version of `agt_pizza_01`. I could not run a successful publish against the test database, so this step is not verified by me either. |
+| P5 | **Not rehearsed.** Click Publish and confirm. | A new version is written and the agent card shows live. | Publish checks the providers itself. It answers "a provider this agent needs is not reachable" when Twilio, OpenAI, Square, Google Sheets or the message channel is not connected. If Google has no credentials, publish cannot work: say so, and say the phone is answered by the seeded published version of `agt_pizza_01`. Publish, pause and rollback are tested with fakes. None has run on the deployed server. |
 | P6 | **Not rehearsed.** Check the top bar says the pizza agent answers the phone. If not, switch the live agent to `agt_pizza_01`. | `PUT /api/live-agent` writes the database and a `live_agent.changed` event. | If the switch fails, stop the phone segment and use the simulated call in P7. |
 | P7 | **Not rehearsed.** The second person calls the Twilio number. | The agent says it is an AI assistant for Demo Pizza Co. | If the call does not connect, or there is no audio within a few seconds, hang up and use the simulated call, which is the route `POST /api/agents/agt_pizza_01/sim-call?businessId=biz_pizza_01`. It uses the same real read and propose tools and the same approval. The web code mentions simulated calls on the agent screens. I did not check which screen starts one, so find it before the demo. Say "this is a simulated call". |
 | P8 | **Not rehearsed.** The caller orders two large pepperoni pizzas, one with a modifier, and asks the total. | The agent reads a total that came from Square CalculateOrder. | Verified in a spike: a Square sandbox quote matched catalog prices. If the agent says it cannot price the order, Square is not reachable. Stop here. Do not show a made-up total. |
 | P9 | **Not rehearsed.** The caller gives a name and a pickup time inside opening hours. | The agent does not ask for a phone number. It says the payment link will be shown at the counter. | If the agent promises a message, note it as a defect. Nothing will be sent. |
 | P10 | **Not rehearsed.** The caller confirms the order. | An approval card appears on Approvals with items, total, the QR code route, steps and a 10 minute countdown. The agent says the order is not placed until the shop approves and the customer pays. | If no card appears, open Activity and read the trace. Do not insert a row by hand. |
 | P11 | **Not rehearsed.** The owner reads the card and clicks Approve. | The approval becomes approved and the step list starts. If the caller is still on the line, the agent says the shop approved the order. | If the card expired, the order is closed and nothing was sent. Place a new order. A double click is safe. The agent does not hang up on its own goodbye. The caller hangs up. |
-| P12 | **Not rehearsed.** Watch step 1, "Creating checkout". | The order shows a link and a QR code on Live operations. | Verified in a spike: a payment link was created on the Square sandbox and read back with the right total. Through the executor it is not verified. If the step ends in "Needs your review", the owner can resolve it with `POST /api/executions/:id/resolve` and action `retry`. The server reads Square. If the link exists, the order continues with that same link. If Square cannot say, the request is refused, and the way out is `POST /api/orders/:id/cancel` and a new order. I did not check whether the web app has buttons for these two routes. Never approve again to force a second link. |
+| P12 | **Not rehearsed.** Watch step 1, "Creating checkout". | The order shows a link and a QR code on Live operations. | Verified in a spike: a payment link was created on the Square sandbox and read back with the right total. Through the executor it is not verified. If the step ends in "Needs your review", the owner can resolve it with `POST /api/executions/:id/resolve` and action `retry`. The server reads Square. If the link exists, the order continues with that same link. If Square cannot say, the request is refused. `POST /api/orders/:id/cancel` cancels an order that has no Square link. An order that already has a link cannot be cancelled by that route, so leave it and place a new order. I did not check whether the web app has buttons for these two routes. Never approve again to force a second link. |
 | P13 | **Not rehearsed.** Watch step 2, the message. | The step is skipped. Nothing is sent. | Nothing to fall back to. The customer scans the QR code on the owner's screen. |
 | P14 | **Not rehearsed.** On the second device, scan the code and pay with the Square sandbox test card `4111 1111 1111 1111`, CVV `111`, any future expiry. | Square's sandbox page accepts the payment. | Not verified: no sandbox link has been paid. SPEC section 4 warns that links may not be payable in sandbox. The fallback in the SPEC (CreateOrder plus CreatePayment) is not built. If the page will not take the card, stop at "Link sent, not paid (sandbox)" and say that is as far as the live demo goes. |
 | P15 | **Not rehearsed.** Wait. | Within about 30 seconds the order turns "Paid (sandbox), verified" and then "Ready to make". | If the webhook does not arrive, the poll reads Square every 30 seconds for 15 minutes after the link was ready. If the order stays unpaid, leave it unpaid on screen. Never mark it paid by hand. The database would refuse it anyway. |
