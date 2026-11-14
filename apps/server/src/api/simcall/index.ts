@@ -22,6 +22,7 @@ import { AppError } from '../../errors';
 import { emitActivity } from '../../policy/activity';
 import type { RealToolset } from '../../tools/real/types';
 import { nextStage } from '../../voice/relay';
+import { PLAIN_SPEECH_RULE, plainSpeech } from '../../voice/prompt';
 import type { CallsStore } from '../../compose/ports';
 
 const MAX_TOOL_CALLS_PER_TURN = 8;
@@ -103,7 +104,7 @@ export function registerSimCall(app: FastifyInstance, deps: SimCallDeps): void {
       // AC-06: a refused attempt runs no tool.
       await emitActivity(deps.db, { id: deps.newId('evt_'), businessId, correlationId: callId, type: 'guardrail.refused', actorType: 'deployed_agent',
         occurredAt: deps.now().toISOString(), payload: { callId, reasonCode: 'caller_message', rule: refused } });
-      response = { callId, reply: refusalReply(refused, tools), toolTrace: [], guardrail: { refused: true, rule: refused } };
+      response = { callId, reply: plainSpeech(refusalReply(refused, tools)), toolTrace: [], guardrail: { refused: true, rule: refused } };
     } else {
       session.toolset.clearTrace();
       let calls = 0;
@@ -123,13 +124,14 @@ export function registerSimCall(app: FastifyInstance, deps: SimCallDeps): void {
       let reply: string;
       try {
         ({ reply } = await deps.model.respond({
-          instructions: agentInstructions(spec as Parameters<typeof agentInstructions>[0], String(agent.business_name)),
+          instructions: `${agentInstructions(spec as Parameters<typeof agentInstructions>[0], String(agent.business_name))}\n${PLAIN_SPEECH_RULE}`,
           history: s.history, message: input.message, tools, now: deps.now(), executeTool,
         }));
       } catch {
         throw new AppError('INTEGRATION_UNAVAILABLE', 'The agent model is not available.', undefined, undefined, { provider: 'openai' });
       }
-      reply = reply.slice(0, 2000);
+      // The agent's line is what a caller would hear: no Markdown.
+      reply = plainSpeech(reply).slice(0, 2000);
       s.history.push({ role: 'caller', text: input.message }, { role: 'agent', text: reply });
       response = { callId, reply, toolTrace: s.toolset.trace() };
     }

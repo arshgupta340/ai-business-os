@@ -31,7 +31,7 @@ import {
 } from '@abos/contracts';
 import { AUDIO_FORMAT, OAI_CLIENT, OAI_ITEM, OAI_SERVER, OPENAI_REALTIME_URL, STREAM_TOKEN_PARAM, TURN_DETECTION, TWILIO_EVENT, VOICE } from './constants';
 import { PlaybackTracker, StreamTokenStore, TimingTracker, errorInfo, safeLogger, ulawBase64DurationMs } from './logic';
-import { buildInstructions, decisionInstruction, pendingGoodbyeInstruction } from './prompt';
+import { buildInstructions, decisionInstruction, pendingGoodbyeInstruction, plainSpeech } from './prompt';
 import type {
   CallDecision,
   CallDecisionsPort,
@@ -387,7 +387,9 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
   };
 
   /** Injects a fixed server status message and asks the model to speak. */
-  const instruct = (text: string) => {
+  const instruct = (raw: string) => {
+    // Server-sent text the model is told to speak carries no Markdown.
+    const text = plainSpeech(raw);
     sendOpenAI({ type: OAI_CLIENT.itemCreate, item: { type: 'message', role: 'system', content: [{ type: 'input_text', text }] } });
     sendOpenAI({ type: OAI_CLIENT.responseCreate });
   };
