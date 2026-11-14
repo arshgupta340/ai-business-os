@@ -262,6 +262,13 @@ These settle names and numbers that more than one doc uses.
 | Live agent, empty case | When no agent answers the number, `LiveAgent` has `phoneNumber` and `businessId` only. |
 | Square key length | Square's reference caps the idempotency key at 45 characters for `CreatePayment` and 192 for `CreatePaymentLink`. Use the full key for the payment link and its first 45 characters for `CreatePayment` (the fallback path only). |
 | Message wording | A customer message ends with the link on its own, with no punctuation after it, so a phone cannot fold a full stop into the link. |
+| Comparing timestamps | Schemas compare timestamps as instants with `Date.parse` and allow 2 seconds of slack, never as strings. The server sets an approval's `created_at` and `expires_at` explicitly from one clock reading, so they are exactly 10 minutes apart. |
+| Fact verified time | A draft has no `verifiedAt`. A verified fact has one. A superseded fact may or may not, because a draft can be superseded when a conflict keeps the authoritative value. |
+| Quote totals | A quote's total is not required to equal subtotal plus tax, because Square can add a discount or a service charge. The total Square returns is the authority. |
+| Builder messages | `sessionId` and `inputMode` are required on every builder message. The server fills them on assistant messages. |
+| File read | `GET /api/files/:id` returns a bare `FileRecord`. The upload returns `{ file }`. |
+| Timestamps sent to the UI | The server sends every timestamp through `toISOString()`. Schemas accept `Z` or a numeric offset. |
+| Customer who declines messages | `messageConsent` is a boolean. Without consent there is no recipient and the channel is `qr_only`. |
 | Tie-breakers | For a field name no ruling covers, `docs/CONTRACTS.md` wins. For a path or an error code, `docs/API.md` wins. For a table or column name, `docs/DATA-MODEL.md` wins. |
 
 ## 3. Architecture
