@@ -1,10 +1,12 @@
 import {
+  ErrorCodeSchema,
   type AgentSpec,
   type BuilderMessage,
   type BuilderSession,
   type BuilderTurnResponse as ContractBuilderTurnResponse,
   type BusinessFact,
   type DraftAgentSpec,
+  type ErrorCode,
   type JsonValue,
 } from '@abos/contracts';
 import { BuilderAgentSpecSchema } from '../spec';
@@ -61,6 +63,14 @@ export interface ProposeFactFromChatInput {
 export type ProposeFactFromChat = (input: ProposeFactFromChatInput) => Promise<{ approvalId: string; bundleType: 'fact_edit' }>;
 
 const CONFIRM_PENDING = 'I saved your answer as a draft, but I could not open the confirmation for it just now, so it still needs your confirmation. I will try again on your next message.';
+const CONFIRM_REFUSED = 'I saved your answer as a draft, but this change could not be sent for your confirmation.';
+
+// Proposal errors that another try will not fix: the fact or the approval
+// target is gone, is in a state that refuses the change, or the engine refuses
+// the change itself (the value equals the current one, the fact changed since
+// it was read, or the kind cannot be edited as a fact). The draft is kept, but
+// it is not proposed again unless the owner repeats or corrects it.
+const REFUSED_CODES: ReadonlySet<ErrorCode> = new Set(['INVALID_STATE', 'NOT_FOUND', 'VALIDATION_FAILED', 'CAPABILITY_NOT_ALLOWED']);
 
 // An approval expires 10 minutes after it is created (SPEC 2.9). After that,
 // repeating the same answer opens a new one.
@@ -69,9 +79,12 @@ const APPROVAL_EXPIRY_MS = 10 * 60_000;
 // What the builder records about a proposal, on the stored assistant message of
 // the turn that made it. The session's messages are stored whole, so the
 // record survives a restart. It is removed from every message the API returns.
+// A refused record has no approval: the engine refused the proposal with a
+// code in REFUSED_CODES.
 interface ProposalRecord {
   factId: string;
-  approvalId: string;
+  approvalId?: string;
+  refused?: ErrorCode;
   proposedAt: string;
 }
 type StoredMessage = BuilderMessage & { proposals?: ProposalRecord[] };
@@ -85,13 +98,28 @@ export interface BuilderSessionDeps {
   now: () => Date;
   // Optional. Without it, chat answers stay drafts and no approval is created.
   proposeFactFromChat?: ProposeFactFromChat;
+  // Optional. Gets error codes only, never a value or the owner's words.
+  log?: SessionLogger;
 }
+
+export interface SessionLogger {
+  warn(fields: { code: string; step: string }, message: string): void;
+}
+
+const silent: SessionLogger = { warn() {} };
 
 export class BuilderSessionService {
   // One turn per session at a time, in this process (see message()).
   private readonly turns = new KeyedLock();
+  // Proposal records whose session write failed, per session, so the next
+  // turn in this process neither proposes them again nor loses them. They are
+  // written with that turn's reply. A restart loses them (see turn()).
+  private readonly unrecorded = new Map<string, ProposalRecord[]>();
+  private readonly log: SessionLogger;
 
-  constructor(private readonly deps: BuilderSessionDeps) {}
+  constructor(private readonly deps: BuilderSessionDeps) {
+    this.log = deps.log ?? silent;
+  }
 
   async create(input: { businessId: string; ownerId: string; agentId?: string }): Promise<BuilderSessionView> {
     const context = await this.context(input.businessId);
@@ -187,7 +215,9 @@ export class BuilderSessionService {
     // typed for its readers, and an answer may also change a verified fact or
     // correct an earlier draft; each saved draft then opens a fact_edit.
     const propose = this.deps.proposeFactFromChat;
-    const ledger = proposalLedger(session.messages);
+    const lockKey = `${businessId}:${sessionId}`;
+    const carried = this.unrecorded.get(lockKey) ?? [];
+    const ledger = proposalLedger(session.messages, carried);
     const newDrafts: BusinessFact[] = [];
     const repeated = new Set<string>();
     const hints: string[] = [];
@@ -230,7 +260,10 @@ export class BuilderSessionService {
         const verified = verifiedFact(context, field);
         if (verified && sameFactMeaning(field, verified.value, draft.value)) continue;
         const record = ledger.get(draft.id);
-        if (record) {
+        if (record?.refused) {
+          // Refused for good: tried again only when the owner repeats it.
+          if (!repeated.has(draft.id)) continue;
+        } else if (record) {
           const expired = this.deps.now().getTime() - Date.parse(record.proposedAt) > APPROVAL_EXPIRY_MS;
           if (!(expired && repeated.has(draft.id))) continue;
         }
@@ -248,6 +281,8 @@ export class BuilderSessionService {
       text: composed,
       ...(Object.keys(patch).length > 0 ? { specPatch: patch } : {}),
       ...(after.evidence.length > 0 ? { evidenceRefs: after.evidence } : {}),
+      // Records an earlier turn could not write go with this reply.
+      ...(carried.length > 0 ? { proposals: [...carried] } : {}),
       createdAt: this.timestamp(),
     };
 
@@ -263,16 +298,19 @@ export class BuilderSessionService {
     session.missingFields = after.missing;
     session.updatedAt = reply.createdAt;
     await this.deps.sessions.update(session);
+    this.unrecorded.delete(lockKey);
     await this.writeAgentDraft(session);
 
-    // Each draft opens a fact_edit approval. The turn reports the first one.
-    // A failed call keeps the draft and marks nothing, so a later turn tries
-    // again. The approval IDs are then recorded on this turn's reply. If that
-    // second write fails, the next turn proposes the same subject again: the
-    // engine sees the same subjectId, but nothing here can stop a second
-    // approval for it.
+    // One fact_edit approval per turn: the contract carries one
+    // proposedChange, so a second approval made now would never be shown in
+    // the chat. The loop stops at the first success. A draft after it has no
+    // record yet, so the next turn proposes it (the selection above).
+    // A retryable failure keeps the draft and marks nothing, so a later turn
+    // tries again, and the loop moves on to the next draft. A refusal
+    // (REFUSED_CODES) is recorded, so it is not retried on every turn.
     let proposedChange: BuilderTurnResponse['proposedChange'];
     let confirmPending = false;
+    let confirmRefused = false;
     const made: ProposalRecord[] = [];
     if (propose) {
       for (const fact of toPropose) {
@@ -290,16 +328,41 @@ export class BuilderSessionService {
             before: verified ? verified.value : null,
           });
           made.push({ factId: fact.id, approvalId: created.approvalId, proposedAt: this.timestamp() });
-          proposedChange ??= { approvalId: created.approvalId, bundleType: created.bundleType };
-        } catch {
-          confirmPending = true;
+          proposedChange = { approvalId: created.approvalId, bundleType: created.bundleType };
+          break;
+        } catch (error) {
+          const code = errorCode(error);
+          this.log.warn({ code: code ?? 'unknown', step: 'propose_fact_from_chat' }, 'builder chat proposal failed');
+          if (code && REFUSED_CODES.has(code)) {
+            made.push({ factId: fact.id, refused: code, proposedAt: this.timestamp() });
+            confirmRefused = true;
+          } else {
+            confirmPending = true;
+          }
         }
       }
     }
-    if (made.length > 0 || confirmPending) {
-      if (made.length > 0) reply.proposals = made;
+    if (made.length > 0 || confirmPending || confirmRefused) {
+      if (made.length > 0) reply.proposals = [...(reply.proposals ?? []), ...made];
+      if (confirmRefused) reply.text = `${reply.text} ${CONFIRM_REFUSED}`;
       if (confirmPending) reply.text = `${reply.text} ${CONFIRM_PENDING}`;
-      await this.deps.sessions.update(session);
+      // The approval already exists, so a failed write here must not turn
+      // the turn into an error: the owner would see a 500 and the approval
+      // would never reach the chat. The records are kept in this process
+      // and written with the next turn, so the next turn does not open a
+      // duplicate. What remains: after a restart (or on another process)
+      // before that next write, the record is lost and the next turn opens a
+      // second approval for the same subject. Closing that needs the engine
+      // to return the open approval for a subjectId, or one transaction
+      // across the proposal and the session write; neither is in this folder.
+      // The reply text change is lost with the failed write as well.
+      try {
+        await this.deps.sessions.update(session);
+      } catch (error) {
+        this.log.warn({ code: errorCode(error) ?? 'unknown', step: 'record_proposals' }, 'builder proposal record was not written');
+        // The first write above already stored the carried records.
+        if (made.length > 0) this.unrecorded.set(lockKey, made);
+      }
     }
 
     return {
@@ -307,7 +370,8 @@ export class BuilderSessionService {
       draftSpec: nextSpec,
       missingFields: after.missing,
       suggestions: suggestions(after),
-      stopConditions: stopConditions(nextSpec, context, after),
+      // What publish would refuse on (verified facts only), plus open_conflict.
+      stopConditions: stopConditions(nextSpec, context),
       progress: progress(after),
       unsupportedRequests,
       ...(proposedChange ? { proposedChange } : {}),
@@ -464,10 +528,20 @@ function latestDraft(drafts: readonly BusinessFact[], field: string): BusinessFa
   return [...drafts].reverse().find((f) => fieldOf(f) === field);
 }
 
-function proposalLedger(messages: readonly StoredMessage[]): Map<string, ProposalRecord> {
+function proposalLedger(messages: readonly StoredMessage[], carried: readonly ProposalRecord[]): Map<string, ProposalRecord> {
   const out = new Map<string, ProposalRecord>();
   for (const m of messages) for (const p of m.proposals ?? []) out.set(p.factId, p);
+  for (const p of carried) out.set(p.factId, p);
   return out;
+}
+
+// The API error code of a thrown error (AppError, PolicyError), or undefined.
+// Only a code from the contract's list is returned, so nothing else from the
+// error reaches a log.
+function errorCode(error: unknown): ErrorCode | undefined {
+  const code = error && typeof error === 'object' && 'code' in error ? (error as { code: unknown }).code : undefined;
+  const parsed = ErrorCodeSchema.safeParse(code);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function publicMessage(m: StoredMessage): BuilderMessage {

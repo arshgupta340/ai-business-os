@@ -115,10 +115,24 @@ const WORDS: Record<string, number> = {
 };
 const UNIT_MINUTES: Record<string, number> = { minute: 1, min: 1, hour: 60, hr: 60, day: 1440 };
 
+// Every number in the text, in digits or in words ("a" and "an" are left out:
+// they are articles more often than numbers). Longer words come first, so
+// "forty-five" is one number, not "forty" and "five".
+const NUMBER_TOKEN = new RegExp(
+  `\\b(?:\\d+(?:\\.\\d+)?|${Object.keys(WORDS).filter((w) => w !== 'a' && w !== 'an').sort((x, y) => y.length - x.length).join('|')})\\b`,
+  'g',
+);
+
 function parseMinutes(text: string): number | undefined {
   if (/\band a half\b/i.test(text)) return undefined;
   const lower = text.toLowerCase().replace(/\bhalf an? hour\b/g, '30 minutes');
-  const found = [...lower.matchAll(/\b(\d+(?:\.\d+)?|forty-five|[a-z]+)\s*(minutes?|mins?|hours?|hrs?|days?)\b/g)]
+  const matches = [...lower.matchAll(/\b(\d+(?:\.\d+)?|forty-five|[a-z]+)\s*(minutes?|mins?|hours?|hrs?|days?)\b/g)];
+  // A number with no unit of its own ("15 to 20 minutes", "between 1 and 2
+  // hours") makes the answer a range. A range is refused, not narrowed to
+  // one end of it.
+  const withUnit = matches.filter((m) => m[1] !== 'a' && m[1] !== 'an').length;
+  if ((lower.match(NUMBER_TOKEN) ?? []).length > withUnit) return undefined;
+  const found = matches
     .map((m) => {
       const n = /^\d/.test(m[1]!) ? Number(m[1]) : WORDS[m[1]!];
       const unit = m[2]!.replace(/s$/, '');
