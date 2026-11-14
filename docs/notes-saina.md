@@ -60,3 +60,30 @@ MSW normally runs as a service worker. Some browsers refuse to register one (emb
 - The real Supabase Realtime subscription (no Supabase values).
 - The React hooks are typechecked and used through MSW in tests, but not rendered in a component test.
 - In a production build, the MSW code sits in lazy chunks that real mode never loads. It is not removed from the output.
+
+## B-16 builder service (2026-11-13)
+
+The builder was built before the contracts package (S-02), the mock toolset (S-03), the database (B-06) and auth (B-08) existed. Each gap has a temporary stand-in inside `apps/server/src/builder`, marked TEMPORARY in its header:
+
+- `pending-contracts.ts`, `registry.ts` rows and `fixtures.ts`: transcribed from docs/CONTRACTS.md. Replaced by `@abos/contracts` and its fixtures when S-02 and S-03 merge.
+- `runner/mock-toolset.ts`: seven read and propose tools, deterministic, no network, no database. Replaced by S-03's mock toolset, which must report `toolset: "mock"`.
+- `session/stores.ts` and `session/knowledge.ts`: in-memory stores behind interfaces shaped after docs/DATA-MODEL.md. Replaced by database versions passed through the plugin options.
+- `auth.ts`: builder routes answer `UNAUTHENTICATED` until a real `BuilderAuth` is passed to the plugin. For local development only, `BUILDER_DEV_AUTH=1` turns on an unverified stand-in that treats any bearer token as the seeded owner. It is refused when `NODE_ENV` is `production`. `BUILDER_DEV_AUTH` is not in SPEC 3.3 yet.
+
+### Not verified
+
+- The real OpenAI path has never run. There is no `OPENAI_API_KEY` yet. `OpenAiBuilderModel` and `OpenAiAgentModel` are tested with fake clients only (request shape, strict JSON schema, tool round trip, refusal handling).
+- The recorded interviews (pizza, barbershop, one unsupported request) were written by hand. They were not captured from OpenAI.
+- No default model ID is set. SPEC 3.2 says to confirm it at build time. Setting `OPENAI_API_KEY` without `OPENAI_BUILDER_MODEL` stops the server on purpose.
+- The text runner uses `OPENAI_BUILDER_MODEL`. SPEC 3.3 names no separate model for text runs.
+
+### Choices made where the docs were silent
+
+- Missing-field names follow `kind.key` (the API.md example is `policy.pickup_window`). The others are mine: `policy.special_requests`, `policy.message_consent`, `policy.minimum_notice`, `hours.<day>`, `catalog.items`, `services`, `name`, `goal`.
+- Stop-condition codes: `missing_timezone` comes from API.md. `open_conflict` and `missing_message_consent_policy` are mine.
+- Owner chat answers are saved as draft facts (`sourceType: "owner_chat"`, `value: { text }`, confidence 0.8). They count as answered for the interview and are not verified. B-17 decides whether publish needs them confirmed through a `fact_edit`.
+- `proposedChange` is never set yet. The builder cannot create an approval until the approval engine (B-07) exposes a function for it.
+- Preview scenarios `happy_path` and `price_injection` come from API.md. `approval_bypass` and the custom template's `happy_path` are mine.
+- Test runs pass `agentVersionId: "draft:<agt_id>"` to the tools. It is deliberately not an `agv_` ID.
+- `POST /api/builder/sessions` and `POST /api/agents` return 201.
+- Mock toolset: tax is 8.75% (it reproduces the CONTRACTS example of 4350, 381, 4731), 12:00 to 13:00 is busy every day, and an unknown quote ID is treated as `QUOTE_EXPIRED` with a fresh quote. The opening hours in `fixtures.ts` are placeholders.
