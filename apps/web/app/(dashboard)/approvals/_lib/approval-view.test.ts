@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {ApiError} from '@/lib/api/errors';
-import type {ApprovalRequest} from '@/lib/api';
+import type {ApprovalRequest, OrderApprovalRequest} from '@/lib/api';
 import {
   actionSteps,
   canDecide,
@@ -16,7 +16,7 @@ import {
 const NOW = Date.parse('2026-11-13T19:45:00Z');
 
 function approval(over: Partial<ApprovalRequest> = {}): ApprovalRequest {
-  const actionBundle = ['square.checkout.create', 'message.checkout.send', 'local.order.record', 'sheets.order.append'];
+  const actionBundle = ['square.checkout.create', 'message.checkout.send', 'local.order.record', 'sheets.order.append'] as OrderApprovalRequest['actionBundle'];
   return {
     id: 'apv_1',
     businessId: 'biz_pizza_01',
@@ -42,7 +42,7 @@ function approval(over: Partial<ApprovalRequest> = {}): ApprovalRequest {
     expiresAt: '2026-11-13T19:52:00Z',
     createdAt: '2026-11-13T19:42:00Z',
     ...over,
-  };
+  } as ApprovalRequest;
 }
 
 function err(init: Partial<ConstructorParameters<typeof ApiError>[0]>): ApiError {

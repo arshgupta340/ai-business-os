@@ -41,11 +41,12 @@ export function emptyState(now: number): MockState {
   };
 }
 
-export function buildSeed(now: number = Date.now()): MockState {
+/** Async because the contract's hash functions (payloadHash, cartHash, idempotencyKey) use Web Crypto. */
+export async function buildSeed(now: number = Date.now()): Promise<MockState> {
   resetEventCounter();
   const state = emptyState(now);
-  seedPizza(state, now);
-  seedBarber(state, now);
+  await seedPizza(state, now);
+  await seedBarber(state, now);
   state.activity.sort((a, b) => a.occurredAt.localeCompare(b.occurredAt));
   return state;
 }
