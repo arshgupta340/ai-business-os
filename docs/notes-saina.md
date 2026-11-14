@@ -43,7 +43,7 @@ MSW normally runs as a service worker. Some browsers refuse to register one (emb
 - `POST /api/agents/:id/pause` has no documented body. The client returns nothing and the hook refetches.
 - A `price_edit` approval's `subjectId` is derived in the mock as `cat_<variation id>`. The UI never reads it.
 - `facts/propose` with `resolvesConflictId` on a `menu_item` conflict returns `VALIDATION_FAILED` in the mock. The docs say it is a price change and name no error.
-- A proposed fact with no verified row gets `before: null` and `fromVersion: 0`.
+- The earlier mock used `before: null` and `fromVersion: 0` for a fact with no verified row. A `fact_edit` requires an existing verified fact as its subject, so a key that has never existed cannot be edited this way.
 - Deciding an `EXPIRED` approval returns `APPROVAL_EXPIRED`. The same decision sent twice returns 200.
 - A network failure surfaces as `ApiError` with code `INTERNAL`, `retryable: true`, status 0. No new error code was added.
 - `stopConditions` is always empty in the mock. Its code values are not listed anywhere.
@@ -81,7 +81,7 @@ The builder was built before the contracts package (S-02), the mock toolset (S-0
 
 - Missing-field names follow `kind.key` (the API.md example is `policy.pickup_window`). The others are mine: `policy.special_requests`, `policy.message_consent`, `policy.minimum_notice`, `hours.<day>`, `catalog.items`, `services`, `name`, `goal`.
 - Stop-condition codes: `missing_timezone` comes from API.md. `open_conflict` and `missing_message_consent_policy` are mine.
-- Owner chat answers are saved as draft facts (`sourceType: "owner_chat"`, `value: { text }`, confidence 0.8). They count as answered for the interview and are not verified. B-17 decides whether publish needs them confirmed through a `fact_edit`.
+- Owner chat answers are saved as draft facts (`sourceType: "owner_chat"`, `value: { text }`, confidence 0.8). They count as answered for the interview and are not verified. A `fact_edit` can edit an existing verified fact; it cannot verify a new key through a draft subject.
 - `proposedChange` is never set yet. The builder cannot create an approval until the approval engine (B-07) exposes a function for it.
 - Preview scenarios `happy_path` and `price_injection` come from API.md. `approval_bypass` and the custom template's `happy_path` are mine.
 - Test runs pass `agentVersionId: "draft:<agt_id>"` to the tools. It is deliberately not an `agv_` ID.

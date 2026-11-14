@@ -249,6 +249,7 @@ These settle names and numbers that more than one doc uses.
 | Fact kinds | `hours`, `policy`, `service`, `contact`, `faq`, `menu_item`. A `menu_item` fact comes only from an upload, stays `draft`, and exists to be compared with `catalog_items`. It is never a price source. |
 | Hours keys | One `hours` fact per weekday, with keys `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`. |
 | Sync target | The Sheets sync target is named `google_sheets`. |
+| Sheets record ID (proposed, waiting for Arsh to ratify) | The record ID written to the sheet is the order ID for an order and the booking ID for a booking. |
 | Not persisted | Quotes made before a proposal and test console sessions live in server memory. A quote is saved inside the order when the proposal is stored. |
 | User IDs | `users.id` is a `usr_` text ID. `users.auth_user_id` links to Supabase Auth. |
 | Unavailable items | `UNAVAILABLE` is both a call stage (an item is found unavailable while collecting) and an order status (the re-check at checkout finds an item gone). |
@@ -330,7 +331,7 @@ The builder registers its own routes as a Fastify plugin from `apps/server/src/b
 
 ### 3.3 Environment variables
 
-Names only. Values live in `.env.local` and in the host's secret store. They are never committed.
+Names only. Values live in `.env.local` and in the host's secret store. They are never committed. An environment variable set to an empty string counts as absent.
 
 | Variable | Used by |
 |---|---|

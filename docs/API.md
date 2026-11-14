@@ -101,14 +101,14 @@ FactConflict fields follow CONTRACTS.md.
 
 ```json
 { "approval": { "id": "apv_f01", "businessId": "biz_pizza_01", "actorType": "owner", "bundleType": "fact_edit",
-  "actionBundle": ["local.fact.update"], "subjectId": "fact_hours_fri_d2",
-  "payload": { "businessId": "biz_pizza_01", "subjectId": "fact_hours_fri_d2", "kind": "hours", "key": "fri", "fromVersion": 1,
+  "actionBundle": ["local.fact.update"], "subjectId": "fact_hours_fri",
+  "payload": { "businessId": "biz_pizza_01", "subjectId": "fact_hours_fri", "kind": "hours", "key": "fri", "fromVersion": 1,
                "before": { "open": "11:00", "close": "22:00" }, "after": { "open": "11:00", "close": "23:00" },
                "actionBundle": ["local.fact.update"], "expiresAt": "2026-11-13T20:10:00Z" },
   "payloadHash": "sha256:9c1e...", "state": "PENDING", "expiresAt": "2026-11-13T20:10:00Z", "createdAt": "2026-11-13T20:00:00Z" } }
 ```
 
-The server stores the proposed value as a new draft fact, and `subjectId` is that draft's `fact_` ID (DATA-MODEL.md section 2.6). A conflict is resolved in one of two ways. To keep the authoritative value, call `POST /api/conflicts/:id/resolve` (section 3.12): nothing external is written, so no approval is needed. To replace a local fact with the uploaded value, send `{ "resolvesConflictId": "cfl_01", "value": {...} }` here instead of `kind` and `key`; the conflict moves to `resolved` when the edit is approved. A price that lives in Square cannot be changed this way: that is a price change (`catalog/prices/propose`, SHOULD).
+The approval's `subjectId` is the existing verified fact's `fact_` ID. The proposed value is stored in the approval payload; no draft row is created for an edit. The database routine checks `fromVersion` and `before` against that row. A key that has never existed cannot be edited this way (DATA-MODEL.md section 2.6). A conflict is resolved in one of two ways. To keep the authoritative value, call `POST /api/conflicts/:id/resolve` (section 3.12): nothing external is written, so no approval is needed. To replace a local fact with the uploaded value, send `{ "resolvesConflictId": "cfl_01", "value": {...} }` here instead of `kind` and `key`; the conflict moves to `resolved` when the edit is approved. A price that lives in Square cannot be changed this way: that is a price change (`catalog/prices/propose`, SHOULD).
 
 **`POST /api/businesses/:id/catalog/sync`**. Refreshes the `catalog_items` cache from Square (P-10). Body `{}`. Response `202 { "jobId": "job_cat_01" }`. Errors: `INTEGRATION_UNAVAILABLE`, `ENVIRONMENT_MISMATCH`. Events: `sync.queued`, then `sync.succeeded` or `sync.failed` with `payload.target: "catalog"`. Screens: Knowledge review.
 
@@ -235,7 +235,7 @@ One phone number serves both businesses, so this route is owner-scoped (P-06).
 
 ### 3.7 Approvals (owner: Arsh)
 
-**`GET /api/approvals?businessId=`**. Query: `state` (default `PENDING`), `bundleType` (`order_bundle`, `booking_bundle`, `fact_edit`, `price_edit`), `limit`, `cursor`. Returns ApprovalRequests. `payload` holds only the hashed material fields (CONTRACTS.md section 4); the Approvals screen fetches the subject (`GET /api/orders/:id`, `/api/bookings/:id` or the fact) for itemized lines. Screens: Approvals, Overview (count), Live operations.
+**`GET /api/approvals?businessId=`**. Query: `state` (default `PENDING`), `bundleType` (`order_bundle`, `booking_bundle`, `fact_edit`, `price_edit`), `limit`, `cursor`. Returns ApprovalRequests. `payload` holds exactly the hashed material fields and never `messageConsent` (CONTRACTS.md section 4); the Approvals screen fetches the subject (`GET /api/orders/:id`, `/api/bookings/:id` or the fact) for itemized lines. Screens: Approvals, Overview (count), Live operations.
 
 **`GET /api/approvals/:id?businessId=`**. Returns one ApprovalRequest. Errors: `NOT_FOUND`.
 

@@ -316,7 +316,7 @@ The server builds `payload` from stored rows, never from model output. The paylo
 | `fact_edit` | `businessId`, `subjectId`, `kind`, `key`, `fromVersion`, `before`, `after`, `actionBundle`, `expiresAt` |
 | `price_edit` (SHOULD) | `businessId`, `subjectId` (the `cat_` id), `squareItemId`, `variationId`, `fromPriceMinor`, `newPriceMinor`, `currency`, `squareVersion`, `actionBundle`, `expiresAt` |
 
-`messageChannel` is the server's `MESSAGE_CHANNEL` at proposal time, or `qr_only` when the customer declined messages. Any channel other than `qr_only` requires `messageRecipient`. A `qr_only` payload may have no recipient, and a `qr_only` payload with no recipient is how the payload records that the customer declined: the payload has no `messageConsent` field. The order's `contact` and the booking's `customer` keep `messageConsent`. `agentVersionId` always comes from the `calls` row (SPEC 2.9). `callId` is not a material field; the order row holds it. The full quote and contact are shown to the owner from the order row but are not separately hashed (SPEC 2.9). `before` is `null` when a fact is new.
+`messageChannel` is the server's `MESSAGE_CHANNEL` at proposal time, or `qr_only` when the customer declined messages. Any channel other than `qr_only` requires `messageRecipient`. A `qr_only` payload may have no recipient, and a `qr_only` payload with no recipient is how the payload records that the customer declined: the payload has no `messageConsent` field. The order's `contact` and the booking's `customer` keep `messageConsent`. `agentVersionId` always comes from the `calls` row (SPEC 2.9). `callId` is not a material field; the order row holds it. The full quote and contact are shown to the owner from the order row but are not separately hashed (SPEC 2.9). For `fact_edit`, `subjectId` is the existing verified fact's ID. No draft row is created for the edit. The database routine checks `fromVersion` and `before` against that row. A key that has never existed cannot be edited this way.
 
 **Hash recipe (SPEC 2.9).** Canonical JSON: keys sorted by code point at every depth, no whitespace, UTF-8, arrays kept in order, absent fields omitted. `payloadHash = "sha256:" + hex(sha256(canonicalJson(payload)))`, lowercase hex. Payload timestamps (`expiresAt`, `pickupAt`, `startUtc`, `endUtc`) are stored in `toISOString()` form (UTC, `Z`, milliseconds, for example `2026-11-14T20:35:00.000Z`) before hashing, because `+00:00` and `Z` name the same instant but hash differently. `toCanonicalTimestamp(value)` in `packages/contracts` returns that form. `pickMaterialFields(bundleType, source)` picks the material fields from a wider object and validates them; for a stored payload it returns an equal object. `cartHash` uses the same recipe on the `Cart`, after sorting `modifierIds` inside each line and sorting lines by `variationId`, then joined `modifierIds`, then `note`.
 
@@ -335,7 +335,7 @@ The server builds `payload` from stored rows, never from model output. The paylo
 | `square.checkout.create` | `idempotency_key` on `CreatePaymentLink`. The simulated fallback (`CreateOrder` plus `CreatePayment`) shortens it to the first 45 characters if spike B-02 confirms that cap |
 | `message.checkout.send`, `message.booking.confirm` | Unique `message_dispatches.idempotency_key`, inserted before the provider call. A retry finds the row and sends nothing |
 | `calendar.event.create` | The Google event `id` (hex fits Google's base32hex rule). A 409 means the event exists: read it and succeed. `bookingId` also goes in `extendedProperties.private` |
-| `sheets.order.append`, `sheets.booking.append` | Computed when the sync job is created (same formula, with the bundle's `approvalId`) and written to the `recordId` column. Before a retry the job reads that column and skips if the key is present |
+| `sheets.order.append`, `sheets.booking.append` | Computed when the sync job is created (same formula, with the bundle's `approvalId`) and stored on the sync job. The sheet's `recordId` column holds the order ID for an order or the booking ID for a booking. Before a retry the job reads that column and skips if the record ID is present |
 | `square.catalog.price.update` | `idempotency_key` on Square `UpsertCatalogObject`, sent with the full object and its current `version` |
 | `local.order.record`, `local.booking.record`, `local.fact.update`, `local.catalog.sync` | Unique `action_executions.idempotency_key` only |
 
@@ -425,13 +425,15 @@ The payment poller checks every 30 seconds for 15 minutes after the link is read
 
 Only `whatsapp_sandbox` can reach `DELIVERED`. `SENT` is the last state for every other channel. The `MessageDispatch` schema refuses `DELIVERED` on any other channel.
 
-**Fact.** `draft` to `verified` when an approved `fact_edit` runs `local.fact.update`; the old `verified` row becomes `superseded` in the same transaction. `superseded` is terminal. **Fact conflict.** `open` to `resolved` when the owner picks a candidate (or an approved edit carries `resolvesConflictId`); `resolved` is terminal.
+**Fact.** An approved `fact_edit` targets the existing verified row. When `local.fact.update` runs, that row becomes `superseded` and the approved value is inserted as a new `verified` row in the same transaction. `superseded` is terminal. **Fact conflict.** `open` to `resolved` when the owner picks a candidate (or an approved edit carries `resolvesConflictId`); `resolved` is terminal.
 
 **Agent.** No terminal state. `draft` to `live` when the owner publishes a validated spec (new `agv_`). `live` to `live` on a published update (atomic swap; in-flight calls stay on their version). `live` to `paused` when the owner pauses. `paused` to `live` when the owner resumes or publishes.
 
 **Call.** `IN_PROGRESS` goes to `COMPLETED` (`endReason: "completed"`), `DROPPED` (`"dropped"`, the stream closed unexpectedly) or `FAILED` (`"failed"`, setup, model or relay error). All three are terminal.
 
 ## 7. Activity events
+
+`decide_and_enqueue` and `expire_approvals` write `order.status_changed` and `booking.status_changed` with the stored payload `{ subjectId, from, to }`. The activity list route fills in `orderId` or `bookingId` and `callId` when it reads these events, so clients receive the contract shapes below.
 
 ```ts
 type ActivityEvent = { id: string; businessId: string; type: ActivityEventType; correlationId: string;
