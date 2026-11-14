@@ -46,6 +46,11 @@ Import from `@/components` (or the single file).
 - `StatusBadge` `{label, tone}`, tone `neutral | info | warning | danger | success`. `success` (green) is only for states the server or provider confirmed. Never green before the provider confirms.
 - `SandboxBadge`. Put it next to any payment data: totals, payment links, payment status.
 
+## Shared helpers
+
+- `statusView(machine, state)` and `conflictView(status, required)` from `@/lib/status`. They map every server state to `{label, tone}`. Use them with `StatusBadge` so a state looks the same on every screen. Do not write your own state to color mapping.
+- `formatMoney(amountMinor, currency)`, `formatDateTime(iso, timeZone)`, `formatTime`, `formatDate`, `formatRelative`, `secondsUntil`, `formatCountdown`, `lastFour` from `@/lib/format`. Money is in minor units on the wire. Show times in `business.timezone`.
+
 ## Hooks
 
 ```tsx
