@@ -21,6 +21,8 @@ The SQL in this document was the starting point for task B-06. An independent re
 | `activity_events.agent_id` | `ON DELETE RESTRICT`. An agent with audit events cannot be deleted. | `ON DELETE SET NULL` |
 | Helper functions | Every function pins an empty `search_path`. `owns_business` lives in a `private` schema and only `authenticated` may run it. | `public.owns_business` with `search_path = public` |
 | Message dispatches | A dispatch is tied to the approval of the execution it belongs to. | No such tie |
+| Payment outcomes (0005) | `private.mark_order_paid` and `private.mark_order_payment_failed` are the only checked paths for a Square result; `orders.square_payment_id` is unique. | Plain order updates |
+| Stale leases (0005) | `private.recover_stale_executions` moves a step RUNNING past its lease to `NEEDS_REVIEW`, never back to `QUEUED`. | A sweeper that requeues |
 
 ## 1. Conventions
 
@@ -234,13 +236,14 @@ create table public.agents (
   draft_spec        jsonb,
   active_version_id text,
   seeded            boolean not null default false,
+  spec_revision     integer not null default 1 check (spec_revision >= 1),  -- migration 0005
   created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
   check (state = 'draft' or active_version_id is not null),
   unique (id, business_id)
 );
 ```
 
-A live or paused agent always points to a version. `draft_spec` is the editable spec before the next publish (API agent summary). The foreign key on `active_version_id` is added after `agent_versions`. `seeded` marks the agents the reset script keeps.
+A live or paused agent always points to a version. `draft_spec` is the editable spec before the next publish (API agent summary). The foreign key on `active_version_id` is added after `agent_versions`. `seeded` marks the agents the reset script keeps. `spec_revision` is the builder's durable draft revision (API 3.4 `specRevision`); the builder increments it on each draft change.
 
 ### 2.10 `agent_versions`
 
@@ -413,7 +416,17 @@ create table public.orders (
 );
 create unique index orders_square_order_id_key on public.orders (square_order_id) where square_order_id is not null;
 create unique index orders_square_payment_link_id_key on public.orders (square_payment_link_id) where square_payment_link_id is not null;
+create unique index orders_square_payment_id_key on public.orders (square_payment_id) where square_payment_id is not null;  -- 0005
 ```
+
+**Payment routines (migration 0005).** The server reads Square first, then calls one of these as `abos_app`. Both lock the order, check `business_id` and the order's `APPROVED` `order_bundle` approval, and are all or nothing.
+
+| Routine | Wrapper | Does |
+|---|---|---|
+| `private.mark_order_paid(business, order, paymentId, amountMinor, currency)` returns `{order, syncJob}` | `markOrderPaid` | Accepts `PAYMENT_PENDING` or `PAYMENT_FAILED`. Amount and currency must equal both the signed `totalMinor`/`currency` and the order row. Records `square_payment_id`, moves to `PAID_VERIFIED`, enqueues the Sheets job through `enqueue_sheets_sync`, and writes `order.status_changed`, `payment.verified` and `sync.queued`. A repeat with the same payment ID (also after `FULFILLMENT_READY`) changes nothing and returns the same result. A different payment ID on a paid order, or a payment ID on another order, is refused. It does not set `FULFILLMENT_READY`. |
+| `private.mark_order_payment_failed(business, order, paymentId, reason)` returns the order | `markOrderPaymentFailed` | `PAYMENT_PENDING` to `PAYMENT_FAILED` with `order.status_changed` and `payment.failed`. A repeat on `PAYMENT_FAILED` is a no-op. Any other state, including paid, is refused. |
+
+Events use the approval ID as `correlation_id`, as the 0004 routines do.
 
 The propose tool creates the row already in `AWAITING_OWNER_APPROVAL` (SPEC 2.4 rulings). The earlier states live in `calls.stage`, so the check holds exactly the fourteen values of the `OrderStatus` type (CONTRACTS.md). `UNAVAILABLE` here means the checkout step's re-check found an item gone. `unique (business_id, cart_hash, call_id)` makes a repeated `propose_order` return the existing row instead of making a second proposal. The two partial unique indexes stop one Square order or link attaching to two local orders (AC-10). The last two checks make the database refuse a paid state without a Square payment ID (SPEC rule 1.3.5). `PAYMENT_LINK_READY` may go straight to `PAYMENT_PENDING` when the channel is `qr_only` or the send fails. `quote` is the `Quote` (`qte_` ID, `expiresAt`) the proposal used; quotes before a proposal live only in the call session and are not stored. `total_minor` and `currency` are copied from the quote when the proposal is stored (SPEC 2.9).
 
@@ -478,6 +491,8 @@ create table public.action_executions (
 ```
 
 `idempotency_key` is `sha256(businessId:subjectId:actionType:approvalId)` in hex (SPEC 2.9). It is computed once at insert and sent unchanged to Square, Google and the message channel on every retry; where a provider caps key length, the adapter shortens it the same way every time. `unique (approval_id, action_type)` means a double click on Approve cannot queue a bundle twice. A worker claims a row with `update ... set status = 'RUNNING', attempts = attempts + 1, locked_by = $1, locked_at = now() where id = $2 and status = 'QUEUED' and next_attempt_at <= now() returning *`, so only one worker owns an intent. A retryable failure returns to `QUEUED` with a later `next_attempt_at`; after 3 attempts it is `FAILED`; an unknown result is `NEEDS_REVIEW`, never a blind retry (SPEC 2.9). When `MESSAGE_CHANNEL` is `qr_only`, a message step goes straight to `SKIPPED` and no `message_dispatches` row is created (SPEC 2.9). `last_error` is `ActionExecution.lastError`. `capability_id` follows the SPEC 2.3 mapping and is null for `local.*` steps.
+
+**Stale lease recovery (migration 0005).** `private.recover_stale_executions(business, staleAfter interval)` (wrapper `recoverStaleExecutions`, `staleAfterMs` at least 60000) moves every step in the business that is `RUNNING` with `locked_at` older than the interval to `NEEDS_REVIEW`, clears the lease and keeps the idempotency key. The provider outcome is unknown, so it never requeues. A stale checkout moves its order from `APPROVED` or `CREATING_CHECKOUT` to `RECOVERY_REQUIRED`; a stale calendar step moves its booking from `RECHECKING_SLOT` to `RETRY_REQUIRED`; each with a status event. A message step in `NEEDS_REVIEW` still lets local recording run. It returns the moved rows; the executor writes `execution.failed`. Sync job leases have no recovery yet.
 
 The Sheets step is authorized at approval but runs later (SPEC 2.3), and it never gets an `action_executions` row (SPEC 2.9). That is why the `action_type` check leaves out `sheets.order.append` and `sheets.booking.append`. The transaction that moves an order into `PAID_VERIFIED`, or a booking into `BOOKED_VERIFIED`, inserts the `sync_jobs` row; the approval in `action_bundle` is its authority. An order that is never paid has no Sheets row and no pending job.
 
@@ -734,7 +749,7 @@ On failure the worker sets `state = 'QUEUED'` and `run_after = now() + backoff` 
 
 **Functions, triggers, settings, storage:** `gen_id`, `set_updated_at`, `agent_versions_immutable`, `activity_events_append_only`, `owns_business`, the session setting `app.allow_reset`, the Storage bucket `business-files`, and the seed variables `SEED_OWNER_EMAIL` and `SEED_OWNER_PASSWORD`.
 
-**Columns not defined in SPEC or the PRD:** `users.display_name`; `businesses.currency`; `capabilities.approval_mode`, `tier`; `integrations.config`, `last_error`; `files.name`, `size_bytes` (PRD `size`), `uploaded_by`; `business_facts.confidence`, `file_id`, `supersedes_id`, `verified_by`, `updated_at`; all `catalog_items` and `fact_conflicts` column names; `agents.channel`, `draft_spec`, `seeded`; `agent_versions.business_id`, `guardrail_version`; all `live_agent` column names; `builder_sessions.owner_id`, `agent_id`, `status`, `messages` (PRD `messages_json_ref`); `calls.agent_id`, `caller_last4` (PRD `caller_ref`), `fact_snapshot_ref`, `end_reason`, `started_at` (PRD `began_at`); `approval_requests.actor_id`, `decision_reason`; `action_executions.step_index`, `next_attempt_at`, `locked_by`, `locked_at`, `last_error`, `started_at`, `finished_at`; `message_dispatches.approval_id`, `order_id`, `booking_id`, `subject_id` (generated), `body_hash`, `sent_at`, `delivered_at`; `webhook_events.event_type`, `business_id`, `payload`, `process_error`; `sync_jobs.external_ref`, `last_error`; `activity_events.payload` (PRD `redacted_payload`).
+**Columns not defined in SPEC or the PRD:** `users.display_name`; `businesses.currency`; `capabilities.approval_mode`, `tier`; `integrations.config`, `last_error`; `files.name`, `size_bytes` (PRD `size`), `uploaded_by`; `business_facts.confidence`, `file_id`, `supersedes_id`, `verified_by`, `updated_at`; all `catalog_items` and `fact_conflicts` column names; `agents.channel`, `draft_spec`, `seeded`, `spec_revision`; `agent_versions.business_id`, `guardrail_version`; all `live_agent` column names; `builder_sessions.owner_id`, `agent_id`, `status`, `messages` (PRD `messages_json_ref`); `calls.agent_id`, `caller_last4` (PRD `caller_ref`), `fact_snapshot_ref`, `end_reason`, `started_at` (PRD `began_at`); `approval_requests.actor_id`, `decision_reason`; `action_executions.step_index`, `next_attempt_at`, `locked_by`, `locked_at`, `last_error`, `started_at`, `finished_at`; `message_dispatches.approval_id`, `order_id`, `booking_id`, `subject_id` (generated), `body_hash`, `sent_at`, `delivered_at`; `webhook_events.event_type`, `business_id`, `payload`, `process_error`; `sync_jobs.external_ref`, `last_error`; `activity_events.payload` (PRD `redacted_payload`).
 
 **Enumerated values:** `users.role`; `builder_sessions.status`; `calls.end_reason`; `webhook_events.source`; `sync_jobs.record_type`; `jobs.queue` and `state`. The values of `files.extraction_state`, `integrations.state`, `capabilities.approval_mode` and `business_facts.kind` come from CONTRACTS.md and SPEC 2.9.
 

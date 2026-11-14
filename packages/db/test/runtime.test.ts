@@ -106,12 +106,13 @@ it('exposes only the checked entry points and pins definer search paths', async 
       exists(select 1 from aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) where grantee=0 and privilege_type='EXECUTE') pub
     from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='private' and proname<>'owns_business'`);
   const routines=['create_approval','decide_and_enqueue','claim_execution','claim_next_execution','finish_execution','record_dispatch',
-    'update_dispatch','enqueue_sheets_sync','claim_sync_job','finish_sync_job','expire_approvals'];
+    'update_dispatch','enqueue_sheets_sync','claim_sync_job','finish_sync_job','expire_approvals',
+    'mark_order_paid','mark_order_payment_failed','recover_stale_executions'];
   for(const r of q.rows) {
     expect(r.runtime,r.proname).toBe(routines.includes(r.proname)); expect(r.browser).toBe(false); expect(r.pub).toBe(false);
     if(r.runtime) { expect(r.prosecdef).toBe(true); expect(r.proconfig).toContain('search_path=""'); }
   }
-  expect(q.rows.filter(r=>r.runtime)).toHaveLength(11);
+  expect(q.rows.filter(r=>r.runtime)).toHaveLength(14);
 });
 
 for(const type of types) describe(type, () => {
