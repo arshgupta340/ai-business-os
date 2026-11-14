@@ -267,20 +267,33 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
       : () => processTwilioStatus(deps13, stored);
   }
 
+  /** Rows per recovery page. Every unprocessed row is reached across pages, whatever its age. */
+  const RECOVERY_PAGE = 200;
+
   async function recoverNow(): Promise<number> {
-    // Rows of the payment window without processed_at are candidates (a finished job marks its row).
-    // Re-running is safe: a paid order is never paid twice and a call ends once.
-    const since = new Date(deps.now().getTime() - PAYMENT_POLL_DURATION_MS);
-    const rows = (await db.query(`select id, source, provider_event_id, event_type, business_id, payload from public.webhook_events
-      where processed_at is null and source in ('square','twilio_status') and received_at >= $1 order by received_at`, [since])).rows as Row[];
+    // Review finding 7: every stored row without processed_at is a candidate, whatever its age (the
+    // 15 minute payment poll window is a separate thing). A finished job marks its row, so a row seen
+    // here again is one whose job failed or was deferred. Re-running is safe: a paid order is never
+    // paid twice, a call ends once, a receipt moves a dispatch forward once. Rows older than the
+    // payment window are logged so a stuck event is visible, never dropped silently.
+    const staleBefore = new Date(deps.now().getTime() - PAYMENT_POLL_DURATION_MS);
     let n = 0;
-    for (const r of rows) {
-      const id = String(r.id);
-      if (pending.has(id) || typeof r.business_id !== 'string') continue;
-      const stored: StoredWebhook = { id, source: r.source as StoredWebhook['source'], providerEventId: String(r.provider_event_id), eventType: String(r.event_type),
-        businessId: r.business_id, payload: (r.payload ?? {}) as Record<string, string> };
-      n++;
-      flights = flights.then(() => runJob(id, stored.businessId, jobFor(stored)));
+    let after = '';
+    for (;;) {
+      const rows = (await db.query(`select id, source, provider_event_id, event_type, business_id, payload, received_at from public.webhook_events
+        where processed_at is null and source in ('square','twilio_status') and id > $1 order by id limit $2`, [after, RECOVERY_PAGE])).rows as Row[];
+      for (const r of rows) {
+        const id = String(r.id);
+        after = id;
+        if (pending.has(id) || typeof r.business_id !== 'string') continue;
+        const received = r.received_at instanceof Date ? r.received_at : new Date(String(r.received_at));
+        if (received < staleBefore) log.warn({ job: 'webhook-recovery', webhookId: id }, 'webhook event still unprocessed after the payment window; retrying');
+        const stored: StoredWebhook = { id, source: r.source as StoredWebhook['source'], providerEventId: String(r.provider_event_id), eventType: String(r.event_type),
+          businessId: r.business_id, payload: (r.payload ?? {}) as Record<string, string> };
+        n++;
+        flights = flights.then(() => runJob(id, stored.businessId, jobFor(stored)));
+      }
+      if (rows.length < RECOVERY_PAGE) break;
     }
     await flights;
     return n;

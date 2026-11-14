@@ -77,6 +77,8 @@ describe('a delivery receipt that arrives before the send step finishes', () => 
     const pending = "select count(*)::int as n from webhook_events where source = 'twilio_status' and processed_at is null";
     expect((await w.t.db.query(pending, [])).rows[0]).toEqual({ n: 1 });
 
+    // Review finding 7: an unprocessed row older than the 15 minute payment window is still recovered.
+    await w.t.admin((q) => q.query("update webhook_events set received_at = now() - interval '2 hours' where source = 'twilio_status' and processed_at is null"));
     // Recovery of stored but unprocessed rows (also what runs after a restart) applies it now.
     expect(await c.webhooks!.recoverNow()).toBe(1);
     expect((await w.t.db.query('select status from message_dispatches where approval_id = $1', [approval.id])).rows[0]).toEqual({ status: 'FAILED' });
