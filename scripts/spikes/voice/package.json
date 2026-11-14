@@ -1,0 +1,28 @@
+{
+  "name": "spike-voice",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Spike B-03: Twilio Media Streams relayed to the OpenAI Realtime API. Not part of the root workspaces.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --import tsx src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastify/formbody": "^8.0.2",
+    "fastify": "^5.6.0",
+    "twilio": "^5.10.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.0.0"
+  }
+}
