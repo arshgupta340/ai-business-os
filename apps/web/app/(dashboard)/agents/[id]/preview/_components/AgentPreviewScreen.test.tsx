@@ -359,7 +359,18 @@ describe('Agent preview', {timeout: 30000}, () => {
     renderScreen('agt_pizza_paused_88');
     expect(await screen.findByText('This agent is paused')).toBeTruthy();
     expect(screen.getByText(/Simulated call is off: This agent is paused/)).toBeTruthy();
-    // The live agent has the same name: it is told apart by its version, never by its raw ID.
+    // The live agent has another name, so it is named plainly.
+    expect(await screen.findByText(/^Phone\. Pizza Order Assistant answers/)).toBeTruthy();
+    expect(screen.queryByText(/The other/)).toBeNull();
+    expect(screen.queryByText(/agt_pizza_01/)).toBeNull();
+  });
+
+  it('tells two agents with one name apart by version, never by raw ID', async () => {
+    // The fixtures give every agent its own name, so this test renames the paused one to match the live one.
+    const paused = await api.getAgent('biz_pizza_01', 'agt_pizza_paused_88');
+    const live = await api.getAgent('biz_pizza_01', 'agt_pizza_01');
+    server.use(http.get(`${A}/agents/agt_pizza_paused_88`, () => HttpResponse.json({...paused, name: live.name})));
+    renderScreen('agt_pizza_paused_88');
     expect(await screen.findByText(/^Phone\. The other Pizza Order Assistant \(version 2\) answers/)).toBeTruthy();
     expect(screen.queryByText(/agt_pizza_01/)).toBeNull();
   });

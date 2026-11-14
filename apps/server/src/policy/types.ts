@@ -1,4 +1,5 @@
 import type { ApprovalDecision, Order, Booking, BusinessFact, MessageChannelSetting, ErrorCode, JsonValue } from '@abos/contracts';
+import { errorMessage } from '../error-messages';
 
 export interface QueryInterface {
   query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
@@ -35,7 +36,7 @@ export type FactEditInput = Pick<BusinessFact, 'businessId' | 'kind' | 'key' | '
 };
 export type DecisionInput = ApprovalDecision & { approvalId: string; businessId: string; ownerUserId: string };
 export class PolicyError extends Error {
-  constructor(readonly code: ErrorCode, message: string = code) {
+  constructor(readonly code: ErrorCode, message: string = errorMessage(code)) {
     super(message);
     this.name = 'PolicyError';
   }

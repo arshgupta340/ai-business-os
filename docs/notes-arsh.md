@@ -116,3 +116,13 @@ Assumptions made in that work that no test here can check. Each one needs a real
 - `createdByName` is in the schema and the fixtures only. No server code fills it: the version view is built in `apps/server/src/builder/publish/stores.ts` (`toVersionView`), which is the UI lead's directory.
 - `resolvesConflictId` on the price proposal body is in the schema, and the route still refuses it. Nothing stores the link.
 
+## Database stores for uploads (2026-11-14, branch `arsh/uploads-db-stores`)
+
+`apps/server/src/compose/builder-extraction.ts` gives the builder's document extraction database stores. Not verified, or decided without a ruling:
+
+- **Tested on the in-process Postgres only.** Every query ran as `abos_app` on PGlite. None ran against the Supabase database or through the `pg` driver. The statements use the same forms the other compose stores use (`$n::jsonb`, `= any($n::text[])`, `clock_timestamp()`).
+- **File contents are not stored anywhere.** `files` has no column for them and no bucket is wired. The bytes stay in the server process from the upload until that file's extraction ends, then they are dropped. A restart during an extraction loses them: the row stays `PENDING` or `EXTRACTING`, and nothing moves it to `FAILED`.
+- **A failed file is replaced, not re-run (my decision, not in SPEC).** The builder re-runs a `FAILED` file from its stored bytes when the same file is uploaded again. With no stored bytes, the new upload replaces the failed row instead: the old `files` row is deleted, a new one is inserted with a new `file_` ID, and draft facts of the old row move to the new one. The same happens to a row left `PENDING` or `EXTRACTING` for more than 15 minutes whose bytes this process does not hold. The 15 minutes is a guess from the extractor's 60 second timeout with one retry. With several server processes, a row another process has been extracting for more than 15 minutes would be replaced under it.
+- **An uploaded draft is never marked `superseded`.** The check `(status = 'draft') = (verified_at is null)` and the index `business_facts_version` refuse it for a fact that was never verified. After "keep the current value" the conflict row is `resolved` and the draft stays `draft`. Deleting it is not possible either: `abos_app` has no delete on `business_facts`.
+- **A draft and its conflict are two statements.** DATA-MODEL section 5 says "in the same transaction". The builder's service calls the fact store and then the conflict store, so a crash between the two leaves a draft with no conflict row.
+- **`StoredFile.failureReason` is not stored.** `files` has no column for it. It is kept in the process and nothing but a builder test reads it.

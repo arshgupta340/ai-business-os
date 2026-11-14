@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { ENDPOINTS, ERROR_CODE_INFO, ApiErrorSchema, type EndpointDefinition, type ErrorCode } from '@abos/contracts';
+import { ENDPOINTS, ERROR_CODE_INFO, ApiErrorSchema, ErrorCodeSchema, type EndpointDefinition, type ErrorCode } from '@abos/contracts';
+import { PolicyError } from '../../src/policy/types';
 import { buildApp } from '../../src/app';
 import { parseEnv } from '../../src/env';
 import { createInMemoryEngine, type EnginePorts } from '../../src/api/ports';
@@ -233,6 +234,40 @@ describe('core REST with migrated Postgres', () => {
       } finally { await isolated.close(); }
     });
   }
+
+  it('answers every error code thrown through the route wrapper with a plain sentence (issue #127)', async () => {
+    let thrown: unknown;
+    const broken: EnginePorts = { ...ports, async decide() { throw thrown; } };
+    const isolated = await buildApp(env, { db: h.db, verifier, ports: broken });
+    try {
+      for (const code of ErrorCodeSchema.options) {
+        for (const [kind, error] of [['PolicyError', new PolicyError(code)], ['plain object', Object.assign(new Error('secret provider response'), { code })]] as const) {
+          thrown = error;
+          const res = await isolated.inject({ method: 'POST', url: '/api/approvals/apv_a2/decision?businessId=biz_a', headers,
+            payload: { decision: 'approve', payloadHash: HASH } });
+          assertError(res, code);
+          const { message } = ApiErrorSchema.parse(res.json());
+          const label = `${code} as ${kind}`;
+          expect(message.trim(), label).not.toBe('');
+          expect(message, label).not.toBe(code);
+          expect(message, label).not.toContain('_');
+          expect(message, label).not.toMatch(/[A-Z]{2,}/);
+          expect(message, label).not.toContain('secret');
+        }
+      }
+    } finally { await isolated.close(); }
+  });
+
+  it('keeps the message a PolicyError was given when it passes through the route wrapper', async () => {
+    const broken: EnginePorts = { ...ports, async decide() { throw new PolicyError('INVALID_STATE', 'The call has ended.'); } };
+    const isolated = await buildApp(env, { db: h.db, verifier, ports: broken });
+    try {
+      const res = await isolated.inject({ method: 'POST', url: '/api/approvals/apv_a2/decision?businessId=biz_a', headers,
+        payload: { decision: 'approve', payloadHash: HASH } });
+      assertError(res, 'INVALID_STATE');
+      expect(res.json().message).toBe('The call has ended.');
+    } finally { await isolated.close(); }
+  });
 
   it('reports integration configuration and sandbox through the contract', async () => {
     const res = await app.inject({ url: '/api/integrations/health?businessId=biz_a', headers });

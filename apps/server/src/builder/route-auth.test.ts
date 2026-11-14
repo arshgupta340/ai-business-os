@@ -49,9 +49,9 @@ function concrete(url: string): string {
   return `${path}?businessId=biz_pizza_01`;
 }
 
-// The only routes allowed to answer without an owner. Adding one here is a
-// decision, not a way to make the test pass.
-const OPEN_ROUTES = new Set(['/api/builder/ping']);
+// The only routes allowed to answer without an owner. There are none. Adding
+// one here is a decision, not a way to make the test pass.
+const OPEN_ROUTES = new Set<string>();
 
 let open: FastifyInstance | undefined;
 afterEach(async () => {

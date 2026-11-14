@@ -60,14 +60,33 @@ export function isCallId(id: string): boolean {
   return id.startsWith('call_');
 }
 
-/** One entry per call, oldest event first in each. Events of other journeys (fact edits, webhooks) are left out. */
+/** The approval an event names, for the two events that link a call to its approval. */
+function approvalIdOf(event: ActivityEvent): string | undefined {
+  const id = (payload(event, 'approval.requested') ?? payload(event, 'approval.decided'))?.approvalId;
+  return typeof id === 'string' ? id : undefined;
+}
+
+/**
+ * One entry per call, oldest event first in each. Events of other journeys (fact edits, webhooks) are left out.
+ *
+ * The server writes what the executor does (execution.*, sync.*) under the approval's id, not the call's.
+ * Those events join the call that asked for that approval, so a step that ran is not shown as still waiting.
+ */
 export function groupByCall(events: ActivityEvent[]): Map<string, ActivityEvent[]> {
-  const groups = new Map<string, ActivityEvent[]>();
-  for (const event of mergeEvents(events)) {
+  const merged = mergeEvents(events);
+  const callOfApproval = new Map<string, string>();
+  for (const event of merged) {
     if (!isCallId(event.correlationId)) continue;
-    const list = groups.get(event.correlationId);
+    const approvalId = approvalIdOf(event);
+    if (approvalId) callOfApproval.set(approvalId, event.correlationId);
+  }
+  const groups = new Map<string, ActivityEvent[]>();
+  for (const event of merged) {
+    const callId = isCallId(event.correlationId) ? event.correlationId : callOfApproval.get(event.correlationId);
+    if (!callId) continue;
+    const list = groups.get(callId);
     if (list) list.push(event);
-    else groups.set(event.correlationId, [event]);
+    else groups.set(callId, [event]);
   }
   return groups;
 }

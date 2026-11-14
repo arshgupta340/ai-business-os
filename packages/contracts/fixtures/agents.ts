@@ -186,12 +186,12 @@ export const faqDraftAgent = {
   updatedAt: '2026-11-14T20:28:00Z',
 } satisfies Agent;
 
-// The paused agent still has the live agent's name (issue #103, item 6). A web test reads this pair as its
-// "two agents with one name" case, so the rename has to land together with that test: see issue103.test.ts.
-export const pausedSpec: AgentSpec = { ...pizzaSpecV1, id: 'agt_pizza_paused_88', status: 'paused' };
+// The paused agent has a name of its own, so My Agents and Overview never list two agents of one business
+// under one name (issue #103, item 6).
+export const pausedSpec: AgentSpec = { ...pizzaSpecV1, id: 'agt_pizza_paused_88', name: 'Weekend Pizza Assistant', status: 'paused' };
 export const pausedVersion: AgentVersion = { ...pizzaVersionV1, id: 'agv_pizza_paused_88_v1', agentId: pausedSpec.id, spec: pausedSpec };
 agentVersions.push(pausedVersion);
-export const pausedAgent: Agent = { ...pizzaAgent, id: pausedSpec.id, state: 'paused', activeVersionId: pausedVersion.id, activeVersion: pausedVersion, draftSpec: pausedSpec, isLiveAgent: false };
+export const pausedAgent: Agent = { ...pizzaAgent, id: pausedSpec.id, name: pausedSpec.name, state: 'paused', activeVersionId: pausedVersion.id, activeVersion: pausedVersion, draftSpec: pausedSpec, isLiveAgent: false };
 export const agents: Agent[] = [pizzaAgent, barberAgent, faqDraftAgent, pausedAgent];
 
 export const liveAgent = {

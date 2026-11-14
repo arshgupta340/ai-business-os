@@ -161,6 +161,8 @@ describe("catalog and prices", () => {
 
 const PIZZA_MENU_PDF = "%PDF-1.4\nDemo Pizza Co. Menu\nMargherita Large 21.00\n%%EOF\n";
 const HOURS_CSV = "Opening hours\nday,open,close\nFriday,11:00,23:00\n";
+// The barbershop closes Saturday at 16:00; this sheet says 21:00.
+const SATURDAY_HOURS_CSV = "Opening hours\nday,open,close\nSaturday,09:00,21:00\n";
 const BARBER_CSV = "Demo Barbershop price list\nservice,price,minutes\nHaircut,30,30\nBeard trim,15,15\nHaircut and beard,40,45\n";
 
 describe("files and conflicts", () => {
@@ -209,18 +211,27 @@ describe("files and conflicts", () => {
     expect((again as ApiError).code).toBe("INVALID_STATE");
   });
 
-  // Mismatch (server): uploads, their draft facts and their conflicts are kept in the builder's
-  // in-memory stores (apps/server/src/compose/index.ts), while GET /api/businesses/:id/facts reads
-  // fact_conflicts in the database, so a conflict from an upload never reaches the Knowledge screen.
-  it.fails("a conflict an upload opened is listed by getFacts, so the Knowledge screen can show it", async () => {
+  // Uploads, their draft facts and their conflicts are rows in the database (#116), the same rows
+  // GET /api/businesses/:id/facts reads, so a conflict from an upload reaches the Knowledge screen.
+  // The test above resolved its conflict, and getFacts lists open conflicts only, so this one uploads
+  // its own sheet and looks for the conflict that upload opened, by its ID.
+  it("a conflict an upload opened is listed by getFacts, so the Knowledge screen can show it", async () => {
+    const file = await api.uploadFile(BARBER, new Blob([SATURDAY_HOURS_CSV], { type: "text/csv" }), "saturday-hours.csv");
+    const done = await waitFor(() => api.getFile(BARBER, file.id), (f) => f.extractionState === "EXTRACTED" || f.extractionState === "FAILED");
+    expect(done.extractionState).toBe("EXTRACTED");
+    const conflictId = done.conflictIds?.[0];
+    expect(conflictId).toBeDefined();
     const res = await api.getFacts(BARBER);
-    const files = s.requests.filter((r) => r.url.pathname.startsWith("/api/files/"));
-    expect(files.length).toBeGreaterThan(0);
-    expect(res.conflicts.some((c) => c.kind === "hours" && c.key === "fri")).toBe(true);
+    expect(res.conflicts.find((c) => c.id === conflictId)).toMatchObject({ id: conflictId, businessId: BARBER, kind: "hours", state: "open" });
   });
 
   describe("a conflict stored in the database", () => {
     beforeAll(async () => {
+      // The menu uploads above opened a conflict for this same key in the database (#116), and only
+      // one conflict per key may be open. It is removed so the fixture row can stand in for it.
+      await s.world.t.admin((q) =>
+        q.query("delete from public.fact_conflicts where business_id = $1 and kind = 'menu_item' and key = $2 and state = 'open'", [PIZZA, menuPriceConflict.key]),
+      );
       await s.world.t.admin((q) =>
         q.query(
           "insert into public.fact_conflicts (id, business_id, kind, key, candidates, required, state) values ($1, $2, 'menu_item', $3, $4::jsonb, true, 'open')",
