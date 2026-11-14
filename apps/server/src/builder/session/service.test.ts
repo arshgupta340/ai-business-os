@@ -300,7 +300,7 @@ describe('proposeFactFromChat: a chat answer opens a fact_edit approval', () => 
     }),
   });
 
-  it('the composition function fits the plugin option', () => {
+  it('the composition function fits the plugin option (a type check only, not a database run)', () => {
     expectTypeOf<ComposedProposeFactFromChat>().toMatchTypeOf<ProposeFactFromChat>();
   });
 
@@ -317,8 +317,9 @@ describe('proposeFactFromChat: a chat answer opens a fact_edit approval', () => 
     expect(drafts).toHaveLength(1);
     expect(calls).toEqual([{
       businessId: 'biz_pizza_01', ownerUserId: 'usr_owner_01', kind: 'policy', key: 'message_consent', value: drafts[0]!.value,
-      reason: 'Owner answer in the builder chat.', fromVersion: 0, before: null,
+      reason: 'Owner answer in the builder chat.', subjectId: drafts[0]!.id, fromVersion: 0, before: null,
     }]);
+    expect(drafts[0]!.value).toEqual({ required: true, wording: 'Ask the caller if they agree to get one text with the payment link. Send it only after a clear yes.' });
     expect(second.missingFields).toEqual([]);
   });
 
@@ -349,7 +350,7 @@ describe('proposeFactFromChat: a chat answer opens a fact_edit approval', () => 
     const turn = await service.message('biz_pizza_01', s.id, { text: 'Do not send texts.', inputMode: 'text' });
     expect(turn.proposedChange).toEqual({ approvalId: 'apv_chat_02', bundleType: 'fact_edit' });
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({ kind: 'policy', key: 'message_consent', value: { text: 'Never text anyone.' }, fromVersion: verified.version, before: verified.value });
+    expect(calls[0]).toMatchObject({ kind: 'policy', key: 'message_consent', value: { required: true, wording: 'Never text anyone.' }, subjectId: verified.id, fromVersion: verified.version, before: verified.value });
     expect(await draftFacts.listBySession('biz_pizza_01', s.id)).toEqual([expect.objectContaining({ key: 'message_consent', status: 'draft' })]);
   });
 

@@ -1,4 +1,4 @@
-import { HoursKeySchema, type BusinessFact, type CapabilityId, type DraftAgentSpec, type StopCondition } from '@abos/contracts';
+import { HoursKeySchema, type AgentSpec, type BusinessFact, type CapabilityId, type DraftAgentSpec, type StopCondition } from '@abos/contracts';
 import type { BusinessContext } from './knowledge';
 
 // Missing-field computation (FLOWS.md step A6): the union of the details each
@@ -106,7 +106,7 @@ function satisfiedBy(field: string, spec: DraftAgentSpec, context: BusinessConte
 // contract's StopCondition is `{ code }`; `conflictIds` is an extra field the
 // builder sends with `open_conflict` (see docs/notes-saina.md).
 export interface BuilderStopCondition extends StopCondition {
-  code: 'missing_timezone' | 'open_conflict' | 'missing_message_consent_policy' | 'missing_price';
+  code: 'missing_timezone' | 'open_conflict' | 'missing_message_consent_policy' | 'empty_catalog';
   conflictIds?: string[];
 }
 
@@ -120,16 +120,20 @@ export function stopConditions(spec: DraftAgentSpec, context: BusinessContext, s
 }
 
 // The stop conditions publish checks on missing facts (FLOWS.md, Builder stop
-// conditions 1, 3 and 6). Only verified facts count: a deployed agent reads
-// verified facts only, so an unconfirmed chat draft does not fill a field
-// here. The draft's own existence never stops a publish. An open conflict is
-// left out: publish reports it as CONFLICT_UNRESOLVED instead.
-// `missing_price` is used only here. The builder sees only the catalog's item
-// count, so it fires when the spec needs a catalog and the catalog is empty.
-export function publishStopConditions(spec: DraftAgentSpec, context: BusinessContext): BuilderStopCondition[] {
+// conditions 3 and 6, and the empty-catalog part of 1). Only verified facts
+// count: a deployed agent reads verified facts only, so an unconfirmed chat
+// draft does not fill a field here. A draft's existence never stops a publish.
+// An open conflict is left out: publish reports it as CONFLICT_UNRESOLVED.
+//
+// What this cannot check: the builder sees only the catalog's item count, not
+// which products must have a price or whether a product mapping is ambiguous.
+// So stop condition 1 is checked only as `empty_catalog` (the spec needs a
+// catalog and the catalog has no item), and stop condition 2 is not checked.
+// Call this only with a spec that passed validation.
+export function publishStopConditions(spec: AgentSpec, context: BusinessContext): BuilderStopCondition[] {
   const status = computeFieldStatus(spec, context, []);
   const out = stopConditions(spec, context, status).filter((c) => c.code !== 'open_conflict');
-  if (status.missing.includes('catalog.items')) out.push({ code: 'missing_price' });
+  if (status.missing.includes('catalog.items')) out.push({ code: 'empty_catalog' });
   return out;
 }
 
