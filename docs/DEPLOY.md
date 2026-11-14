@@ -292,7 +292,7 @@ To switch to AgentPhone:
 
 To switch back: set `TELEPHONY_PROVIDER=twilio` (or remove it), redeploy and publish again so the live agent points at `TWILIO_PHONE_NUMBER`. The Twilio console settings were never touched, so nothing needs re-registering on Twilio.
 
-Texting is separate: `MESSAGE_CHANNEL=agentphone` sends the approved checkout or booking message through AgentPhone with either telephony provider, once AgentPhone's 10DLC registration is approved. Its delivery status is read from AgentPhone's message history every minute; there is no receipt webhook.
+Texting is separate: `MESSAGE_CHANNEL=agentphone` sends the approved checkout or booking message through AgentPhone with either telephony provider, once AgentPhone's 10DLC registration is approved. Its delivery status is read from AgentPhone's message history every minute; there is no receipt webhook. Integration health shows the message channel as connected only when AgentPhone reports outbound SMS `enabled` on the number; until then publish refuses an agent that sends messages.
 
 ## Registering the webhooks with one command
 

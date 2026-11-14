@@ -99,6 +99,11 @@ Index of the docs: https://docs.agentphone.ai/llms.txt
 - Whether a retried delivery carries a new `X-Webhook-Timestamp` (and so a new signature) or the original one. The server accepts either: it dedupes on the delivery ID and on the signed content.
 - The format of the webhook secret. The example response in the webhooks guide shows `"secret": "whsec_abc123..."`; no page states the prefix as a rule. Read again on 2026-11-14.
 - Whether `from` is present on a call from a withheld number. The server treats a missing or odd `from` as withheld.
+- The character set of `X-Webhook-ID` and of call and message IDs. The examples look like `del_pqr901`, `call_abc123`, `msg_abc123`; the server accepts letters, digits and `. _ : -` and refuses anything else (401 or 400, with the cause in the server log).
+- The exact list envelope of `GET /v1/numbers/{number_id}/messages` (`data`, `hasMore`, `nextCursor`), taken from the OpenAPI file.
+- The `status` values on `agent.call_ended`. The example shows `completed`; the server maps `failed` to failed and everything else to dropped.
+- What `GET /v1/webhooks` answers when no webhook is set. The webhooks guide says it "Returns `null`"; the registration script accepts that and a 404.
+- The API key format. `docs/SETUP-ACCOUNTS.md` says `sk_live_`; no page read for these notes states it.
 - Whether `X-Webhook-ID` is unique per event or per delivery attempt across retries for every event type (the docs say a retried delivery keeps it).
 - Whether a voice `agent.message` is sent for the very start of a call (before the caller speaks), and whether the agent's `beginMessage` is spoken in webhook mode. We do not depend on either.
 - What happens if our NDJSON stream closes without a final chunk.

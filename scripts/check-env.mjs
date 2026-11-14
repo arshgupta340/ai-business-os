@@ -136,6 +136,8 @@ const checks = {
   MESSAGE_CHANNEL: (v) => (CHANNELS.includes(v) ? null : `not one of ${CHANNELS.join(', ')}`),
   TELEPHONY_PROVIDER: (v) => (TELEPHONY.includes(v) ? null : `not one of ${TELEPHONY.join(', ')}`),
   AGENTPHONE_PHONE_NUMBER: (v) => (E164.test(v) ? null : 'not E.164 (for example +18055550100)'),
+  // Untested guess: the vendor's example response shows "whsec_abc123..."; no page states the prefix as a rule.
+  // If a real secret has another shape, this reports a wrong format although the server would accept it.
   AGENTPHONE_WEBHOOK_SECRET: (v) => (v.startsWith('whsec_') ? null : 'does not start with whsec_ (the secret POST /v1/webhooks returns)'),
   ANDROID_GATEWAY_URL: (v) => (/^https?:$/.test(parseUrl(v)?.protocol ?? '') ? null : 'not an http(s) URL'),
   TWILIO_WHATSAPP_FROM: (v) => (E164.test(v.replace(/^whatsapp:/, '')) ? null : 'not whatsapp:+E.164 or +E.164'),

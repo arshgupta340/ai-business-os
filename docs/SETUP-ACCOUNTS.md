@@ -41,7 +41,7 @@ Do 1 to 4 first. They unblock spikes B-02 and B-03, which are the go or no-go ga
 
 ### 4b. AgentPhone (D-12, optional, to compare with Twilio)
 Everything below follows AgentPhone's own documentation (`docs/notes-agentphone.md`); none of it has been tried yet.
-1. Sign up at agentphone.ai. The API key starts with `sk_live_` and is shown once: put it in `.env.local` as `AGENTPHONE_API_KEY` straight away.
+1. Sign up at agentphone.ai. The API key is expected to start with `sk_live_` (not confirmed in the vendor's documentation) and is shown once: put it in `.env.local` as `AGENTPHONE_API_KEY` straight away.
 2. Buy one US number in the dashboard (or `POST /v1/numbers` with `country: "US"`). About 3 dollars a month; new accounts get 5 dollars of credit. Put its ID (`num_...`) in `AGENTPHONE_NUMBER_ID` and the number in E.164 form in `AGENTPHONE_PHONE_NUMBER`.
 3. Create an agent and attach the number. Set its voice mode to **webhook**, not hosted: in hosted mode AgentPhone's own model answers and our tools and approvals are skipped. Leave any per-agent webhook empty, because it would override the project webhook.
 4. Set the project webhook to `<PUBLIC_SERVER_URL>/webhooks/agentphone`: run `npm run register-webhooks -- --agentphone-only` (dry run), then add `--apply`. AgentPhone makes a new secret every time the webhook is set; the script writes it to `.env.local` as `AGENTPHONE_WEBHOOK_SECRET` without printing it. Copy it to the host.
