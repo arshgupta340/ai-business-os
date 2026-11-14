@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
 import * as api from "@/lib/api/client";
 import { ApiError } from "@/lib/api/errors";
-import { ApprovalRequestSchema } from "@/lib/api/pending-contracts";
-import { payloadHash } from "./hash";
-import { getState, mockControls, whenIdle } from "./server";
+import { ApprovalRequestSchema, payloadHash, type PublishBody } from "@abos/contracts";
+import { advanceMockClock, getState, mockControls, whenIdle } from "./server";
 import { useMockServer } from "./test-setup";
 
 useMockServer();
@@ -22,10 +21,10 @@ async function code(p: Promise<unknown>): Promise<string> {
 }
 
 describe("fixtures", () => {
-  it("validate against the contract schemas and use the payload hash recipe", () => {
+  it("validate against the contract schemas and use the payload hash recipe", async () => {
     for (const apv of getState().approvals) {
       expect(ApprovalRequestSchema.safeParse(apv).success).toBe(true);
-      expect(apv.payloadHash).toBe(payloadHash(apv.payload));
+      expect(apv.payloadHash).toBe(await payloadHash(apv.payload));
     }
   });
 
@@ -66,7 +65,7 @@ describe("approval rules", () => {
 
   it("expires a pending approval once expiresAt passes and closes its order", async () => {
     const apv = getState().approvals.find((a) => a.id === "apv_pizza_pending")!;
-    apv.expiresAt = new Date(Date.now() - 1000).toISOString();
+    advanceMockClock(11 * 60_000);
     expect(await code(api.decideApproval(PIZZA, apv.id, { decision: "approve", payloadHash: apv.payloadHash }))).toBe("APPROVAL_EXPIRED");
     expect(apv.state).toBe("EXPIRED");
     expect((await api.getOrder(PIZZA, "ord_pizza_pending")).status).toBe("APPROVAL_EXPIRED");
@@ -92,7 +91,7 @@ describe("approval rules", () => {
 
   it("refuses after the stored payload changed (mock control)", async () => {
     const apv = await api.getApproval(PIZZA, "apv_pizza_pending");
-    mockControls.simulatePayloadChanged(apv.id);
+    await mockControls.simulatePayloadChanged(apv.id);
     expect(await code(api.decideApproval(PIZZA, apv.id, { decision: "approve", payloadHash: apv.payloadHash }))).toBe("PAYLOAD_HASH_MISMATCH");
   });
 });
@@ -120,7 +119,7 @@ describe("fact edits", () => {
 
 describe("publish rules", () => {
   it("needs confirm: true", async () => {
-    expect(await code(api.publishAgent(BARBER, "agt_barber_faq_01", { confirm: false }))).toBe("VALIDATION_FAILED");
+    expect(await code(api.publishAgent(BARBER, "agt_barber_faq_01", { confirm: false } as unknown as PublishBody))).toBe("VALIDATION_FAILED");
   });
 
   it("is blocked by an open required conflict until it is resolved", async () => {
@@ -176,7 +175,7 @@ describe("uploads", () => {
     expect(done.extractionState).toBe("EXTRACTED");
     expect(done.draftFactIds?.length).toBeGreaterThan(0);
     const events = (await api.listActivity(PIZZA, { types: ["extraction.completed"] })).items;
-    expect(events[0].payload.fileId).toBe(file.id);
+    expect(events[0].type === "extraction.completed" && events[0].payload.fileId).toBe(file.id);
   });
 });
 

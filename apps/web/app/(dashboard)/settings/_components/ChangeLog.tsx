@@ -5,12 +5,12 @@ import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {EmptyState} from '@/components/EmptyState';
 import {LoadingState} from '@/components/LoadingState';
-import {useActivity, useFacts, type BusinessFact} from '@/lib/api';
+import {useActivity, useFacts, type ActivityEventType, type BusinessFact} from '@/lib/api';
 import {formatDateTime} from '@/lib/format';
 import {changeLogEntries} from '../_lib/settings-model';
 import {RequestError} from './RequestError';
 
-const CHANGE_TYPES = ['fact.changed'];
+const CHANGE_TYPES: ActivityEventType[] = ['fact.changed'];
 
 /**
  * Recent fact.changed events, newest first. The activity list is refetched on

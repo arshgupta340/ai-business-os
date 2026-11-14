@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {ApiError, type Agent, type LiveAgent} from '@/lib/api';
+import {ApiError, type Agent, type AgentSpec, type LiveAgent} from '@/lib/api';
 import {
   answersNumber,
   canOfferLiveSwitch,
@@ -90,7 +90,7 @@ describe('shownSpec', () => {
       id: 'agv_a_v1',
       agentId: 'agt_a',
       version: 1,
-      spec: {capabilities: ['order.propose' as const]},
+      spec: {capabilities: ['order.propose' as const]} as AgentSpec, // only the field shownSpec reads
       knowledgeSnapshotRef: {facts: []},
       createdBy: 'usr_1',
       publishedAt: '2026-11-13T19:30:00Z',

@@ -9,9 +9,11 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "e2e": "playwright test",
     "astryx": "astryx"
   },
   "dependencies": {
+    "@abos/contracts": "*",
     "@astryxdesign/core": "0.7.16",
     "@astryxdesign/theme-neutral": "0.7.16",
     "@stylexjs/stylex": "0.19.2",

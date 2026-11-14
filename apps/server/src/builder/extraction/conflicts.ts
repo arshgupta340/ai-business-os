@@ -1,9 +1,8 @@
-import type { BusinessFact } from '../pending-contracts';
+import type { BusinessFact, FactConflictCandidate } from '@abos/contracts';
 import type { BusinessKnowledge } from '../session/knowledge';
 import { apiError, canonicalJson } from '../util';
 import { normalizeName } from './sanitize';
 import type { CatalogVariationRow, ConflictStore } from './stores';
-import type { FactConflictCandidate } from './types';
 
 // Conflict detection (DATA-MODEL.md section 5). A draft menu_item is compared
 // with the catalog cache on normalized item and variation names; a price

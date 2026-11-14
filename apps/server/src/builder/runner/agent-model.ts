@@ -1,4 +1,4 @@
-import type { ToolName } from '../pending-contracts';
+import type { ToolName } from '@abos/contracts';
 
 // The model that plays the agent in a text run. It never calls a tool itself:
 // it asks the runner through `executeTool`, and the runner decides whether the

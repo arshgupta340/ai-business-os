@@ -63,12 +63,10 @@ MSW normally runs as a service worker. Some browsers refuse to register one (emb
 
 ## B-16 builder service (2026-11-13)
 
-The builder was built before the contracts package (S-02), the mock toolset (S-03), the database (B-06) and auth (B-08) existed. Each gap has a temporary stand-in inside `apps/server/src/builder`, marked TEMPORARY in its header:
+The builder was built before the contracts package (S-02), the mock toolset (S-03), the database (B-06) and auth (B-08) existed. The contracts and mock toolset stand-ins are gone (see "Contracts swap" below). These stand-ins still stand:
 
-- `pending-contracts.ts`, `registry.ts` rows and `fixtures.ts`: transcribed from docs/CONTRACTS.md. Replaced by `@abos/contracts` and its fixtures when S-02 and S-03 merge.
-- `runner/mock-toolset.ts`: seven read and propose tools, deterministic, no network, no database. Replaced by S-03's mock toolset, which must report `toolset: "mock"`.
-- `session/stores.ts` and `session/knowledge.ts`: in-memory stores behind interfaces shaped after docs/DATA-MODEL.md. Replaced by database versions passed through the plugin options.
-- `auth.ts`: builder routes answer `UNAUTHENTICATED` until a real `BuilderAuth` is passed to the plugin. For local development only, `BUILDER_DEV_AUTH=1` turns on an unverified stand-in that treats any bearer token as the seeded owner. It is refused when `NODE_ENV` is `production`. `BUILDER_DEV_AUTH` is not in SPEC 3.3 yet.
+- `session/stores.ts`: in-memory stores behind interfaces shaped after docs/DATA-MODEL.md. `session/knowledge.ts` reads the shared fixtures in `@abos/contracts/fixtures`. Both are replaced by database versions passed through the plugin options.
+- `auth.ts`: builder routes answer `UNAUTHENTICATED` until a real `BuilderAuth` is passed to the plugin. For local development only, `BUILDER_DEV_AUTH=1` turns on an unverified stand-in that treats any bearer token as the seeded owner. It is refused when `NODE_ENV` is `production`, and it answers only requests whose socket address is loopback (`127.0.0.1`, `::1`, `::ffff:127.0.0.1`). `BUILDER_DEV_AUTH` is not in SPEC 3.3 yet.
 
 ### Not verified
 
@@ -79,14 +77,14 @@ The builder was built before the contracts package (S-02), the mock toolset (S-0
 
 ### Choices made where the docs were silent
 
-- Missing-field names follow `kind.key` (the API.md example is `policy.pickup_window`). The others are mine: `policy.special_requests`, `policy.message_consent`, `policy.minimum_notice`, `hours.<day>`, `catalog.items`, `services`, `name`, `goal`.
+- Missing-field names follow `kind.key` (the API.md example is `policy.pickup_window`). The others are mine: `policy.special_requests`, `policy.message_consent`, `policy.min_notice` (renamed from `policy.minimum_notice` to match the fixture key `min_notice`, which the shared mock toolset reads), `hours.<day>`, `catalog.items`, `services`, `name`, `goal`.
 - Stop-condition codes: `missing_timezone` comes from API.md. `open_conflict` and `missing_message_consent_policy` are mine.
 - Owner chat answers are saved as draft facts (`sourceType: "owner_chat"`, `value: { text }`, confidence 0.8). The builder opens a `fact_edit` for each answer, using the draft subject for a new key, and the owner confirms it in chat.
 - `proposedChange` is never set yet. The builder cannot create an approval until the approval engine (B-07) exposes a function for it.
 - Preview scenarios `happy_path` and `price_injection` come from API.md. `approval_bypass` and the custom template's `happy_path` are mine.
-- Test runs pass `agentVersionId: "draft:<agt_id>"` to the tools. It is deliberately not an `agv_` ID.
+- Test runs pass `agentVersionId: "agv_draft_<agent suffix>"` to the tools. The package's `ToolContextSchema` requires an `agv_` ID, so the old `draft:<agt_id>` marker was dropped. No published version has this ID: those are `agv_` plus random hex.
 - `POST /api/builder/sessions` and `POST /api/agents` return 201.
-- Mock toolset: tax is 8.75% (it reproduces the CONTRACTS example of 4350, 381, 4731), 12:00 to 13:00 is busy every day, and an unknown quote ID is treated as `QUOTE_EXPIRED` with a fresh quote. The opening hours in `fixtures.ts` are placeholders.
+- The mock toolset is the shared one (`apps/server/src/tools/mock`), on the runner's clock. Its values come from the shared fixtures: tax 8.75%, busy calendar blocks only on 2026-11-17, an unknown quote ID answers `NOT_FOUND`, an unknown item or topping answers `ITEM_UNAVAILABLE`.
 
 ## B-24 owner voice session (2026-11-13)
 
@@ -146,6 +144,7 @@ An open required conflict from an upload reaches the builder interview as the `o
 
 - A conflict is `required: true` for a menu price or a service price that differs. It is `false` for hours, policies and other differences. The API.md 3.1 example shows a `pickup_window` conflict with `required: true`, which disagrees. Arsh should rule on it.
 - `sha256` on a file is stored as `sha256:<hex>` (DATA-MODEL check). The API.md example shows bare hex.
+- `GET /api/files/:id` returns the FileRecord itself, as the package's `getFile` response says. It returned `{ file }` before. The upload response stays `{ file }`.
 - Uploading the same bytes twice for one business returns the existing record and does not extract again. A file that failed before is run again.
 - The declared MIME type must be one of the six listed. `application/vnd.ms-excel` for a CSV, which some Windows browsers send, is refused.
 - A menu item that is not in the catalog opens no conflict. A second disagreeing draft for a key that already has an open conflict opens no new one.
@@ -174,11 +173,40 @@ A published version is a deep frozen copy of the spec. No code path updates or d
 - Pause is allowed only from `live` and does not change which agent answers the number (API.md: "The `live_agent` row does not change").
 - Rollback points the active version at the earlier one and writes no version row. A paused agent stays paused, and the draft spec is not changed.
 - `makeLive` defaults to false. If the agent already answers the number, the number follows its new version even with `makeLive: false`.
-- Publish runs the catalog sync, then checks every Builder stop condition in FLOWS before writing a version.
-- The phone number is included in the publish response only when the agent answers it afterwards. Pause returns `{ agent }`.
+- Publish runs the catalog sync on every call, then the conflict check, then spec validation, in the order API.md lists them. The other stop conditions in FLOWS (missing price, missing time zone, an integration down) are not checked at publish yet. SPEC 2.9 has a proposed ruling that publish checks all of them.
+- The publish and rollback responses always include `phoneNumber` (the package's `PublishResponse` requires it). `agent.isLiveAgent` says whether this agent answers it. Pause returns the agent summary itself (the package's `pauseAgent` response is `Agent`).
+- Rollback honors `makeLive` (it is in the package's `RollbackBodySchema`): true moves the number to the agent, as on publish.
 - Events use the `agt_` ID as `correlationId` and `actorType: "owner"`.
-- With no `TWILIO_PHONE_NUMBER`, the in-memory pointer uses the example number from API.md 3.6.
+- With no `TWILIO_PHONE_NUMBER`, the in-memory pointer uses the fixture `DEMO_PHONE_NUMBER` (the API.md 3.6 example).
 
 ### Not verified
 
 - No database, no real Square sync, no real live-agent table or route.
+
+## Contracts swap (2026-11-14)
+
+The builder now imports every schema and type from `@abos/contracts` and uses the shared mock toolset. `pending-contracts.ts`, `extraction/types.ts`, `fixtures.ts` and `runner/mock-toolset.ts` are deleted.
+
+### What changed
+
+- Registry: the rows, the tool map (`TOOL_CAPABILITY`), `toolsForCapabilities` and the bundle steps (`capabilitiesForBundle`) come from the package. `CAPABILITY_RULES`, `validateCapabilitySet`, `fitCapabilitySet` and `splitRequestedCapabilities` stay in `registry.ts`. The load-time check is `assertToolsReadOrPropose` and still stops the server if a tool maps to a write or external_message capability.
+- Tools: input schemas, descriptions and function definitions (`TOOL_INPUT_SCHEMAS`, `toolDefinitionsFor`) and `MOCK_APPROVAL_PREFIX` come from the package. Every runner guard stays.
+- Mock toolset: `runner/session-toolset.ts` routes each call to `createMockToolsetRegistry().forSession(ctx.testSessionId, ctx.businessId)`, on the runner's clock, and `reset(key)` resets that session. It refuses a call with no `testSessionId` or a context that fails `ToolContextSchema`.
+- Routes parse params, queries and bodies with the `ENDPOINTS` schemas, then apply the builder's own limits (message text 4000 characters, test message 2000, preview at most 10 scenarios of 60 characters, pause body strict). Every response is checked against the endpoint's response schema before it is sent (`respond.ts`); a mismatch answers `INTERNAL`.
+- `inputMode` is now required on `POST /api/builder/sessions/:id/messages` (the package's `BuilderMessageBodySchema`). It defaulted to `text` before.
+- The spec is checked with the package's `AgentSpecSchema` plus the builder's limits on top (`spec.ts`: name at most 80, goal 1 to 300, greeting at most 300, at least one capability). Unknown keys in a spec are now dropped instead of refused.
+- Events: both sinks are typed with the package's `ActivityEvent`. Every event goes through `assertContractEvent` (`events.ts`) before it reaches a sink. Every event the builder writes passed the check, including `fact.changed` on conflict resolve and `agent.published` with `rolledBackFrom`, so no payload changed.
+- Recorded data uses the shared fixtures: service IDs `svc_haircut`, `svc_beard_trim`, `svc_haircut_beard`, the modifier `SQ_MOD_MUSHROOMS`, the fixture opening hours, the `cat_marg_lg` style catalog row IDs and the fixture fact IDs. The recorded hours sheet and menu were moved to the fixture hours, so the hours sheet still opens one Friday conflict only.
+- The barbershop scripts look from tomorrow up to six days on for the first open day, because the shop is closed on Sunday and Monday in the fixtures. On the fixture clock (Saturday) the first open day is Tuesday 2026-11-17, where the fixture busy blocks and booked haircut leave 11:30 as the first slot.
+- The shared fixtures already hold the pizza `message_consent` policy and the barbershop `min_notice` and `message_consent` policies. The recorded interviews therefore find nothing missing. The tests that show the asking path remove those facts from the knowledge reader. The recorded replies no longer say how many things are left; the builder adds the question for each missing field.
+- Replies are plain text. The agent and builder instructions say no Markdown, and `runner/plain-text.ts` strips emphasis, list markers, headings, quotes and links from every agent reply and from the builder model's reply.
+
+### Choices made where the docs were silent
+
+- `POST /api/agents` with `{ spec }` does not require `id`, `businessId`, `version` and `status`, which the server sets. The package's `CreateAgentBodySchema` requires them. An unknown capability still answers `CAPABILITY_NOT_ALLOWED` (API.md 3.4), so the registry check runs before the schema.
+- `stopConditions` items carry `conflictIds` with `open_conflict`, and preview examples carry `guardrail` when one fired. Neither field is in the contract; both pass the contract schemas, which do not refuse extra fields.
+
+### Not verified
+
+- The shared mock toolset registry has no way to delete a session, only to reset it. Each test session and each preview scenario leaves one small instance in memory until the server restarts.
+

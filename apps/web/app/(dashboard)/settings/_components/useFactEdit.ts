@@ -1,7 +1,7 @@
 'use client';
 
 import {useEffect, useRef, useState} from 'react';
-import {useApproval, useProposeFact, type ApprovalRequest, type BusinessFact, type FactKind} from '@/lib/api';
+import {useApproval, useProposeFact, type ApprovalRequest, type BusinessFact, type FactKind, type JsonValue} from '@/lib/api';
 import {effectiveState} from '../../approvals/_lib/approval-view';
 import {useNow} from '../../approvals/_lib/useNow';
 import {asFactEdit, editPhase, pendingEditFor, type EditPhase, type FactEditApproval} from '../_lib/settings-model';
@@ -71,7 +71,8 @@ export function useFactEdit({
     if (proposeMutation.isPending) return;
     lastValue.current = value;
     proposeMutation.mutate(
-      {kind, key: factKey, value},
+      // The edited value is plain JSON from the form (ProposeFactBody.value is a JsonValue).
+      {kind, key: factKey, value: value as JsonValue},
       {
         onSuccess: ({approval: created}) => {
           setTrackedId(created.id);

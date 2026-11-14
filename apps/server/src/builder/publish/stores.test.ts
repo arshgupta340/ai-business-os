@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentSpec } from '../pending-contracts';
+import type { AgentSpec } from '@abos/contracts';
 import { InMemoryAgentDraftStore, type AgentRecord } from '../session/stores';
 import { createPublishStores } from './index';
 import { KeyedLock } from './lock';

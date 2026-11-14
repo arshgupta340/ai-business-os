@@ -1,26 +1,4 @@
-import { ApiErrorSchema, ErrorCodeSchema, type ErrorCode } from "./pending-contracts";
-
-/** HTTP status and retryable flag for each code, from docs/API.md section 2. */
-export const ERROR_CODE_INFO: Record<ErrorCode, { status: number; retryable: boolean }> = {
-  UNAUTHENTICATED: { status: 401, retryable: false },
-  FORBIDDEN_BUSINESS: { status: 403, retryable: false },
-  NOT_FOUND: { status: 404, retryable: false },
-  VALIDATION_FAILED: { status: 400, retryable: false },
-  INVALID_STATE: { status: 409, retryable: false },
-  CONFLICT_UNRESOLVED: { status: 409, retryable: false },
-  APPROVAL_EXPIRED: { status: 409, retryable: false },
-  APPROVAL_ALREADY_DECIDED: { status: 409, retryable: false },
-  PAYLOAD_HASH_MISMATCH: { status: 409, retryable: false },
-  CAPABILITY_NOT_ALLOWED: { status: 422, retryable: false },
-  INTEGRATION_UNAVAILABLE: { status: 503, retryable: true },
-  ENVIRONMENT_MISMATCH: { status: 503, retryable: false },
-  SIGNATURE_INVALID: { status: 401, retryable: false },
-  RATE_LIMITED: { status: 429, retryable: true },
-  INTERNAL: { status: 500, retryable: true },
-  QUOTE_EXPIRED: { status: 409, retryable: false },
-  ITEM_UNAVAILABLE: { status: 409, retryable: false },
-  SLOT_CONFLICT: { status: 409, retryable: false },
-};
+import { ApiErrorSchema, ERROR_CODE_INFO, ErrorCodeSchema, type ErrorCode } from "@abos/contracts";
 
 /**
  * Where the failure came from.

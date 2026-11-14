@@ -1,7 +1,8 @@
+import { ENDPOINTS } from '@abos/contracts';
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
 import { requireBusiness, type BuilderAuth } from '../auth';
 import type { BuilderSessionStore } from '../session/stores';
+import { checkedResponse } from '../respond';
 import { apiError, parseOrThrow } from '../util';
 import { parseVoiceEnv, REALTIME_MODEL } from './env';
 import { OpenAiRealtimeMinter, UnavailableRealtimeMinter, type RealtimeMinter } from './minter';
@@ -32,7 +33,6 @@ export interface VoiceRouteDeps {
   minter?: RealtimeMinter;
 }
 
-const Body = z.strictObject({ builderSessionId: z.string().regex(/^bld_[A-Za-z0-9_]{1,64}$/) });
 
 function chooseMinter(app: FastifyInstance, env: Record<string, string | undefined>): RealtimeMinter {
   const voiceEnv = parseVoiceEnv(env);
@@ -52,7 +52,7 @@ export function registerVoiceRoutes(app: FastifyInstance, deps: VoiceRouteDeps):
 
   app.post('/api/realtime/client-secret', async (request, reply) => {
     const scope = await requireBusiness(deps.auth, request);
-    const { builderSessionId } = parseOrThrow(Body, request.body ?? {});
+    const { builderSessionId } = parseOrThrow(ENDPOINTS.createRealtimeClientSecret.body, request.body ?? {});
     const session = await deps.sessions.get(scope.businessId, builderSessionId);
     if (!session) throw apiError('NOT_FOUND', 'Builder session not found.');
 
@@ -67,11 +67,11 @@ export function registerVoiceRoutes(app: FastifyInstance, deps: VoiceRouteDeps):
     const minted = await minter.mint(builderVoiceClientSecretRequest(REALTIME_MODEL));
     request.log.info({ builderSessionId, expiresAt: minted.expiresAt.toISOString() }, 'realtime client secret minted');
     reply.header('Cache-Control', 'no-store');
-    return {
+    return checkedResponse('createRealtimeClientSecret', {
       clientSecret: minted.value,
       expiresAt: minted.expiresAt.toISOString(),
       model: REALTIME_MODEL,
       builderSessionId,
-    };
+    });
   });
 }

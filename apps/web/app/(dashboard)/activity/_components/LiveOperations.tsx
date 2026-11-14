@@ -17,7 +17,7 @@ import {
   useCalls,
   useOrders,
   type ActivityFeedStatus,
-  type ActivityPayloads,
+  type ActivityEventPayloads,
 } from '@/lib/api';
 import {formatRelative} from '@/lib/format';
 import type {Tone} from '@/lib/status';
@@ -153,9 +153,9 @@ export function LiveOperations() {
       {webhooks[0] ? (
         <Banner
           status="warning"
-          title={`Rejected webhook from ${(webhooks[0].payload as unknown as ActivityPayloads['webhook.rejected']).provider === 'square' ? 'Square' : 'Twilio'}`}
+          title={`Rejected webhook from ${(webhooks[0].payload as unknown as ActivityEventPayloads['webhook.rejected']).provider === 'square' ? 'Square' : 'Twilio'}`}
           description={`${
-            (webhooks[0].payload as unknown as ActivityPayloads['webhook.rejected']).reason === 'signature_invalid'
+            (webhooks[0].payload as unknown as ActivityEventPayloads['webhook.rejected']).reason === 'signature_invalid'
               ? 'The signature did not match, so the server ignored it.'
               : 'The request was malformed, so the server ignored it.'
           } No order or payment changed. ${formatRelative(webhooks[0].occurredAt, timeZone)}.${

@@ -3,29 +3,40 @@
  * seed time and a row made by a scripted call look the same.
  */
 import {
+  APPROVAL_EXPIRY_MS,
   BUNDLE_ACTIONS,
-  type ActivityEvent,
+  cartHash,
+  payloadHash,
+  QUOTE_EXPIRY_MS,
+  toCanonicalTimestamp,
+  type ActivityEventOf,
+  type ActivityEventPayloads,
   type ActivityEventType,
-  type ActivityPayloads,
-  type ApprovalRequest,
+  type ActorType,
   type Booking,
+  type BookingApprovalRequest,
   type BusinessFact,
   type Cart,
   type CatalogItem,
   type Contact,
+  type FactEditApprovalRequest,
+  type JsonValue,
+  type MessageChannelSetting,
   type Order,
+  type OrderApprovalRequest,
+  type PriceEditApprovalRequest,
   type Quote,
-} from "@/lib/api/pending-contracts";
-import { cartHash, payloadHash } from "./hash";
+} from "@abos/contracts";
 import { MESSAGE_CHANNEL } from "./types";
 
 export const MINUTE = 60_000;
-export const APPROVAL_TTL_MS = 10 * MINUTE;
-export const QUOTE_TTL_MS = 5 * MINUTE;
+export const APPROVAL_TTL_MS = APPROVAL_EXPIRY_MS;
+export const QUOTE_TTL_MS = QUOTE_EXPIRY_MS;
 const TAX_RATE = 0.0875;
 
+/** CONTRACTS 4: every stored instant is Date.prototype.toISOString() (UTC, milliseconds, Z). */
 export function iso(ms: number): string {
-  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+  return toCanonicalTimestamp(ms);
 }
 
 let idCounter = 0;
@@ -44,10 +55,10 @@ export function makeEvent<T extends ActivityEventType>(
   businessId: string,
   type: T,
   correlationId: string,
-  actorType: ActivityEvent["actorType"],
+  actorType: ActorType,
   at: number,
-  payload: ActivityPayloads[T],
-): ActivityEvent {
+  payload: ActivityEventPayloads[T],
+): ActivityEventOf<T> {
   eventCounter += 1;
   return {
     id: `evt_${eventCounter.toString().padStart(4, "0")}${Math.random().toString(36).slice(2, 6)}`,
@@ -56,15 +67,15 @@ export function makeEvent<T extends ActivityEventType>(
     correlationId,
     actorType,
     occurredAt: iso(at),
-    payload: payload as unknown as Record<string, unknown>,
-  };
+    payload,
+  } as ActivityEventOf<T>;
 }
 
 export function last4(phone: string): string {
   return phone.slice(-4);
 }
 
-export function buildQuote(catalog: CatalogItem[], cart: Cart, at: number, quoteId = newId("qte_")): Quote {
+export async function buildQuote(catalog: CatalogItem[], cart: Cart, at: number, quoteId = newId("qte_")): Promise<Quote> {
   const lines = cart.lines.map((line) => {
     const item = catalog.find((c) => c.squareItemId === line.catalogItemId);
     const variation = item?.variations.find((v) => v.id === line.variationId);
@@ -88,7 +99,7 @@ export function buildQuote(catalog: CatalogItem[], cart: Cart, at: number, quote
   const taxMinor = Math.round(subtotalMinor * TAX_RATE);
   return {
     quoteId,
-    cartHash: cartHash(cart),
+    cartHash: await cartHash(cart),
     subtotalMinor,
     taxMinor,
     totalMinor: subtotalMinor + taxMinor,
@@ -99,7 +110,7 @@ export function buildQuote(catalog: CatalogItem[], cart: Cart, at: number, quote
   };
 }
 
-export function buildOrder(input: {
+export async function buildOrder(input: {
   id: string;
   businessId: string;
   callId: string;
@@ -108,8 +119,8 @@ export function buildOrder(input: {
   contact: Omit<Contact, "consentAt">;
   pickupAt: number;
   at: number;
-}): Order {
-  const quote = buildQuote(input.catalog, input.cart, input.at - MINUTE);
+}): Promise<Order> {
+  const quote = await buildQuote(input.catalog, input.cart, input.at - MINUTE);
   return {
     id: input.id,
     businessId: input.businessId,
@@ -120,7 +131,8 @@ export function buildOrder(input: {
     quote,
     totalMinor: quote.totalMinor,
     currency: "USD",
-    contact: { ...input.contact, consentAt: iso(input.at - 30_000) },
+    // SPEC 2.9: consentAt goes with consent; a customer who declined has no recipient and no consentAt.
+    contact: input.contact.messageConsent ? { ...input.contact, consentAt: iso(input.at - 30_000) } : { ...input.contact },
     fulfillment: { type: "pickup", pickupAt: iso(input.pickupAt) },
     createdAt: iso(input.at),
     updatedAt: iso(input.at),
@@ -128,15 +140,15 @@ export function buildOrder(input: {
 }
 
 /** messageChannel defaults to MESSAGE_CHANNEL. The mock passes "qr_only" for a call made after simulateQrOnlyChannel(). */
-export function orderApproval(
+export async function orderApproval(
   order: Order,
   agentVersionId: string,
   id: string,
   at: number,
-  messageChannel: string = MESSAGE_CHANNEL,
-): ApprovalRequest {
+  messageChannel: MessageChannelSetting = MESSAGE_CHANNEL,
+): Promise<OrderApprovalRequest> {
   const expiresAt = iso(at + APPROVAL_TTL_MS);
-  const actionBundle = [...BUNDLE_ACTIONS.order_bundle];
+  const actionBundle = [...BUNDLE_ACTIONS.order_bundle] as OrderApprovalRequest["actionBundle"];
   const payload = {
     businessId: order.businessId,
     subjectId: order.id,
@@ -153,21 +165,21 @@ export function orderApproval(
   return {
     id,
     businessId: order.businessId,
-    actorType: "deployed_agent",
-    bundleType: "order_bundle",
+    actorType: "deployed_agent" as const,
+    bundleType: "order_bundle" as const,
     actionBundle,
     subjectId: order.id,
     payload,
-    payloadHash: payloadHash(payload),
-    state: "PENDING",
+    payloadHash: await payloadHash(payload),
+    state: "PENDING" as const,
     expiresAt,
     createdAt: iso(at),
   };
 }
 
-export function bookingApproval(booking: Booking, agentVersionId: string, id: string, at: number): ApprovalRequest {
+export async function bookingApproval(booking: Booking, agentVersionId: string, id: string, at: number): Promise<BookingApprovalRequest> {
   const expiresAt = iso(at + APPROVAL_TTL_MS);
-  const actionBundle = [...BUNDLE_ACTIONS.booking_bundle];
+  const actionBundle = [...BUNDLE_ACTIONS.booking_bundle] as BookingApprovalRequest["actionBundle"];
   const payload = {
     businessId: booking.businessId,
     subjectId: booking.id,
@@ -185,31 +197,31 @@ export function bookingApproval(booking: Booking, agentVersionId: string, id: st
   return {
     id,
     businessId: booking.businessId,
-    actorType: "deployed_agent",
-    bundleType: "booking_bundle",
+    actorType: "deployed_agent" as const,
+    bundleType: "booking_bundle" as const,
     actionBundle,
     subjectId: booking.id,
     payload,
-    payloadHash: payloadHash(payload),
-    state: "PENDING",
+    payloadHash: await payloadHash(payload),
+    state: "PENDING" as const,
     expiresAt,
     createdAt: iso(at),
   };
 }
 
-export function factEditApproval(input: {
+export async function factEditApproval(input: {
   id: string;
   businessId: string;
   subjectId: string;
   kind: BusinessFact["kind"];
   key: string;
   fromVersion: number;
-  before: unknown;
-  after: unknown;
+  before: JsonValue;
+  after: JsonValue;
   at: number;
-}): ApprovalRequest {
+}): Promise<FactEditApprovalRequest> {
   const expiresAt = iso(input.at + APPROVAL_TTL_MS);
-  const actionBundle = [...BUNDLE_ACTIONS.fact_edit];
+  const actionBundle = [...BUNDLE_ACTIONS.fact_edit] as FactEditApprovalRequest["actionBundle"];
   const payload = {
     businessId: input.businessId,
     subjectId: input.subjectId,
@@ -224,19 +236,19 @@ export function factEditApproval(input: {
   return {
     id: input.id,
     businessId: input.businessId,
-    actorType: "owner",
-    bundleType: "fact_edit",
+    actorType: "owner" as const,
+    bundleType: "fact_edit" as const,
     actionBundle,
     subjectId: input.subjectId,
     payload,
-    payloadHash: payloadHash(payload),
-    state: "PENDING",
+    payloadHash: await payloadHash(payload),
+    state: "PENDING" as const,
     expiresAt,
     createdAt: iso(input.at),
   };
 }
 
-export function priceEditApproval(input: {
+export async function priceEditApproval(input: {
   id: string;
   businessId: string;
   item: CatalogItem;
@@ -244,11 +256,11 @@ export function priceEditApproval(input: {
   newPriceMinor: number;
   squareVersion: number;
   at: number;
-}): ApprovalRequest {
+}): Promise<PriceEditApprovalRequest> {
   const variation = input.item.variations.find((v) => v.id === input.variationId);
   if (!variation) throw new Error(`Unknown variation ${input.variationId}`);
   const expiresAt = iso(input.at + APPROVAL_TTL_MS);
-  const actionBundle = [...BUNDLE_ACTIONS.price_edit];
+  const actionBundle = [...BUNDLE_ACTIONS.price_edit] as PriceEditApprovalRequest["actionBundle"];
   const payload = {
     businessId: input.businessId,
     subjectId: catalogRowId(input.variationId),
@@ -264,13 +276,13 @@ export function priceEditApproval(input: {
   return {
     id: input.id,
     businessId: input.businessId,
-    actorType: "owner",
-    bundleType: "price_edit",
+    actorType: "owner" as const,
+    bundleType: "price_edit" as const,
     actionBundle,
     subjectId: payload.subjectId,
     payload,
-    payloadHash: payloadHash(payload),
-    state: "PENDING",
+    payloadHash: await payloadHash(payload),
+    state: "PENDING" as const,
     expiresAt,
     createdAt: iso(input.at),
   };

@@ -43,7 +43,7 @@ function ev(type: string, p: Record<string, unknown>): ActivityEvent {
     actorType: 'system',
     occurredAt: `2026-11-14T20:01:${String(n).padStart(2, '0')}.000Z`,
     payload: p,
-  };
+  } as ActivityEvent;
 }
 
 const started = (exe: string, actionType: string, approvalId = 'apv_1') => ev('execution.started', {executionId: exe, approvalId, actionType, stepIndex: 0, attempt: 1});

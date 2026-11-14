@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { AgentService, noLiveAgent } from '../agents';
-import { AgentSpecSchema } from '../pending-contracts';
+import { BuilderAgentSpecSchema } from '../spec';
 import { isRegisteredCapability, toolsForCapabilities, validateCapabilitySet } from '../registry';
-import { FixtureBusinessKnowledge } from './knowledge';
+import { FixtureBusinessKnowledge, type BusinessKnowledge } from './knowledge';
 import type { BuilderModel } from './model';
 import { RECORDED_SCRIPTS, RecordedBuilderModel } from './recorded-builder-model';
 import { BuilderSessionService } from './service';
@@ -10,17 +10,30 @@ import { InMemoryAgentDraftStore, InMemoryBuilderSessionStore, InMemoryDraftFact
 
 const now = () => new Date('2026-11-13T18:00:00Z');
 
-function setup(model: BuilderModel = new RecordedBuilderModel()) {
+// The shared fixtures already hold the consent and notice policies. To replay
+// the interviews that ask for them, these knowledge readers leave them out.
+function knowledgeWithout(keys: string[]): BusinessKnowledge {
+  const base = new FixtureBusinessKnowledge();
+  return {
+    async getContext(businessId) {
+      const ctx = await base.getContext(businessId);
+      return ctx && { ...ctx, verifiedFacts: ctx.verifiedFacts.filter((f) => !(f.kind === 'policy' && keys.includes(f.key))) };
+    },
+  };
+}
+const ASKING = knowledgeWithout(['message_consent', 'min_notice']);
+
+function setup(model: BuilderModel = new RecordedBuilderModel(), knowledge: BusinessKnowledge = new FixtureBusinessKnowledge()) {
   const sessions = new InMemoryBuilderSessionStore();
   const agents = new InMemoryAgentDraftStore();
   const draftFacts = new InMemoryDraftFactStore();
-  const service = new BuilderSessionService({ sessions, agents, draftFacts, knowledge: new FixtureBusinessKnowledge(), model, now });
+  const service = new BuilderSessionService({ sessions, agents, draftFacts, knowledge, model, now });
   const agentService = new AgentService({ agents, sessions, liveAgent: noLiveAgent, now });
   return { service, agentService, draftFacts };
 }
 
-async function interview(businessId: string, script: readonly string[]) {
-  const ctx = setup();
+async function interview(businessId: string, script: readonly string[], knowledge?: BusinessKnowledge) {
+  const ctx = setup(undefined, knowledge);
   const session = await ctx.service.create({ businessId, ownerId: 'usr_owner_01' });
   const turns = [];
   for (const text of script) turns.push(await ctx.service.message(businessId, session.id, { text, inputMode: 'text' }));
@@ -35,8 +48,25 @@ describe('builder interview on recorded responses', () => {
     expect(s).toMatchObject({ status: 'active', draftSpec: {}, missingFields: [], progress: { answered: 0, required: 0 } });
   });
 
-  it('pizza: classifies, asks for the consent policy, then reaches a valid draft spec', async () => {
+  it('pizza on the shared fixtures: nothing is missing, and the draft is valid after the first turn', async () => {
     const { turns, session, agentService, draftFacts } = await interview('biz_pizza_01', RECORDED_SCRIPTS.pizza);
+    expect(turns[0]!.missingFields).toEqual([]);
+    expect(turns[0]!.stopConditions).toEqual([]);
+    expect(turns[0]!.reply.evidenceRefs).toContain('fact_pizza_policy_message_consent');
+    // The consent answer in the second turn is for a field that was not missing, so no draft is written.
+    expect(await draftFacts.listBySession('biz_pizza_01', session.id)).toEqual([]);
+    const agent = await agentService.create('biz_pizza_01', { builderSessionId: session.id });
+    expect(BuilderAgentSpecSchema.safeParse(agent.draftSpec).success).toBe(true);
+  });
+
+  it('barbershop on the shared fixtures: notice and consent are already known', async () => {
+    const { turns } = await interview('biz_barber_01', RECORDED_SCRIPTS.barbershop);
+    expect(turns[0]!.missingFields).toEqual([]);
+    expect(turns[0]!.reply.evidenceRefs).toEqual(expect.arrayContaining(['fact_barber_policy_min_notice', 'fact_barber_policy_message_consent']));
+  });
+
+  it('pizza: classifies, asks for the consent policy, then reaches a valid draft spec', async () => {
+    const { turns, session, agentService, draftFacts } = await interview('biz_pizza_01', RECORDED_SCRIPTS.pizza, ASKING);
     const [first, second] = turns;
     expect(first!.draftSpec.template).toBe('restaurant_order_taker');
     expect(first!.missingFields).toEqual(['policy.message_consent']);
@@ -51,7 +81,7 @@ describe('builder interview on recorded responses', () => {
     expect(facts).toEqual([expect.objectContaining({ kind: 'policy', key: 'message_consent', status: 'draft', sourceType: 'owner_chat', sourceRef: session.id })]);
 
     const agent = await agentService.create('biz_pizza_01', { builderSessionId: session.id });
-    expect(AgentSpecSchema.safeParse(agent.draftSpec).success).toBe(true);
+    expect(BuilderAgentSpecSchema.safeParse(agent.draftSpec).success).toBe(true);
     expect(agent.draftSpec.capabilities).toEqual([
       'catalog.read',
       'business.facts.read',
@@ -66,12 +96,13 @@ describe('builder interview on recorded responses', () => {
   });
 
   it('barbershop: asks two questions, takes both answers, reaches a valid draft spec', async () => {
-    const { turns, session, agentService } = await interview('biz_barber_01', RECORDED_SCRIPTS.barbershop);
+    const { turns, session, agentService } = await interview('biz_barber_01', RECORDED_SCRIPTS.barbershop, ASKING);
     expect(turns[0]!.draftSpec.template).toBe('appointment_booker');
-    expect(turns[0]!.missingFields).toEqual(['policy.minimum_notice', 'policy.message_consent']);
+    expect(turns[0]!.missingFields).toEqual(['policy.min_notice', 'policy.message_consent']);
+    expect(turns[0]!.reply.text).toContain('How much notice do you need before an appointment?');
     expect(turns[1]!.missingFields).toEqual([]);
     const agent = await agentService.create('biz_barber_01', { builderSessionId: session.id });
-    expect(AgentSpecSchema.parse(agent.draftSpec).template).toBe('appointment_booker');
+    expect(BuilderAgentSpecSchema.parse(agent.draftSpec).template).toBe('appointment_booker');
     expect(agent.draftSpec.capabilities).toContain('booking.propose');
   });
 
@@ -83,6 +114,28 @@ describe('builder interview on recorded responses', () => {
     expect(turn.draftSpec.capabilities).not.toContain('marketing.sms.broadcast');
     expect(turn.draftSpec.template).toBe('restaurant_order_taker');
     expect(turn.reply.text).toContain('Not available, so it is not part of this agent: send marketing texts');
+  });
+
+  it('strips Markdown from the model reply before the builder adds its own lines', async () => {
+    const markdown: BuilderModel = {
+      kind: 'recorded',
+      turn: async () => ({
+        reply: 'I can build that:\n- **reads** your menu\n- sends orders for _approval_',
+        template: null,
+        capabilityIds: [],
+        unsupportedRequests: [],
+        confidence: 0.9,
+        name: null,
+        goal: null,
+        greeting: null,
+        knowledgeScopes: null,
+        answers: [],
+      }),
+    };
+    const { service } = setup(markdown);
+    const s = await service.create({ businessId: 'biz_pizza_01', ownerId: 'usr_owner_01' });
+    const turn = await service.message('biz_pizza_01', s.id, { text: 'hi', inputMode: 'voice' });
+    expect(turn.reply.text).toBe('I can build that: reads your menu. sends orders for approval.');
   });
 
   it('never trusts model output: unknown IDs, foreign answers and a greeting without disclosure are dropped', async () => {
@@ -157,7 +210,7 @@ describe('custom FAQ-only agent (B-29) on recorded responses', () => {
     expect(first.progress).toEqual({ answered: 10, required: 10 });
 
     const agent = await agentService.create('biz_pizza_01', { builderSessionId: session.id });
-    const spec = AgentSpecSchema.parse(agent.draftSpec);
+    const spec = BuilderAgentSpecSchema.parse(agent.draftSpec);
     expect(spec.template).toBe('custom');
     expect(spec.capabilities).toEqual(['catalog.read', 'business.facts.read']);
     expect(spec.greeting).toMatch(/AI assistant/);
@@ -189,7 +242,7 @@ describe('custom FAQ-only agent (B-29) on recorded responses', () => {
     expect(turn.reply.text).toContain('Not available, so it is not part of this agent: text customers promotions');
     expect(turn.missingFields).toEqual([]);
     const agent = await agentService.create('biz_pizza_01', { builderSessionId: session.id });
-    expect(toolsForCapabilities(agent.draftSpec.capabilities)).toEqual(['read_catalog', 'read_business_facts', 'quote_order']);
+    expect(toolsForCapabilities(agent.draftSpec.capabilities!)).toEqual(['read_catalog', 'read_business_facts', 'quote_order']);
   });
 
   it('removes a write capability the model picked on its own and says why', async () => {

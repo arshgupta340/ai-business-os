@@ -28,7 +28,7 @@ function version(n: number, spec: Partial<AgentSpec>, facts: {id: string; versio
     id: `agv_x_v${n}`,
     agentId: 'agt_x',
     version: n,
-    spec,
+    spec: spec as AgentSpec, // only the fields the diff reads
     knowledgeSnapshotRef: {facts, ...(catalogSyncedAt ? {catalogSyncedAt} : {})},
     createdBy: 'usr_owner_01',
     publishedAt: `2026-11-13T1${n}:00:00Z`,
@@ -169,7 +169,7 @@ describe('rollbackMarks', () => {
     actorType: 'owner',
     occurredAt: at,
     payload,
-  });
+  }) as ActivityEvent;
 
   it('marks the version that became active by rollback, newest event wins, other agents ignored', () => {
     const marks = rollbackMarks(

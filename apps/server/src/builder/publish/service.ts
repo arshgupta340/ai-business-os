@@ -1,7 +1,9 @@
+import type { AgentSpec, PublishResponse } from '@abos/contracts';
 import type { AgentService, AgentSummary } from '../agents';
+import { assertContractEvent } from '../events';
 import { assertNoOpenRequiredConflict, type ConflictStore } from '../extraction/index';
-import { AgentSpecSchema, type AgentSpec } from '../pending-contracts';
 import { getCapability, toolsForCapabilities, TOOL_CAPABILITY, validateCapabilitySet } from '../registry';
+import { BuilderAgentSpecSchema } from '../spec';
 import type { BusinessKnowledge } from '../session/knowledge';
 import type { AgentDraftStore, AgentRecord } from '../session/stores';
 import { isoZ } from '../time';
@@ -12,7 +14,6 @@ import {
   toVersionView,
   type AgentVersionRecord,
   type AgentVersionStore,
-  type AgentVersionView,
   type KnowledgeSnapshotRef,
   type LiveAgentStore,
   type PublishActivityEvent,
@@ -45,11 +46,11 @@ export interface Actor {
   correlationId: string;
 }
 
-export interface PublishResponse {
-  agent: AgentSummary;
-  version: AgentVersionView;
-  phoneNumber?: string;
-}
+// The response of publish and rollback is the package's PublishResponse:
+// `{ agent, version, phoneNumber }`, with `phoneNumber` always present. It is
+// the number this server's live-agent pointer holds, whether or not this agent
+// answers it; `agent.isLiveAgent` says whether it does.
+export type { PublishResponse };
 
 const LIVE_AGENT_LOCK = 'live_agent';
 
@@ -85,7 +86,10 @@ export class PublishService {
     });
   }
 
-  async rollback(actor: Actor, agentId: string, input: { toVersionId: string }): Promise<PublishResponse> {
+  // `makeLive` is in the package's RollbackBodySchema. As on publish, it moves
+  // the number to this agent; without it the number follows only if this
+  // agent already answers it.
+  async rollback(actor: Actor, agentId: string, input: { toVersionId: string; makeLive?: boolean }): Promise<PublishResponse> {
     return this.deps.lock.run(agentId, async () => {
       const agent = await this.getAgent(actor.businessId, agentId);
       if (agent.state === 'draft') throw apiError('INVALID_STATE', 'A draft agent has no version to roll back to.', { state: agent.state });
@@ -103,11 +107,12 @@ export class PublishService {
       // API.md 3.4 and DATA-MODEL.md 2.10: rollback points activeVersionId
       // back at the earlier version. No version row is written, edited or
       // deleted. The draft spec is left as it is.
-      return this.goLive(agent, target, { moveNumber: false, rolledBackFrom: active.id });
+      return this.goLive(agent, target, { moveNumber: input.makeLive ?? false, rolledBackFrom: active.id });
     });
   }
 
-  async pause(actor: Actor, agentId: string): Promise<{ agent: AgentSummary }> {
+  // Returns the agent summary (the package's pauseAgent response is Agent).
+  async pause(actor: Actor, agentId: string): Promise<AgentSummary> {
     return this.deps.lock.run(agentId, async () => {
       const agent = await this.getAgent(actor.businessId, agentId);
       if (agent.state !== 'live') throw apiError('INVALID_STATE', 'Only a live agent can be paused.', { state: agent.state });
@@ -116,7 +121,7 @@ export class PublishService {
       await this.deps.agents.update(updated);
       // API.md 3.4: the live_agent row does not change on pause.
       await this.event(updated.businessId, updated.id, at, { type: 'agent.paused', payload: { agentId: updated.id } });
-      return { agent: await this.deps.agentService.summary(updated) };
+      return this.deps.agentService.summary(updated);
     });
   }
 
@@ -156,7 +161,7 @@ export class PublishService {
         issues: issues.map(({ path, message }) => ({ path, message })),
       });
     }
-    const parsed = AgentSpecSchema.safeParse(candidate);
+    const parsed = BuilderAgentSpecSchema.safeParse(candidate);
     if (!parsed.success) {
       throw apiError('VALIDATION_FAILED', 'The agent spec is not complete.', {
         issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
@@ -245,14 +250,16 @@ export class PublishService {
     return {
       agent: await this.deps.agentService.summary(updated),
       version: toVersionView(version),
-      ...(answers ? { phoneNumber: this.deps.liveAgents.phoneNumber } : {}),
+      phoneNumber: this.deps.liveAgents.phoneNumber,
     };
   }
 
   // correlationId is the agt_ ID, so the agent's own activity can be
   // filtered by it.
+  // Every event is checked against the contract before it reaches the sink.
   private async event(businessId: string, agentId: string, at: string, body: Pick<PublishActivityEvent, 'type' | 'payload'>) {
-    await this.deps.events.write({ id: newId('evt_'), businessId, correlationId: agentId, actorType: 'owner', occurredAt: at, ...body } as PublishActivityEvent);
+    const event = { id: newId('evt_'), businessId, correlationId: agentId, actorType: 'owner', occurredAt: at, ...body } as PublishActivityEvent;
+    await this.deps.events.write(assertContractEvent(event));
   }
 
   private timestamp(): string {

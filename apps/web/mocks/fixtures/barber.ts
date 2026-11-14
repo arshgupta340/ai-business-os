@@ -1,5 +1,5 @@
 /** Demo Barbershop (biz_barber_01). Times are relative to `now`. */
-import type { AgentSpec, Booking, BusinessFact, Call, ServiceOffering } from "@/lib/api/pending-contracts";
+import type { AgentSpec, Booking, BusinessFact, Call, JsonValue, ServiceOffering } from "@abos/contracts";
 import { bookingApproval, iso, MINUTE } from "../builders";
 import { BARBER_CALENDAR_ID, TIMEZONE, type MockState } from "../types";
 import { History } from "./history";
@@ -60,10 +60,10 @@ function slotAt(now: number, hoursAhead: number): number {
   return d.getTime();
 }
 
-export function seedBarber(state: MockState, now: number): void {
+export async function seedBarber(state: MockState, now: number): Promise<void> {
   const h = new History(state, BARBER);
   const seedAt = now - 26 * 60 * MINUTE;
-  const f = (id: string, kind: BusinessFact["kind"], key: string, value: unknown, extra: Partial<BusinessFact> = {}): BusinessFact => ({
+  const f = (id: string, kind: BusinessFact["kind"], key: string, value: JsonValue, extra: Partial<BusinessFact> = {}): BusinessFact => ({
     id,
     businessId: BARBER,
     kind,
@@ -91,7 +91,7 @@ export function seedBarber(state: MockState, now: number): void {
   });
 
   for (const [day, value] of Object.entries(HOURS)) state.facts.push(f(`fact_barber_hours_${day}`, "hours", day, value));
-  for (const svc of BARBER_SERVICES) state.facts.push(f(`fact_barber_${svc.id}`, "service", svc.id, svc));
+  for (const svc of BARBER_SERVICES) state.facts.push(f(`fact_barber_${svc.id}`, "service", svc.id, { ...svc }));
   state.facts.push(
     f("fact_barber_notice", "policy", "minimum_notice", { minutes: 60 }),
     f("fact_barber_faq_parking", "faq", "parking", { question: "Is there parking?", answer: "Street parking out front." }),
@@ -105,7 +105,7 @@ export function seedBarber(state: MockState, now: number): void {
     name: "services.csv",
     mime: "text/csv",
     sizeBytes: 912,
-    sha256: "9a3e5f1c0b2d4e6f8a1c3e5d7b9f0a2c4e6d8f0b1a3c5e7d9f1b3a5c7e9d1f3a",
+    sha256: "sha256:9a3e5f1c0b2d4e6f8a1c3e5d7b9f0a2c4e6d8f0b1a3c5e7d9f1b3a5c7e9d1f3a",
     extractionState: "EXTRACTED",
     draftFactIds: ["fact_barber_draft_kids"],
     conflictIds: [],
@@ -164,6 +164,11 @@ export function seedBarber(state: MockState, now: number): void {
         goal: "Answer questions about services, prices, hours and parking.",
         knowledgeScopes: ["business_profile", "hours", "services", "faq"],
         capabilities: ["business.facts.read"],
+        // Complete enough to publish: AgentVersion.spec is a full AgentSpec.
+        writePolicy: "owner_approval_each_action_bundle",
+        escalation: "explain_unsupported_or_offer_callback",
+        guardrailVersion: "v1",
+        status: "draft",
       },
       createdAt: iso(now - 2 * 60 * MINUTE),
       updatedAt: iso(now - 2 * 60 * MINUTE),
@@ -172,13 +177,13 @@ export function seedBarber(state: MockState, now: number): void {
   h.emit("agent.published", BARBER_AGENT_ID, "owner", pubAt, { agentId: BARBER_AGENT_ID, agentVersionId: BARBER_AGENT_V1, version: 1 });
 
   // Calls and bookings
-  const bookingCall = (
+  const bookingCall = async (
     key: string,
     service: ServiceOffering,
     who: [string, string],
     startAt: number,
     slotStart: number,
-  ): { booking: Booking; approval: ReturnType<typeof bookingApproval>; at: number } => {
+  ): Promise<{ booking: Booking; approval: Awaited<ReturnType<typeof bookingApproval>>; at: number }> => {
     const call: Call = {
       id: `call_barber_${key}`,
       businessId: BARBER,
@@ -209,7 +214,7 @@ export function seedBarber(state: MockState, now: number): void {
       createdAt: iso(at),
       updatedAt: iso(at),
     };
-    const approval = bookingApproval(booking, BARBER_AGENT_V1, `apv_barber_${key}`, at);
+    const approval = await bookingApproval(booking, BARBER_AGENT_V1, `apv_barber_${key}`, at);
     booking.approvalId = approval.id;
     state.bookings.push(booking);
     state.approvals.push(approval);
@@ -219,20 +224,20 @@ export function seedBarber(state: MockState, now: number): void {
   };
 
   {
-    const { booking, approval, at } = bookingCall("booked", BARBER_SERVICES[0], ["Ana", "+15555550124"], now - 160 * MINUTE, slotAt(now, 20));
-    h.approvedBooking(booking, approval, at + MINUTE, "booked");
+    const { booking, approval, at } = await bookingCall("booked", BARBER_SERVICES[0], ["Ana", "+15555550124"], now - 160 * MINUTE, slotAt(now, 20));
+    await h.approvedBooking(booking, approval, at + MINUTE, "booked");
   }
   {
-    const { booking, approval, at } = bookingCall("conflict", BARBER_SERVICES[2], ["Ben", "+15555550125"], now - 120 * MINUTE, slotAt(now, 22));
-    h.approvedBooking(booking, approval, at + MINUTE, "slot_conflict");
+    const { booking, approval, at } = await bookingCall("conflict", BARBER_SERVICES[2], ["Ben", "+15555550125"], now - 120 * MINUTE, slotAt(now, 22));
+    await h.approvedBooking(booking, approval, at + MINUTE, "slot_conflict");
   }
   {
-    const { booking, approval, at } = bookingCall("rejected", BARBER_SERVICES[1], ["Cy", "+15555550126"], now - 100 * MINUTE, slotAt(now, 26));
+    const { booking, approval, at } = await bookingCall("rejected", BARBER_SERVICES[1], ["Cy", "+15555550126"], now - 100 * MINUTE, slotAt(now, 26));
     h.decide(approval, "REJECTED", booking.callId!, at + 2 * MINUTE);
     h.bookingStatus(booking, "AWAITING_OWNER_APPROVAL", "REJECTED", at + 2 * MINUTE);
   }
   {
-    const { booking, approval } = bookingCall("expired", BARBER_SERVICES[0], ["Dee", "+15555550127"], now - 80 * MINUTE, slotAt(now, 28));
+    const { booking, approval } = await bookingCall("expired", BARBER_SERVICES[0], ["Dee", "+15555550127"], now - 80 * MINUTE, slotAt(now, 28));
     h.expire(approval, booking.callId!);
     h.bookingStatus(booking, "AWAITING_OWNER_APPROVAL", "EXPIRED", Date.parse(approval.expiresAt));
   }
@@ -254,5 +259,5 @@ export function seedBarber(state: MockState, now: number): void {
     const t = h.call(call, ["INQUIRY", "SLOT_SEARCH"], "booking", now - 40 * MINUTE);
     h.endCall(call, t + 20_000);
   }
-  bookingCall("pending", BARBER_SERVICES[0], ["Eve", "+15555550128"], now - 4 * MINUTE, slotAt(now, 30));
+  await bookingCall("pending", BARBER_SERVICES[0], ["Eve", "+15555550128"], now - 4 * MINUTE, slotAt(now, 30));
 }

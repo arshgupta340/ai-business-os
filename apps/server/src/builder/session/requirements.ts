@@ -1,5 +1,4 @@
-import { DAY_KEYS } from '../fixtures';
-import type { AgentSpec, BusinessFact, CapabilityId } from '../pending-contracts';
+import { HoursKeySchema, type BusinessFact, type CapabilityId, type DraftAgentSpec, type StopCondition } from '@abos/contracts';
 import type { BusinessContext } from './knowledge';
 
 // Missing-field computation (FLOWS.md step A6): the union of the details each
@@ -15,6 +14,8 @@ export interface FieldRule {
   question: string;
 }
 
+const DAY_KEYS = HoursKeySchema.options;
+
 const hoursRules: FieldRule[] = DAY_KEYS.map((d) => ({
   field: `hours.${d}`,
   answerableInChat: true,
@@ -28,7 +29,7 @@ const RULES: Record<string, FieldRule> = Object.fromEntries(
     { field: 'policy.pickup_window', answerableInChat: true, question: 'How many minutes after ordering can a customer pick up?' },
     { field: 'policy.special_requests', answerableInChat: true, question: 'Do you accept special requests on an order, such as "light sauce"?' },
     { field: 'policy.message_consent', answerableInChat: true, question: 'How should the agent ask the customer for consent before it sends them a text message?' },
-    { field: 'policy.minimum_notice', answerableInChat: true, question: 'How much notice do you need before an appointment?' },
+    { field: 'policy.min_notice', answerableInChat: true, question: 'How much notice do you need before an appointment?' },
     { field: 'services', answerableInChat: false, question: 'Which services do you offer, and how long does each take? You can upload a service list.' },
     { field: 'name', answerableInChat: false, question: 'What should the agent be called?' },
     { field: 'goal', answerableInChat: false, question: 'In one sentence, what should the agent do?' },
@@ -43,7 +44,7 @@ const CAPABILITY_FIELDS: Partial<Record<CapabilityId, string[]>> = {
   'order.propose': ['policy.pickup_window', 'policy.special_requests'],
   'message.checkout.send': ['policy.message_consent'],
   'calendar.availability.read': ['services'],
-  'booking.propose': ['policy.minimum_notice'],
+  'booking.propose': ['policy.min_notice'],
   'message.booking.confirm': ['policy.message_consent'],
 };
 
@@ -53,7 +54,7 @@ export function fieldRule(field: string): FieldRule | undefined {
   return RULES[field];
 }
 
-export function requiredFields(spec: Partial<AgentSpec>): string[] {
+export function requiredFields(spec: DraftAgentSpec): string[] {
   if (!spec.template) return [];
   const out: string[] = [];
   const add = (f: string) => {
@@ -72,7 +73,7 @@ export interface FieldStatus {
 }
 
 export function computeFieldStatus(
-  spec: Partial<AgentSpec>,
+  spec: DraftAgentSpec,
   context: BusinessContext,
   sessionDrafts: readonly BusinessFact[],
 ): FieldStatus {
@@ -89,7 +90,7 @@ export function computeFieldStatus(
 }
 
 // false: missing. true: satisfied with no fact to cite. string: the fact ID.
-function satisfiedBy(field: string, spec: Partial<AgentSpec>, context: BusinessContext, facts: readonly BusinessFact[]): boolean | string {
+function satisfiedBy(field: string, spec: DraftAgentSpec, context: BusinessContext, facts: readonly BusinessFact[]): boolean | string {
   if (field === 'name') return Boolean(spec.name);
   if (field === 'goal') return Boolean(spec.goal);
   if (field === 'catalog.items') return context.catalogItemCount > 0;
@@ -101,14 +102,16 @@ function satisfiedBy(field: string, spec: Partial<AgentSpec>, context: BusinessC
 }
 
 // PRD section 6 stop conditions that the builder can see during the interview.
-// The codes are the builder's own (API.md gives only "missing_timezone").
-export interface StopCondition {
+// The codes are the builder's own (API.md gives only "missing_timezone"). The
+// contract's StopCondition is `{ code }`; `conflictIds` is an extra field the
+// builder sends with `open_conflict` (see docs/notes-saina.md).
+export interface BuilderStopCondition extends StopCondition {
   code: 'missing_timezone' | 'open_conflict' | 'missing_message_consent_policy';
   conflictIds?: string[];
 }
 
-export function stopConditions(spec: Partial<AgentSpec>, context: BusinessContext, status: FieldStatus): StopCondition[] {
-  const out: StopCondition[] = [];
+export function stopConditions(spec: DraftAgentSpec, context: BusinessContext, status: FieldStatus): BuilderStopCondition[] {
+  const out: BuilderStopCondition[] = [];
   if (!context.profile.timezone) out.push({ code: 'missing_timezone' });
   if (context.openRequiredConflictIds.length > 0) out.push({ code: 'open_conflict', conflictIds: [...context.openRequiredConflictIds] });
   const sendsMessages = (spec.capabilities ?? []).some((c) => c === 'message.checkout.send' || c === 'message.booking.confirm');

@@ -28,6 +28,15 @@ import {describeEvent} from './describe';
 import {actionLabel, deriveJourney, isHalted, syncStatusView, type Journey, type JourneyInput} from './journey';
 import {JourneyStepper, NoticeView, Panel, useNow} from './ui';
 
+/** A customer who declined messages has no recipient (SPEC 2.9), so nothing is sent. */
+function lastFourOrUndefined(recipient: string | undefined): string | undefined {
+  return recipient === undefined ? undefined : lastFour(recipient);
+}
+
+function recipientSentence(lead: string, last4: string | undefined): string {
+  return last4 === undefined ? 'The customer declined messages, so nothing is sent.' : `${lead} the number ending in ${last4}.`;
+}
+
 export function callTitle(journey: Journey, agents: Agent[] | undefined): string {
   const agent = agents?.find((a) => a.id === journey.call?.agentId);
   const simulated = journey.call?.channel === 'test_console' || journey.events.some((e) => e.type === 'call.started' && e.payload.channel === 'test_console');
@@ -69,8 +78,8 @@ function OrderProposal({journey, timeZone}: {journey: Journey; timeZone: string}
     <Panel title="Proposal">
       <HStack gap={2} wrap="wrap" vAlign="center">
         <Text type="body">
-          For {order.contact.name}, pickup at {formatTime(order.fulfillment.pickupAt, timeZone)}. Link goes to the number ending in{' '}
-          {journey.approval?.recipientLast4 ?? lastFour(order.contact.messageRecipient)}.
+          For {order.contact.name}, pickup at {formatTime(order.fulfillment.pickupAt, timeZone)}.{' '}
+          {recipientSentence('Link goes to', journey.approval?.recipientLast4 ?? lastFourOrUndefined(order.contact.messageRecipient))}
         </Text>
       </HStack>
       <List hasDividers density="balanced">
@@ -119,8 +128,8 @@ function BookingProposal({journey}: {journey: Journey}) {
           {formatDateTime(booking.startUtc, booking.timezone)} to {formatTime(booking.endUtc, booking.timezone)} ({booking.timezone})
         </Text>
         <Text type="body">
-          For {booking.customer.name}. Confirmation goes to the number ending in{' '}
-          {journey.approval?.recipientLast4 ?? lastFour(booking.customer.messageRecipient)}.
+          For {booking.customer.name}.{' '}
+          {recipientSentence('Confirmation goes to', journey.approval?.recipientLast4 ?? lastFourOrUndefined(booking.customer.messageRecipient))}
         </Text>
         {journey.bookedVerified && booking.googleEventId ? (
           <Text type="supporting">Google Calendar event {booking.googleEventId}</Text>

@@ -5,7 +5,7 @@
  * approvals, and answers errors with the API.md envelope and real codes.
  */
 import { delay, http, HttpResponse, type HttpResponseResolver } from "msw";
-import { ERROR_CODE_INFO } from "@/lib/api/errors";
+import { ERROR_CODE_INFO } from "@abos/contracts";
 import * as db from "./db";
 import * as scripts from "./scripts";
 import { latencyMs } from "./scheduler";
@@ -26,7 +26,7 @@ function errorResponse(err: db.MockHttpError, correlationId: string) {
       retryable: info.retryable,
       ...(err.details ? { details: err.details } : {}),
     },
-    { status: info.status, headers: { "X-Correlation-Id": correlationId } },
+    { status: info.httpStatus, headers: { "X-Correlation-Id": correlationId } },
   );
 }
 
@@ -36,6 +36,7 @@ function route(fn: (ctx: Ctx) => unknown | Promise<unknown>, okStatus = 200): Ht
     const correlationId = correlation(request);
     await delay(latencyMs());
     try {
+      await db.ready();
       db.sweepExpired();
       const result = await fn({ url: new URL(request.url), request, params: params as Record<string, string>, correlationId });
       if (result instanceof Response) {
@@ -92,14 +93,14 @@ export const handlers = [
         throw new db.MockHttpError("VALIDATION_FAILED", "Send kind and key, or resolvesConflictId.", { issues: [{ path: "kind", message: "Required" }] });
       }
       if (!("value" in body)) throw new db.MockHttpError("VALIDATION_FAILED", "value is required.", { issues: [{ path: "value", message: "Required" }] });
-      return db.proposeFact(businessId, body as never);
+      return await db.proposeFact(businessId, body as never);
     }, 201),
   ),
   http.get(`${A}/businesses/:id/catalog`, route((ctx) => db.getCatalog(pathBiz(ctx)))),
   http.post(`${A}/businesses/:id/catalog/sync`, route((ctx) => db.syncCatalog(pathBiz(ctx)), 202)),
   http.post(
     `${A}/businesses/:id/catalog/prices/propose`,
-    route(async (ctx) => db.proposePrice(pathBiz(ctx), (await json(ctx)) as never), 201),
+    route(async (ctx) => await db.proposePrice(pathBiz(ctx), (await json(ctx)) as never), 201),
   ),
   http.post(
     `${A}/conflicts/:id/resolve`,
@@ -123,10 +124,11 @@ export const handlers = [
       }
       const blob = file as File;
       const bytes = blob.size <= db.MAX_UPLOAD_BYTES ? new Uint8Array(await blob.arrayBuffer()) : new Uint8Array();
-      return { file: db.createFile(businessId, { name: blob.name || "upload", mime: blob.type, size: blob.size, bytes }) };
+      return { file: await db.createFile(businessId, { name: blob.name || "upload", mime: blob.type, size: blob.size, bytes }) };
     }, 202),
   ),
-  http.get(`${A}/files/:id`, route((ctx) => ({ file: db.getFile(biz(ctx), ctx.params.id) }))),
+  // API 3.2: the bare FileRecord, not wrapped in { file }.
+  http.get(`${A}/files/:id`, route((ctx) => db.getFile(biz(ctx), ctx.params.id))),
 
   // ------------------------------------------------------------ 3.3
   http.post(
@@ -139,7 +141,7 @@ export const handlers = [
   http.get(`${A}/builder/sessions/:id`, route((ctx) => scripts.builderSessionView(biz(ctx), ctx.params.id))),
   http.post(
     `${A}/builder/sessions/:id/messages`,
-    route(async (ctx) => scripts.sendBuilderMessage(biz(ctx), ctx.params.id, await json(ctx))),
+    route(async (ctx) => await scripts.sendBuilderMessage(biz(ctx), ctx.params.id, await json(ctx))),
   ),
 
   // ------------------------------------------------------------ 3.4
@@ -155,7 +157,7 @@ export const handlers = [
     route(async (ctx) => {
       const businessId = biz(ctx);
       const agent = db.agentView(db.getAgentRecord(businessId, ctx.params.id));
-      return scripts.testTurn(businessId, agent, await json(ctx));
+      return await scripts.testTurn(businessId, agent, await json(ctx));
     }),
   ),
   http.post(
@@ -163,7 +165,7 @@ export const handlers = [
     route(async (ctx) => {
       const businessId = biz(ctx);
       const agent = db.agentView(db.getAgentRecord(businessId, ctx.params.id));
-      return scripts.simCallTurn(businessId, agent, await json(ctx));
+      return await scripts.simCallTurn(businessId, agent, await json(ctx));
     }),
   ),
   http.post(`${A}/agents/:id/publish`, route(async (ctx) => db.publishAgent(biz(ctx), ctx.params.id, await json(ctx)))),
@@ -190,7 +192,7 @@ export const handlers = [
       scripts.getBuilderSession(businessId, body.builderSessionId);
       return {
         clientSecret: "ek_mock_not_a_real_secret",
-        expiresAt: new Date(Date.now() + 60_000).toISOString().replace(/\.\d{3}Z$/, "Z"),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
         model: "gpt-realtime-2.1",
         builderSessionId: body.builderSessionId,
       };
@@ -211,7 +213,7 @@ export const handlers = [
     `${A}/approvals/:id/decision`,
     route(async (ctx) => {
       const businessId = biz(ctx);
-      const result = db.decideApproval(businessId, ctx.params.id, await json(ctx), ctx.request.headers.get("Idempotency-Key"));
+      const result = await db.decideApproval(businessId, ctx.params.id, await json(ctx), ctx.request.headers.get("Idempotency-Key"));
       return HttpResponse.json(result.body as never, { status: result.status });
     }),
   ),

@@ -1,3 +1,4 @@
+import { REALTIME_MODEL as CONTRACT_REALTIME_MODEL } from '@abos/contracts';
 import { z } from 'zod';
 
 // Owner voice reads its own variables here so it does not touch the shared
@@ -8,7 +9,7 @@ import { z } from 'zod';
 // is the literal "gpt-realtime-2.1" (docs/CONTRACTS.md). Any other value would
 // make the response break the contract, so voice is refused instead.
 
-export const REALTIME_MODEL = 'gpt-realtime-2.1' as const;
+export const REALTIME_MODEL = CONTRACT_REALTIME_MODEL;
 
 const blankToUndefined = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? undefined : v);
 

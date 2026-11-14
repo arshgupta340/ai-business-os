@@ -1,7 +1,6 @@
 import OpenAI from 'openai';
 import type { ResponseInputItem } from 'openai/resources/responses/responses';
-import { z } from 'zod';
-import { TOOL_DESCRIPTIONS, ToolInputSchemas, type ToolName } from '../pending-contracts';
+import { toolDefinitionsFor, type ToolName } from '@abos/contracts';
 import { AgentModelUnavailable, type AgentModel, type AgentTurnInput } from './agent-model';
 
 // The real agent model for text runs: OpenAI Responses API with function tools.
@@ -17,11 +16,11 @@ export interface ResponsesCreateClient {
 
 const MAX_ROUNDS = 6;
 
+// The package's function definitions (name, description, JSON parameters),
+// in the order the runner allows them.
 export function toolDefinitions(tools: readonly ToolName[]) {
-  return tools.map((name) => {
-    const { $schema: _ignored, ...parameters } = z.toJSONSchema(ToolInputSchemas[name]) as Record<string, unknown>;
-    return { type: 'function' as const, name, description: TOOL_DESCRIPTIONS[name], parameters, strict: false };
-  });
+  const defs = toolDefinitionsFor(tools);
+  return tools.flatMap((name) => defs.filter((d) => d.name === name)).map((d) => ({ ...d, strict: false }));
 }
 
 export class OpenAiAgentModel implements AgentModel {
