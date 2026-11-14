@@ -209,10 +209,9 @@ describe("files and conflicts", () => {
     expect((again as ApiError).code).toBe("INVALID_STATE");
   });
 
-  // Mismatch (server): uploads, their draft facts and their conflicts are kept in the builder's
-  // in-memory stores (apps/server/src/compose/index.ts), while GET /api/businesses/:id/facts reads
-  // fact_conflicts in the database, so a conflict from an upload never reaches the Knowledge screen.
-  it.fails("a conflict an upload opened is listed by getFacts, so the Knowledge screen can show it", async () => {
+  // Uploads, their draft facts and their conflicts are rows in the database (#116), the same rows
+  // GET /api/businesses/:id/facts reads, so a conflict from an upload reaches the Knowledge screen.
+  it("a conflict an upload opened is listed by getFacts, so the Knowledge screen can show it", async () => {
     const res = await api.getFacts(BARBER);
     const files = s.requests.filter((r) => r.url.pathname.startsWith("/api/files/"));
     expect(files.length).toBeGreaterThan(0);
@@ -221,6 +220,11 @@ describe("files and conflicts", () => {
 
   describe("a conflict stored in the database", () => {
     beforeAll(async () => {
+      // The menu uploads above opened a conflict for this same key in the database (#116), and only
+      // one conflict per key may be open. It is removed so the fixture row can stand in for it.
+      await s.world.t.admin((q) =>
+        q.query("delete from public.fact_conflicts where business_id = $1 and kind = 'menu_item' and key = $2 and state = 'open'", [PIZZA, menuPriceConflict.key]),
+      );
       await s.world.t.admin((q) =>
         q.query(
           "insert into public.fact_conflicts (id, business_id, kind, key, candidates, required, state) values ($1, $2, 'menu_item', $3, $4::jsonb, true, 'open')",
