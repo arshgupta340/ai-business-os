@@ -6,6 +6,7 @@
 //   node scripts/board.mjs claim <ID>          assign yourself, mark it in progress
 //   node scripts/board.mjs done <ID>           clear the in-progress mark (the pull request closes the issue)
 //   node scripts/board.mjs render              rewrite the task tables in docs/WORKPLAN.md from tasks.json
+//   node scripts/board.mjs sync                make the board Status column match the issues
 //
 // One-time setup commands (already run when the repo was created):
 //   setup-labels, setup-issues, setup-project
@@ -201,6 +202,22 @@ const cmds = {
     console.log(`${id}: in-progress mark cleared. The issue closes when its pull request merges with "Closes #${map.issues[id]}".`);
   },
 
+  // Make the board's Status column match the issues: closed is Done,
+  // status:doing is In Progress, everything else is Todo.
+  sync() {
+    const map = loadMap();
+    const issues = fetchIssues();
+    const tally = { Done: 0, 'In Progress': 0, Todo: 0 };
+    for (const t of tasks) {
+      const i = issues[t.id];
+      if (!i) continue;
+      const name = i.state === 'CLOSED' ? 'Done' : i.labels.includes('status:doing') ? 'In Progress' : 'Todo';
+      setBoardStatus(map, t.id, name);
+      tally[name]++;
+    }
+    console.log(`board synced: ${tally.Done} done, ${tally['In Progress']} in progress, ${tally.Todo} to do`);
+  },
+
   render() {
     const map = loadMap();
     const link = (id) => (map.issues[id] ? `#${map.issues[id]}` : '');
@@ -236,7 +253,7 @@ function setBoardStatus(map, id, name) {
 
 const [cmd, ...args] = process.argv.slice(2);
 if (!cmds[cmd]) {
-  console.log('usage: node scripts/board.mjs <list|next|claim|done|render> [arg]');
+  console.log('usage: node scripts/board.mjs <list|next|claim|done|sync|render> [arg]');
   process.exit(cmd ? 1 : 0);
 }
 cmds[cmd](...args);
