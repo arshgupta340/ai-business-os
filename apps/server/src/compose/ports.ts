@@ -172,10 +172,18 @@ function toolReason(error: unknown): ToolFailureReason {
 }
 
 /**
- * Results by operation ID, so a retry of one operation returns its stored result instead of a second
- * proposal. INTEGRATION GAP (voice NOTES 1 and 2): this is per process. Cross-process uniqueness needs a
- * routine with a unique (business_id, call_id, operation_id), which 0005 does not have. Within one
- * process the engine's own replay (same call and cart returns the stored pending proposal) also holds.
+ * Results by operation ID, so a retry of one operation in this process returns its stored result
+ * without another engine transaction. It is a shortcut, not the guarantee, and it is empty after a
+ * restart (issue #93 "smaller").
+ *
+ * The guarantee is in the database and holds across restarts and server processes: the engine looks a
+ * proposal up by its natural key before it creates one. An order is unique per business, call and cart
+ * (orders constraint, 0002) and a booking per business, call, service and start
+ * (bookings_one_proposal_per_call_slot, 0002). A repeat with the same details returns the stored pending
+ * proposal; a repeat with other details, or after the owner decided, is refused and stores nothing.
+ *
+ * What the database does not have is a unique (business_id, call_id, operation_id): the operation ID
+ * itself is not stored. So after a restart a repeat is recognized by what it proposes, not by its ID.
  */
 const OPERATION_MEMORY = 500;
 function operationMemo() {

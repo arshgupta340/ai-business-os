@@ -298,6 +298,27 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
       try {
         return await db.transaction(async (tx) => {
           await assertCall(tx, input.businessId, callId, input.agentVersionId);
+          // Issue #93 "smaller": a repeated propose for the same call, service and start returns the stored
+          // proposal, as an order repeat does. The database allows one booking row per call and slot
+          // (bookings_one_proposal_per_call_slot, 0002), and assertCall holds the call row, so this lookup
+          // and the insert below cannot interleave with another proposal of this call. The answer comes
+          // from the database, so it is the same after a restart and from another server process.
+          const startIso = new Date(input.startUtc).toISOString();
+          const stored = await one(tx, 'select * from public.bookings where business_id=$1 and call_id=$2 and service_id=$3 and start_utc=$4 for update', [input.businessId, callId, input.serviceId, startIso]);
+          if (stored) {
+            const pendingRow = await one(tx, `select * from public.approval_requests where business_id=$1 and subject_id=$2 and bundle_type='booking_bundle' and state='PENDING'
+              order by created_at desc limit 1`, [input.businessId, stored.id]);
+            const approval = pendingRow ? approvalFromRow(pendingRow) : undefined;
+            if (stored.status !== 'AWAITING_OWNER_APPROVAL' || !approval) throw new PolicyError('INVALID_STATE', 'This slot was already proposed on this call and is no longer waiting for the owner.');
+            const had = BookingSchema.parse(mapRow(stored));
+            const material = (c: typeof customer) => ({ name: c.name, messageRecipient: c.messageRecipient ?? null, messageConsent: c.messageConsent });
+            const same = canonicalJson(material(had.customer)) === canonicalJson(material(customer))
+              && new Date(had.endUtc).toISOString() === new Date(input.endUtc).toISOString() && had.calendarId === input.calendarId
+              && (approval.payload as { messageChannel?: string }).messageChannel === channel;
+            // The owner only ever approves the details the caller confirmed: a changed name, number or channel is refused.
+            if (!same) throw new PolicyError('INVALID_STATE', 'A proposal for this slot is already waiting for the owner with different details.');
+            return { booking: { ...had, approvalId: approval.id }, approval };
+          }
           const at = await dbNow(tx);
           const createdAt = at.toISOString();
           const expiresAt = new Date(at.getTime() + APPROVAL_EXPIRY_MS).toISOString();
