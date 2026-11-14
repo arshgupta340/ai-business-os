@@ -37,6 +37,8 @@ import { createHealthMonitor, type HealthMonitor } from './health';
 import { createTelemetry, type TelemetryPluginOptions } from '../telemetry/index';
 import { mapRow } from '../api/rows';
 import type { PricesDependencies } from '../api/prices/index';
+import type { RecoveryPorts } from '../api/recovery/index';
+import { createDbRecoveryPorts } from './recovery';
 import { createProposeFactFromChat, dbAgentDraftStore, dbBuilderSessionStore, dbBusinessKnowledge, dbDraftFactStore, dbLiveAgentReader, type ProposeFactFromChat } from './builder';
 import { notWiredExecutor, notWiredWebhooks, type Executor, type ExecutorFactory, type SeamDeps, type WebhooksFactory } from './seams';
 
@@ -86,6 +88,8 @@ export interface ComposedServer {
   webhooksPlugin: FastifyPluginAsync;
   /** The database webhooks wiring, when it is the one in use (jobs, recovery, reconciliation). */
   webhooks: DbWebhooks | undefined;
+  /** POST /api/orders/:id/cancel and /api/executions/:id/resolve (B-32), on the 0005 routines. */
+  recovery: RecoveryPorts;
   /** POST /api/businesses/:id/catalog/prices/propose (B-26): owner, catalog row, Square read, approval. */
   prices: PricesDependencies;
   /** Integration health: configuration plus cached read-only probe results (API 3.11). */
@@ -177,6 +181,8 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     },
   };
 
+  const recovery = createDbRecoveryPorts({ db, now, newId, providers, reconcile: webhooks ? () => webhooks.reconcileNow() : undefined });
+
   // P-11 price change: a proposal reads Square's current price and stores a pending price_edit approval.
   // The global guard has already authenticated the owner and checked the business (auth/verify.ts).
   const prices: PricesDependencies = {
@@ -255,7 +261,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
 
   let sweep: ReturnType<typeof setInterval> | undefined;
   return {
-    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, prices, telemetry: telemetryOptions, health, now, newId,
+    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, prices, recovery, telemetry: telemetryOptions, health, now, newId,
     async close() { if (pool) await pool.end(); },
     startJobs() {
       if (!hasDb || sweep) return;

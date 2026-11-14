@@ -8,6 +8,7 @@ import { healthRoutes } from './api/health';
 import { apiRoutes } from './api/routes';
 import { registerSimCall } from './api/simcall/index';
 import { pricesPlugin } from './api/prices/index';
+import { createRecoveryPlugin } from './api/recovery/index';
 import { createAuthGuard, routeAuthPolicyOf, withAuthPolicy, type RouteAuthPolicy } from './auth/verify';
 import { builderPlugin } from './builder/index';
 import { composeServer, type ComposeOptions, type ComposedServer } from './compose/index';
@@ -125,6 +126,9 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
 
   // P-11 price change proposals (B-26). The global guard authenticates the owner and the business first.
   await app.register(withAuthPolicy('owner', pricesPlugin), composed.prices);
+
+  // Order cancel and NEEDS_REVIEW resolution (B-32). The plugin re-checks the owner and the business.
+  await app.register(withAuthPolicy('owner', createRecoveryPlugin(composed.recovery)));
 
   // GET /api/telemetry (B-30). The global guard has already authenticated the owner.
   await app.register(withAuthPolicy('owner', telemetryPlugin), composed.telemetry);
