@@ -171,3 +171,37 @@ describe('builder routes: Flow A on recorded responses', () => {
     expect(res.json().code).toBe('NOT_FOUND');
   });
 });
+
+describe('builder routes: FAQ-only custom agent (B-29)', () => {
+  it('interview, draft, preview with three scenarios and the test console, all on mock tools', async () => {
+    const { last, created } = await buildAgent(PIZZA, [RECORDED_SCRIPTS.faq[0]]);
+    expect(last).toMatchObject({ missingFields: [], unsupportedRequests: [], stopConditions: [] });
+    expect(created.statusCode).toBe(201);
+    const agent = created.json();
+    expect(agent).toMatchObject({ template: 'custom', state: 'draft', draftSpec: { capabilities: ['catalog.read', 'business.facts.read'] } });
+
+    const p = (await post(`/api/agents/${agent.id}/preview?${PIZZA}`)).json();
+    expect(p.permissions).toEqual({ readOnly: ['catalog.read', 'business.facts.read'], proposes: [], approvalRequired: [] });
+    expect(p.examples.map((e: { scenario: string }) => e.scenario)).toEqual(['happy_path', 'unsupported_order', 'order_injection']);
+    const [happy, order, injection] = p.examples;
+    expect(happy.toolTrace.map((t: { tool: string }) => t.tool)).toEqual(['read_business_facts', 'read_catalog']);
+    expect(happy.transcript[1].text).toBe('On Saturday we are open from 11 am to 10 pm.');
+    expect(order.toolTrace).toEqual([]);
+    expect(order.transcript[1].text).toMatch(/^I cannot take orders on this call\./);
+    expect(injection.guardrail).toEqual({ refused: true, rule: 'unsupported_request' });
+    expect(injection.toolTrace).toEqual([]);
+    expect(approvalIds(p)).toEqual([]);
+
+    const t = (await post(`/api/agents/${agent.id}/test?${PIZZA}`, { message: AGENT_SCRIPTS.faqMenu })).json();
+    expect(t.toolTrace).toMatchObject([{ tool: 'read_catalog', effect: 'read', mocked: true }]);
+  });
+
+  it('rejects a spec whose capabilities do not fit together with CAPABILITY_NOT_ALLOWED', async () => {
+    const res = await post(`/api/agents?${PIZZA}`, {
+      spec: { template: 'custom', name: 'X', channel: 'phone', goal: 'Y', knowledgeScopes: [], capabilities: ['business.facts.read', 'message.checkout.send'], writePolicy: 'owner_approval_each_action_bundle', escalation: 'explain_unsupported_or_offer_callback', guardrailVersion: 'v1' },
+    });
+    expect(res.statusCode).toBe(422);
+    expect(res.json()).toMatchObject({ code: 'CAPABILITY_NOT_ALLOWED' });
+    expect(JSON.stringify(res.json())).toContain('message.checkout.send runs only inside an approved bundle');
+  });
+});
