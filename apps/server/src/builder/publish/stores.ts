@@ -23,6 +23,9 @@ export interface AgentVersionRecord {
   knowledgeSnapshotRef: KnowledgeSnapshotRef;
   guardrailVersion: 'v1';
   createdBy: string; // usr_
+  // The display name of that user, when the store can load it. The in-memory
+  // store has no users, so it leaves this out.
+  createdByName?: string;
   createdAt: string;
   publishedAt: string;
 }
@@ -38,6 +41,7 @@ export function toVersionView(v: AgentVersionRecord): AgentVersionView {
     spec: v.spec,
     knowledgeSnapshotRef: v.knowledgeSnapshotRef,
     createdBy: v.createdBy,
+    ...(v.createdByName ? { createdByName: v.createdByName } : {}),
     publishedAt: v.publishedAt,
   };
 }
