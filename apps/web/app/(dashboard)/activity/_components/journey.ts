@@ -740,3 +740,64 @@ export function subjectIdFromEvents(events: ActivityEvent[]): {orderId?: string;
 export function rejectedWebhooks(events: ActivityEvent[]): (ActivityEvent & {type: 'webhook.rejected'})[] {
   return mergeEvents(events).filter(is('webhook.rejected')).reverse();
 }
+
+/**
+ * Who or what the call waits on now, in a few words for the back of the room.
+ * `who` is the party ("You", "Square", "The customer"); `what` says what for.
+ * Derived only from states already shown, so it never claims more than they do.
+ */
+export function waitingOn(journey: Journey): {who: string; what: string} {
+  const order = journey.order;
+  const booking = journey.booking;
+  if (journey.approval?.state === 'PENDING') return {who: 'You', what: 'Approve or reject the request.'};
+  if (journey.notices.some((n) => n.key.startsWith('review_') || n.key === 'retry' || n.key === 'recovery')) {
+    return {who: 'You', what: 'A step needs your review. Read the note below.'};
+  }
+  if (order) {
+    switch (order.status) {
+      case 'APPROVED':
+      case 'CREATING_CHECKOUT':
+        return {who: 'Square (sandbox)', what: 'Creating the checkout link.'};
+      case 'PAYMENT_LINK_READY':
+        return journey.message?.status === 'SKIPPED' || journey.message?.status === 'NOT_STARTED'
+          ? {who: 'The customer', what: 'Paying with the QR code (sandbox).'}
+          : {who: 'The message channel', what: 'Sending the link to the customer.'};
+      case 'MESSAGE_SENT':
+      case 'PAYMENT_PENDING':
+        return {who: 'The customer', what: 'Paying with the link (sandbox). Square confirms it.'};
+      case 'PAID_VERIFIED':
+      case 'FULFILLMENT_READY':
+        if (!journey.paidVerified) return {who: 'Square (sandbox)', what: 'Confirming the payment.'};
+        if (journey.sync && journey.sync.status !== 'DONE' && journey.sync.status !== 'FAILED') {
+          return {who: 'Google Sheets', what: 'Adding the report row. The order is paid.'};
+        }
+        return {who: 'Nothing', what: 'Paid and verified. Make the order.'};
+      case 'PAYMENT_FAILED':
+        return {who: 'You', what: 'The payment failed. Call the customer back if you want.'};
+      case 'RECOVERY_REQUIRED':
+        return {who: 'You', what: 'A step needs your review. Read the note below.'};
+      default:
+        return {who: 'Nothing', what: 'Closed. Nothing was charged.'};
+    }
+  }
+  if (booking) {
+    switch (booking.status) {
+      case 'RECHECKING_SLOT':
+        return {who: 'Google Calendar', what: 'Checking the slot and creating the event.'};
+      case 'BOOKED_VERIFIED':
+        if (!journey.bookedVerified) return {who: 'Google Calendar', what: 'Confirming the booking.'};
+        if (journey.sync && journey.sync.status !== 'DONE' && journey.sync.status !== 'FAILED') {
+          return {who: 'Google Sheets', what: 'Adding the report row. The booking stands.'};
+        }
+        return {who: 'Nothing', what: 'Booked and verified.'};
+      case 'SLOT_CONFLICT':
+        return {who: 'You', what: 'The slot was taken. A new time needs a new request.'};
+      case 'RETRY_REQUIRED':
+        return {who: 'You', what: 'Check Google Calendar. Read the note below.'};
+      default:
+        return {who: 'Nothing', what: 'Closed. Nothing was booked.'};
+    }
+  }
+  if (!journey.finished) return {who: 'The caller', what: 'The agent is on the call.'};
+  return {who: 'Nothing', what: 'The call ended without a proposal.'};
+}

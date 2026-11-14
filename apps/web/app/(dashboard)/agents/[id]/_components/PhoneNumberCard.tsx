@@ -34,7 +34,7 @@ export function PhoneNumberCard({businessId, agent, timeZone}: {businessId: stri
   if (liveAgent.isPending) {
     body = <LoadingState label="Checking the phone number" />;
   } else if (liveAgent.error) {
-    body = <ErrorNotice error={liveAgent.error} context="load" onRetry={() => void liveAgent.refetch()} />;
+    body = <ErrorNotice error={liveAgent.error} context="load" title="Could not load the phone number" onRetry={() => void liveAgent.refetch()} />;
   } else {
     const live = liveAgent.data;
     const owner = numberOwner(live, businessId, agents.data?.items ?? [agent], businesses);

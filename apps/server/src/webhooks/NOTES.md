@@ -1,0 +1,17 @@
+# B-13 integration notes
+
+Register webhooksPlugin with WebhookDependencies in app.ts. Configure the exact registered Square and Twilio URLs. Environment loading must enforce Square sandbox. App registration and environment files were outside this task.
+
+Implement the injected ports with the database and adapters. processPayment reads Square first, outside any transaction, then calls OrdersPort.withLockedOrder: BEGIN, SELECT the order FOR UPDATE, run the callback, COMMIT. The callback makes no network call. PaymentTransaction.markPaid is ONE checked routine (the server role has no direct write on sync_jobs): refuse unless the row is PAYMENT_PENDING or PAYMENT_FAILED, save square_payment_id, move to PAID_VERIFIED, insert the unique google_sheets/order sync_jobs row (on conflict do nothing) and emit sync.queued, move to FULFILLMENT_READY, append the events passed in. markFailed is the same for PAYMENT_PENDING to PAYMENT_FAILED. Both are all or nothing. Neither calls Sheets.
+
+Supply PaymentOrder.locationId from the stored approved integration and linkReadyAt from checkout creation, never updatedAt. Resolve early Square references from checkout execution rows too. SquarePort.verifyPayment must read Square afresh with a timeout and throw on timeout. verified:true means COMPLETED with order_id, location_id, amount_money amount and currency matching and nothing refunded. findPaymentsForOrder returns every payment ID for the Square order. listWaitingForPayment returns PAYMENT_PENDING and PAYMENT_FAILED orders. OrdersPort.findBySquareOrderId takes the business ID. Prefer a mismatch field over status when both fail. A later verified success can recover PAYMENT_FAILED. Paid and terminal orders cannot regress.
+
+WebhookStore.recordOnce must enforce unique source/event ID and retain pending rows until job completion. JobsPort.enqueue runs after the HTTP response and must persist the webhook row ID, retry failures and recover pending rows after crashes or enqueue failures. Rebuild jobs through processSquareEvent or processTwilioStatus. Injected closures alone are not durable storage. Log sanitized fixed messages only.
+
+Verified Twilio status events take the business of the call or dispatch they name, because one Twilio account serves both seeded businesses; integrations.findOwner is used only to attribute webhook.rejected. A rejected webhook always gets 401, even when the rejection event cannot be written. CallsPort.endOnce must share its conditional terminal update with stream stop. DispatchPort.updateStatus must prevent terminal regression. Use a transaction or outbox for crash-safe Twilio activity delivery. Only whatsapp_sandbox dispatches are updated.
+
+Schedule pollPendingPayments every PAYMENT_POLL_INTERVAL_MS. Polling stops at PAYMENT_POLL_DURATION_MS after link creation and leaves unpaid orders unpaid. Scheduler wiring was outside this task.
+
+The task explicitly requires mismatches to leave the order unpaid, so they emit guardrail.refused without changing PAYMENT_PENDING, overriding the CONTRACTS recovery-state row. Local transport port types have no equivalent exported contract; domain types, events, errors, routes and timing use @abos/contracts.
+
+All tests use injected fakes and Fastify inject. Live providers, database locking and durable queue recovery were not integration-tested. No provider was called, and no voice route or WebSocket was created.

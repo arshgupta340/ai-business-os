@@ -9,6 +9,12 @@ export type BusinessContextValue = {
   businesses: readonly BusinessSummary[];
   business: BusinessSummary | null;
   businessId: string | null;
+  /**
+   * False until the stored selection has been read after mount. Until then
+   * businessId is null, so no business-scoped call goes out with the default
+   * before the stored business is known.
+   */
+  isReady: boolean;
   setBusinessId: (businessId: string) => void;
 };
 
@@ -21,15 +27,15 @@ type BusinessProviderProps = {
 };
 
 export function BusinessProvider({children, businesses = SEEDED_BUSINESSES}: BusinessProviderProps) {
-  // The first render uses the default so server and client HTML match.
-  // The stored choice is applied after mount.
-  const [selectedId, setSelectedId] = useState<string | null>(() =>
-    resolveBusinessId(businesses, null, DEFAULT_BUSINESS_ID),
-  );
+  // Server HTML and the first client render have no business, so they match.
+  // localStorage is read after mount; only then is a business selected.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
     const stored = readStoredBusinessId(getBrowserStorage());
     setSelectedId(resolveBusinessId(businesses, stored, DEFAULT_BUSINESS_ID));
+    setIsReady(true);
   }, [businesses]);
 
   const setBusinessId = useCallback(
@@ -44,9 +50,9 @@ export function BusinessProvider({children, businesses = SEEDED_BUSINESSES}: Bus
   );
 
   const value = useMemo<BusinessContextValue>(() => {
-    const business = businesses.find((b) => b.id === selectedId) ?? null;
-    return {businesses, business, businessId: business?.id ?? null, setBusinessId};
-  }, [businesses, selectedId, setBusinessId]);
+    const business = (isReady && businesses.find((b) => b.id === selectedId)) || null;
+    return {businesses, business, businessId: business?.id ?? null, isReady, setBusinessId};
+  }, [businesses, selectedId, isReady, setBusinessId]);
 
   return <BusinessContext.Provider value={value}>{children}</BusinessContext.Provider>;
 }

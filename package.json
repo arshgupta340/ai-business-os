@@ -15,7 +15,11 @@
     "dev:server": "npm run dev -w @abos/server",
     "dev:web": "npm run dev -w apps/web",
     "board": "node scripts/board.mjs",
-    "check-env": "node scripts/check-env.mjs"
+    "seed": "tsx scripts/seed.ts",
+    "seed:square": "tsx scripts/seed.ts square",
+    "reset": "tsx scripts/reset.ts",
+    "check-env": "node scripts/check-env.mjs",
+    "register-webhooks": "tsx scripts/register-webhooks.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

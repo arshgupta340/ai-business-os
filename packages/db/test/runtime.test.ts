@@ -14,6 +14,11 @@ async function app<T>(fn: () => Promise<T>): Promise<T> {
   await db.exec('set role abos_app');
   try { return await fn(); } finally { await db.exec('reset role'); }
 }
+/** Provider state fixture for queue-only tests. Runtime role writes are checked in payments-and-recovery. */
+async function ownerFixtureQuery(sql: string, args: unknown[]) {
+  await db.exec('reset role');
+  try { return await db.query(sql, args); } finally { await db.exec('set role abos_app'); }
+}
 const types = ['order_bundle','booking_bundle','fact_edit','price_edit'] as const;
 type Bundle = typeof types[number];
 async function proposal(type: Bundle = 'order_bundle', channel = 'surge', lifetime = 600_000) {
@@ -35,7 +40,7 @@ async function proposal(type: Bundle = 'order_bundle', channel = 'surge', lifeti
       messageRecipient: '+15555550123', messageChannel: channel };
   } else if (type === 'fact_edit') {
     subject = await insert(db, 'business_facts', { business_id: owner.businessId, kind: 'hours', key: 'mon',
-      value: { slots: [1,2] }, source_type: 'owner_ui' });
+      value: { slots: [1,2] }, source_type: 'owner_ui', status: 'verified', verified_at: new Date(), verified_by: owner.userId });
     actionBundle = ['local.fact.update'];
     fields = { kind: 'hours', key: 'mon', fromVersion: 1, before: { slots: [1,2] }, after: { slots: [3,4] } };
   } else {
@@ -56,8 +61,16 @@ async function approved(type: Bundle = 'order_bundle', channel = 'surge') {
   const result = await app(() => runtime.runtimeDecideAndEnqueue(db, decision));
   return { ...p, a, decision, ...result };
 }
-const finish = (businessId: string, executionId: string, attempt = 1, workerId = 'worker', status: 'SUCCEEDED' | 'QUEUED' = 'SUCCEEDED') =>
-  runtime.finishExecution(db, { businessId,executionId,workerId,attempt,status,externalRef: 'provider-' + executionId, retryAt: new Date(0) });
+// 0006: a checkout step succeeds only with the references save_checkout stored, so the helper saves them first.
+async function finish(businessId: string, executionId: string, attempt = 1, workerId = 'worker', status: 'SUCCEEDED' | 'QUEUED' = 'SUCCEEDED') {
+  let externalRef = 'provider-' + executionId;
+  const step = (await db.query<{ action_type: string }>('select action_type from public.action_executions where id=$1', [executionId])).rows[0];
+  if (status === 'SUCCEEDED' && step?.action_type === 'square.checkout.create') {
+    externalRef = 'sq-' + executionId;
+    await runtime.saveCheckout(db, { businessId, executionId, workerId, attempt, squareOrderId: externalRef, paymentLinkId: 'link-' + executionId, url: 'https://example.test/c' });
+  }
+  return runtime.finishExecution(db, { businessId,executionId,workerId,attempt,status,externalRef, retryAt: new Date(0) });
+}
 
 it('installs a nonowner, nonmember restricted runtime role', async () => {
   const { rows } = await db.query(`select rolcanlogin, rolinherit, rolcreatedb, rolcreaterole, rolbypassrls, rolsuper,
@@ -84,8 +97,9 @@ it('grants exactly the ordinary table operations and matching RLS policies', asy
       has_table_privilege('abos_app',$1,'INSERT') ins, has_table_privilege('abos_app',$1,'UPDATE') upd,
       has_table_privilege('abos_app',$1,'DELETE') del, has_table_privilege('abos_app',$1,'TRUNCATE') trunc,
       has_table_privilege('abos_app',$1,'SELECT') sel, (select relrowsecurity from pg_class where oid=$1::regclass) rls`, ['public.'+table]);
-    expect(q.rows[0], table).toEqual({ ins: writable.includes(table) || ['activity_events','webhook_events'].includes(table),
-      upd:writable.includes(table),del:deletable.includes(table),trunc:false,sel:true,rls:true });
+    // 0006: users is read only and no runtime INSERT creates a business; businesses keeps a guarded UPDATE.
+    expect(q.rows[0], table).toEqual({ ins: (writable.includes(table) && !['users','businesses'].includes(table)) || ['activity_events','webhook_events'].includes(table),
+      upd:writable.includes(table) && table!=='users',del:deletable.includes(table),trunc:false,sel:true,rls:true });
     const policies = await db.query<{cmd:string}>(`select cmd from pg_policies where tablename=$1 and 'abos_app'=any(roles)`, [table]);
     expect(policies.rows.map(p => p.cmd).sort()).toEqual(['SELECT', ...(q.rows[0]!.ins?['INSERT']:[]), ...(q.rows[0]!.upd?['UPDATE']:[]), ...(q.rows[0]!.del?['DELETE']:[])].sort());
   }
@@ -106,12 +120,16 @@ it('exposes only the checked entry points and pins definer search paths', async 
       exists(select 1 from aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) where grantee=0 and privilege_type='EXECUTE') pub
     from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='private' and proname<>'owns_business'`);
   const routines=['create_approval','decide_and_enqueue','claim_execution','claim_next_execution','finish_execution','record_dispatch',
-    'update_dispatch','enqueue_sheets_sync','claim_sync_job','finish_sync_job','expire_approvals'];
+    'update_dispatch','enqueue_sheets_sync','claim_sync_job','finish_sync_job','expire_approvals',
+    'mark_order_paid','mark_order_payment_failed','recover_stale_executions',
+    'save_checkout','fulfill_order','verify_booking','renew_execution_lease','resolve_execution','renew_sync_lease','recover_stale_sync_jobs','apply_fact_update',
+    'mark_webhook_processed','update_dispatch_status','runtime_role_check'];
   for(const r of q.rows) {
     expect(r.runtime,r.proname).toBe(routines.includes(r.proname)); expect(r.browser).toBe(false); expect(r.pub).toBe(false);
-    if(r.runtime) { expect(r.prosecdef).toBe(true); expect(r.proconfig).toContain('search_path=""'); }
+    // runtime_role_check reports the caller's own role, so it is the one invoker entry point.
+    if(r.runtime) { expect(r.prosecdef,r.proname).toBe(r.proname!=='runtime_role_check'); expect(r.proconfig).toContain('search_path=""'); }
   }
-  expect(q.rows.filter(r=>r.runtime)).toHaveLength(11);
+  expect(q.rows.filter(r=>r.runtime)).toHaveLength(25);
 });
 
 for(const type of types) describe(type, () => {
@@ -126,6 +144,10 @@ for(const type of types) describe(type, () => {
       const state=await db.query(`select status,approval_id from public.${type==='order_bundle'?'orders':'bookings'} where id=$1`,[p.args.subjectId]);
       expect(state.rows[0]).toEqual({status:type==='order_bundle'?'APPROVED':'RECHECKING_SLOT',approval_id:p.a.id});
     }
+    if(type==='order_bundle'||type==='booking_bundle') {
+      await app(()=>expect(runtime.enqueueSheetsSync(db,{businessId:biz,recordType:type==='order_bundle'?'order':'booking',recordId:p.args.subjectId})).rejects.toThrow(/SYNC/));
+    }
+    if(type==='order_bundle') await insert(db,'integrations',{business_id:biz,provider:'square',alias:'main',config:{locationId:'loc-'+biz}});
     for(const [index,e] of p.executions.entries()) {
       expect(e.idempotency_key).toBe(digest(`${biz}:${p.args.subjectId}:${e.action_type}:${p.a.id}`));
       await app(async()=>{
@@ -145,15 +167,30 @@ for(const type of types) describe(type, () => {
           expect((await runtime.finishExecution(db,{businessId:biz,executionId:e.id,workerId:'worker',attempt:1,status:'SUCCEEDED',externalRef:sent.provider_message_id})).status).toBe('SUCCEEDED');
           return;
         }
+        if(e.action_type==='square.checkout.create') {
+          await runtime.saveCheckout(db,{businessId:biz,executionId:e.id,workerId:'worker',attempt:1,
+            squareOrderId:'sq-'+p.args.subjectId,paymentLinkId:'link-'+p.args.subjectId,url:'https://example.test/checkout'});
+          // The completion reference must be the Square order ID that save_checkout stored.
+          expect((await runtime.finishExecution(db,{businessId:biz,executionId:e.id,workerId:'worker',attempt:1,status:'SUCCEEDED',externalRef:'sq-'+p.args.subjectId})).status).toBe('SUCCEEDED');
+          return;
+        } else if(e.action_type==='calendar.event.create') {
+          expect((await runtime.verifyBooking(db,{businessId:biz,executionId:e.id,workerId:'worker',attempt:1,googleEventId:'event-'+uniq()})).status).toBe('BOOKED_VERIFIED');
+          return;
+        } else if(e.action_type==='local.fact.update') {
+          expect((await runtime.applyFactUpdate(db,{businessId:biz,executionId:e.id,workerId:'worker',attempt:1})).version).toBe(2);
+          return;
+        }
         expect((await finish(biz,e.id)).status).toBe('SUCCEEDED');
       });
     }
     if(type==='order_bundle'||type==='booking_bundle') {
       const recordType=type==='order_bundle'?'order':'booking';
       await app(async()=>{
-        await expect(runtime.enqueueSheetsSync(db,{businessId:biz,recordType,recordId:p.args.subjectId})).rejects.toThrow(/SYNC/);
-        if(recordType==='order') await db.query("update public.orders set status='PAID_VERIFIED',square_payment_id='pay',square_order_id='sq-'||id,square_payment_link_id='link-'||id,checkout_url='https://example.test/checkout' where id=$1",[p.args.subjectId]);
-        else await db.query("update public.bookings set status='BOOKED_VERIFIED',google_event_id=$2 where id=$1",[p.args.subjectId,'event-'+uniq()]);
+        if(recordType==='order') {
+          await db.query("update public.orders set status='PAYMENT_PENDING' where id=$1",[p.args.subjectId]);
+          await runtime.markOrderPaid(db,{businessId:biz,orderId:p.args.subjectId,paymentId:'pay-'+uniq(),amountMinor:1200,currency:'USD',
+            squareOrderId:'sq-'+p.args.subjectId,locationId:'loc-'+biz,paymentStatus:'COMPLETED',environment:'sandbox'});
+        }
         const j=await runtime.enqueueSheetsSync(db,{businessId:biz,recordType,recordId:p.args.subjectId});
         expect((await runtime.enqueueSheetsSync(db,{businessId:biz,recordType,recordId:p.args.subjectId})).id).toBe(j.id);
         expect(j.idempotency_key).toBe(digest(`${biz}:${p.args.subjectId}:sheets.${recordType}.append:${p.a.id}`));
@@ -289,7 +326,7 @@ for(const type of ['order_bundle','booking_bundle'] as const) {
     expect(first.executions).toEqual([]);
     expect(await app(()=>runtime.runtimeDecideAndEnqueue(db,decision))).toEqual(first);
     expect((await db.query(`select status from public.${type==='order_bundle'?'orders':'bookings'} where id=$1`,[p.args.subjectId])).rows[0]).toEqual({status:'REJECTED'});
-    expect((await db.query("select count(*)::int n from public.activity_events where correlation_id=$1 and type='approval.decided'",[a.id])).rows[0]).toEqual({n:1});
+    expect((await db.query("select count(*)::int n from public.activity_events where payload->>'approvalId'=$1 and type='approval.decided'",[a.id])).rows[0]).toEqual({n:1});
   });
   it(`${type}: sweeps by wall clock in an old transaction and moves only its own business`,async()=>{
     const p=await proposal(type,'surge',500); const a=await app(()=>runtime.createApproval(db,p.args));
@@ -326,7 +363,9 @@ it('stops retries at three attempts and never changes a finished result',async()
 it('revalidates current material on claim and does not accept caller chosen keys or routing',async()=>{
   const p=await approved(); const businessId=p.owner.businessId;
   await app(async()=>{
-    await db.query('update public.orders set total_minor=9999 where id=$1',[p.args.subjectId]);
+    // 0006 freezes order material for abos_app, so the drift is an owner-side write.
+    await expect(db.query('update public.orders set total_minor=9999 where id=$1',[p.args.subjectId])).rejects.toThrow(/protected order material/);
+    await ownerFixtureQuery('update public.orders set total_minor=9999 where id=$1',[p.args.subjectId]);
     await expect(runtime.runtimeClaimExecution(db,{businessId,executionId:p.executions[0]!.id,workerId:'worker'})).rejects.toThrow(/SUBJECT/);
     await expect(db.query('select private.decide_and_enqueue($1,$2,$3,$4,$5,$6,$7)',[businessId,p.a.id,p.owner.userId,p.a.payload_hash,'APPROVED',null,'caller-key'])).rejects.toThrow(/does not exist/);
     await expect(db.query('select private.record_dispatch($1,$2,$3,$4,$5,$6)',[businessId,p.executions[1]!.id,'worker',1,hash('body'),'+19999999999'])).rejects.toThrow(/does not exist/);
@@ -342,7 +381,7 @@ it('repairs an exact missing suffix and preserves the original execution and aud
   const result=await app(()=>runtime.runtimeDecideAndEnqueue(db,decision));
   expect(result.executions).toHaveLength(2); expect(result.executions[0]?.id).toBe(e.id);
   const repeat=await app(()=>runtime.runtimeDecideAndEnqueue(db,decision)); expect(repeat).toEqual(result);
-  expect((await db.query("select count(*)::int n from public.activity_events where correlation_id=$1 and type='approval.decided'",[a.id])).rows[0]).toEqual({n:1});
+  expect((await db.query("select count(*)::int n from public.activity_events where payload->>'approvalId'=$1 and type='approval.decided'",[a.id])).rows[0]).toEqual({n:1});
 });
 
 it('retains a SENT dispatch against delete/reinsert even for the owner in replica mode',async()=>{
@@ -366,11 +405,12 @@ it('retains a SENT dispatch against delete/reinsert even for the owner in replic
 it('rechecks sync eligibility, fences worker attempts and enforces five attempts',async()=>{
   const p=await approved('booking_bundle'); const businessId=p.owner.businessId;
   await app(async()=>{
-    await db.query("update public.bookings set status='BOOKED_VERIFIED',google_event_id=$2 where id=$1",[p.args.subjectId,'event-'+uniq()]);
+    await runtime.runtimeClaimExecution(db,{businessId,executionId:p.executions[0]!.id,workerId:'worker'});
+    await runtime.verifyBooking(db,{businessId,executionId:p.executions[0]!.id,workerId:'worker',attempt:1,googleEventId:'event-'+uniq()});
     const j=await runtime.enqueueSheetsSync(db,{businessId,recordType:'booking',recordId:p.args.subjectId});
-    await db.query("update public.bookings set status='RETRY_REQUIRED' where id=$1",[p.args.subjectId]);
+    await ownerFixtureQuery("update public.bookings set status='RETRY_REQUIRED' where id=$1",[p.args.subjectId]);
     await expect(runtime.claimSyncJob(db,{businessId,syncJobId:j.id,workerId:'worker'})).rejects.toThrow(/SYNC/);
-    await db.query("update public.bookings set status='BOOKED_VERIFIED' where id=$1",[p.args.subjectId]);
+    await ownerFixtureQuery("update public.bookings set status='BOOKED_VERIFIED' where id=$1",[p.args.subjectId]);
     await expect(runtime.finishSyncJob(db,{businessId,syncJobId:j.id,workerId:'worker',attempt:0,state:'DONE',externalRef:'row'})).rejects.toThrow(/LEASE/);
     for(let attempt=1;attempt<=5;attempt++) {
       expect((await runtime.claimSyncJob(db,{businessId,syncJobId:j.id,workerId:'worker'}))?.attempts).toBe(attempt);

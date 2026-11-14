@@ -22,6 +22,7 @@ import {Dialog, DialogHeader} from '@astryxdesign/core/Dialog';
 import {Heading} from '@astryxdesign/core/Heading';
 import {HStack} from '@astryxdesign/core/HStack';
 import {Layout, LayoutContent, LayoutFooter} from '@astryxdesign/core/Layout';
+import {Link} from '@astryxdesign/core/Link';
 import {List, ListItem} from '@astryxdesign/core/List';
 import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
@@ -68,6 +69,29 @@ function PublishError({
           <List density="compact" edge="flush" listStyle="disc" header={<Text type="supporting">Open conflicts:</Text>}>
             {view.conflictIds.map((id) => (
               <ListItem key={id} label={<Code>{id}</Code>} />
+            ))}
+          </List>
+        ) : null}
+        {view.fixes.length > 0 ? (
+          <List density="compact" edge="flush" listStyle="disc">
+            {view.fixes.map((fix, index) => (
+              <ListItem
+                key={`${index}-${fix.text}`}
+                label={
+                  <VStack gap={0.5}>
+                    <Text type="body">{fix.text}</Text>
+                    {fix.links.length > 0 ? (
+                      <HStack gap={3} wrap="wrap">
+                        {fix.links.map((link) => (
+                          <Link key={link.href} href={link.href} isStandalone>
+                            {link.label}
+                          </Link>
+                        ))}
+                      </HStack>
+                    ) : null}
+                  </VStack>
+                }
+              />
             ))}
           </List>
         ) : null}

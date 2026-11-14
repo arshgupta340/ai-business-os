@@ -25,7 +25,8 @@ export function ActivitySection({businessId, timeZone}: {businessId: string; tim
   let body;
   if (activity.isPending) {
     body = <LoadingState label="Loading activity" />;
-  } else if (activity.error) {
+  } else if (!activity.data) {
+    // No data at all: the first load failed. A failed refetch keeps the old data and the page header says so.
     body = (
       <BlockError title="Could not load activity" error={activity.error} onRetry={() => void activity.refetch()} />
     );

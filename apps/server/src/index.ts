@@ -7,9 +7,32 @@ let env: Env;
 try {
   env = parseEnv();
 } catch (error) {
+  // parseEnv prints variable names and its own messages only, never a value.
   console.error(error instanceof Error ? error.message : error);
   process.exit(1);
 }
 
 const app = await buildApp(env, { logger: true });
+// 0006: refuse to start unless the database connection is the restricted abos_app role.
+try {
+  await app.composed.assertRuntimeRole();
+} catch (error) {
+  // The message names roles only, never a connection string.
+  console.error(error instanceof Error ? error.message : 'Runtime role check failed');
+  await app.close().catch(() => undefined);
+  process.exit(1);
+}
 await app.listen({ host: '0.0.0.0', port: env.PORT });
+app.composed.startJobs();
+
+// Hosts send SIGTERM before they replace an instance. Close the server (which stops the jobs and
+// the database pool through onClose hooks), then exit.
+let closing = false;
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  process.once(signal, () => {
+    if (closing) return;
+    closing = true;
+    app.log.info({ signal }, 'shutting down');
+    app.close().then(() => process.exit(0), () => process.exit(1));
+  });
+}

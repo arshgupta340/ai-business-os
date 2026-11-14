@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { BusinessFact } from '@abos/contracts';
 import { TEMPLATE_CAPABILITIES } from '../registry';
 import { FixtureBusinessKnowledge, type BusinessContext } from './knowledge';
-import { computeFieldStatus, requiredFields, stopConditions, suggestions } from './requirements';
+import { computeFieldStatus, missingFactMessage, requiredFields, stopConditions, suggestions } from './requirements';
 
 const knowledge = new FixtureBusinessKnowledge();
 
@@ -68,7 +68,14 @@ describe('missing-field computation', () => {
     const status = computeFieldStatus(pizzaSpec, ctx, []);
     expect(status.missing).toEqual(expect.arrayContaining(['name', 'goal', 'catalog.items', 'hours.mon', 'policy.message_consent']));
     expect(suggestions(status)).toEqual(['Upload menu', 'Use Square catalog']);
-    expect(stopConditions(pizzaSpec, ctx, status).map((s) => s.code)).toEqual(['missing_timezone', 'open_conflict', 'missing_message_consent_policy']);
+    expect(stopConditions(pizzaSpec, ctx)).toEqual([
+      { code: 'missing_timezone' },
+      { code: 'open_conflict', conflictIds: ['cfl_1'] },
+      { code: 'missing_message_consent_policy' },
+      { code: 'empty_catalog' },
+      ...['hours.mon', 'hours.tue', 'hours.wed', 'hours.thu', 'hours.fri', 'hours.sat', 'hours.sun', 'policy.pickup_window', 'policy.special_requests']
+        .map((path) => ({ code: 'missing_required_fact', path })),
+    ]);
   });
 });
 
@@ -88,7 +95,7 @@ describe('missing fields for the FAQ-only subset', () => {
     const spec = { ...faqSpec, capabilities: [...faqSpec.capabilities], name: 'A', goal: 'B' };
     const status = computeFieldStatus(spec, ctx, []);
     expect(status.missing).toEqual(['catalog.items', 'hours.mon', 'hours.tue', 'hours.wed', 'hours.thu', 'hours.fri', 'hours.sat', 'hours.sun']);
-    expect(stopConditions(spec, ctx, status)).toEqual([]);
+    expect(stopConditions(spec, ctx).map((c) => c.code)).toEqual(['empty_catalog', ...Array(7).fill('missing_required_fact')]);
     expect(suggestions(status)).toEqual(['Upload menu', 'Use Square catalog']);
   });
 
@@ -96,5 +103,27 @@ describe('missing fields for the FAQ-only subset', () => {
     const spec = { ...faqSpec, capabilities: [...faqSpec.capabilities], name: 'A', goal: 'B' };
     expect(computeFieldStatus(spec, (await knowledge.getContext('biz_pizza_01'))!, []).missing).toEqual([]);
     expect(computeFieldStatus(spec, (await knowledge.getContext('biz_barber_01'))!, []).missing).toEqual(['catalog.items']);
+  });
+});
+
+describe('stop conditions count verified facts only (review: turn and publish agree)', () => {
+  it('a chat draft fills a missing field but not its stop condition; a verified fact clears both', async () => {
+    const spec = { ...pizzaSpec, name: 'A', goal: 'B' };
+    const ctx = await contextWithout('biz_pizza_01', ['message_consent', 'pickup_window']);
+    const withDraft = computeFieldStatus(spec, ctx, [draft('biz_pizza_01', 'policy', 'message_consent')]);
+    expect(withDraft.missing).toEqual(['policy.pickup_window']);
+    expect(stopConditions(spec, ctx)).toEqual([{ code: 'missing_message_consent_policy' }, { code: 'missing_required_fact', path: 'policy.pickup_window' }]);
+    expect(stopConditions(spec, (await knowledge.getContext('biz_pizza_01'))!)).toEqual([]);
+  });
+
+  it('name and goal are left to spec validation, and the booking fields have their own entries', async () => {
+    const ctx = await contextWithout('biz_barber_01', ['min_notice']);
+    const noServices = { ...ctx, verifiedFacts: ctx.verifiedFacts.filter((f) => f.kind !== 'service') };
+    expect(stopConditions(barberSpec, noServices)).toEqual([
+      { code: 'missing_required_fact', path: 'services' },
+      { code: 'missing_required_fact', path: 'policy.min_notice' },
+    ]);
+    expect(missingFactMessage('policy.pickup_window')).toBe('The agent needs a confirmed answer for the pickup window.');
+    expect(missingFactMessage('hours.mon')).toBe('The agent needs a confirmed answer for the opening hours on Monday.');
   });
 });

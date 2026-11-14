@@ -54,14 +54,23 @@ function badge(container: HTMLElement, label: string) {
 }
 
 describe('IntegrationsScreen', {timeout: 20_000}, () => {
+  it('shows the shared default: Sheets connected and the calendar degraded', async () => {
+    renderScreen();
+    expect(badge(await card('Google Sheets'), 'Connected').dataset.tone).toBe('success');
+    expect(badge(await card('Google Calendar'), 'Degraded').dataset.tone).toBe('warning');
+  });
+
   it('shows each state with its tone and what the owner will notice', async () => {
+    // The shared default has Sheets connected; the disconnected state is the shared
+    // integrationHealthDisconnected, reached with this mock control.
+    mockControls.simulateSheetsDisconnected?.();
     renderScreen();
 
     const sheets = await card('Google Sheets');
     expect(badge(sheets, 'Disconnected').dataset.tone).toBe('danger');
     expect(within(sheets).getByText(/The report sheet is not updated/)).toBeTruthy();
     expect(within(sheets).getByText(/will catch up/)).toBeTruthy();
-    expect(within(sheets).getByText(/Server note: The sheet is not shared/)).toBeTruthy();
+    expect(within(sheets).getByText(/Server note: Reconnect Google Sheets to resume sync/)).toBeTruthy();
 
     const calendar = await card('Google Calendar');
     expect(badge(calendar, 'Degraded').dataset.tone).toBe('warning');
@@ -105,6 +114,7 @@ describe('IntegrationsScreen', {timeout: 20_000}, () => {
   });
 
   it('shows the result of Check now only after the server answers', async () => {
+    mockControls.simulateSheetsDisconnected?.();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     server.use(
@@ -134,6 +144,7 @@ describe('IntegrationsScreen', {timeout: 20_000}, () => {
   });
 
   it('shows an error with a retry when Check now fails, and keeps the stored result', async () => {
+    mockControls.simulateSheetsDisconnected?.();
     let fail = true;
     server.use(
       http.get('*/api/integrations/health', ({request}) => {

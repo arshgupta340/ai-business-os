@@ -134,3 +134,22 @@ describe('decisionErrorView', () => {
     expect(v.correlationId).toBe('corr_1');
   });
 });
+
+describe('price edit names its item', () => {
+  it('names the catalog item and size in the inbox line', async () => {
+    const {approvalPriceEditPending, pizzaCatalog} = await import('@abos/contracts/fixtures');
+    const {summaryLine, variationName} = await import('./approval-view');
+    const a = approvalPriceEditPending as unknown as ApprovalRequest;
+    const p = approvalPriceEditPending.payload;
+    expect(variationName(pizzaCatalog, p.squareItemId, p.variationId)).toBe('Pepperoni, Large');
+    expect(summaryLine(a, 'America/Los_Angeles', pizzaCatalog)).toBe('Pepperoni, Large, $22.00 to $19.00');
+  });
+
+  it('says it is a catalog item when the catalog is not loaded or lacks the variation', async () => {
+    const {approvalPriceEditPending} = await import('@abos/contracts/fixtures');
+    const {summaryLine} = await import('./approval-view');
+    const a = approvalPriceEditPending as unknown as ApprovalRequest;
+    expect(summaryLine(a, 'America/Los_Angeles')).toBe('An item in the Square catalog, $22.00 to $19.00');
+    expect(summaryLine(a, 'America/Los_Angeles', [])).toBe('An item in the Square catalog, $22.00 to $19.00');
+  });
+});

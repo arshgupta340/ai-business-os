@@ -41,15 +41,17 @@ describe('TelemetryScreen', () => {
     expect(screen.getByRole('heading', {name: 'Tool call time'})).toBeTruthy();
     expect(screen.getByRole('heading', {name: 'Owner approval time'})).toBeTruthy();
     expect(screen.getByRole('heading', {name: 'Payment webhook delay'})).toBeTruthy();
-    expect(screen.getByText('Median (p50): 1.3 s')).toBeTruthy();
-    expect(screen.getByText('p95: 2.3 s')).toBeTruthy();
-    expect(screen.getByText('Median (p50): 48 s')).toBeTruthy();
-    expect(screen.getByText('p95: 3 min 32 s')).toBeTruthy();
-    expect(screen.getAllByText(/^Based on 14 samples. That is a small sample/)).toHaveLength(2);
+    // The shared telemetry fixture (@abos/contracts/fixtures telemetry).
+    expect(screen.getByText('Median (p50): 1.9 s')).toBeTruthy();
+    expect(screen.getByText('p95: 2.6 s')).toBeTruthy();
+    expect(screen.getByText('Median (p50): 1 min 5 s')).toBeTruthy();
+    expect(screen.getByText('p95: 3 min 30 s')).toBeTruthy();
+    expect(screen.getAllByText(/^Based on 12 samples. That is a small sample/)).toHaveLength(2);
     expect(screen.getByText(/^Based on 9 samples. That is a small sample/)).toBeTruthy();
-    expect(screen.getByText('Based on 61 samples.')).toBeTruthy();
-    // Goals only for first audio (p95) and tool latency (p50).
-    expect(screen.getByText('p95 within goal')).toBeTruthy();
+    expect(screen.getByText(/^Based on 6 samples. That is a small sample/)).toBeTruthy();
+    expect(screen.getByText('Based on 58 samples.')).toBeTruthy();
+    // Goals only for first audio (p95, 2.6 s is over 2.5 s) and tool latency (p50).
+    expect(screen.getByText('p95 over goal')).toBeTruthy();
     expect(screen.getByText('p50 within goal')).toBeTruthy();
     expect(screen.getAllByText(/^PRD goal:/)).toHaveLength(2);
     expect(screen.getByRole('link', {name: 'Back to integrations'}).getAttribute('href')).toBe('/integrations');

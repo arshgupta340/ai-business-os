@@ -5,6 +5,7 @@ import { configureApiClient } from "./client";
 import { ApiError } from "./errors";
 import { invalidationFor } from "./invalidation";
 import { activityEventFromRow } from "@abos/contracts";
+import { approvalOrderPending, orderPaid } from "@abos/contracts/fixtures";
 import { server } from "@/mocks/server";
 import { requests, TEST_BASE_URL, useMockServer } from "@/mocks/test-setup";
 
@@ -33,7 +34,7 @@ describe("business scoping", () => {
 
   it("puts businessId in the query on every other business-scoped route", async () => {
     await api.listOrders(PIZZA, { status: ["PAYMENT_PENDING", "PAID_VERIFIED"] });
-    await api.getApproval(PIZZA, "apv_pizza_pending");
+    await api.getApproval(PIZZA, approvalOrderPending.id);
     await api.listCalls(PIZZA);
     for (const req of requests.slice(-3)) {
       expect(new URL(req.url).searchParams.get("businessId")).toBe(PIZZA);
@@ -53,7 +54,7 @@ describe("business scoping", () => {
   });
 
   it("returns NOT_FOUND for another business's resource, never confirming it exists", async () => {
-    const err = await caught(api.getOrder("biz_barber_01", "ord_pizza_paid"));
+    const err = await caught(api.getOrder("biz_barber_01", orderPaid.id));
     expect(err.code).toBe("NOT_FOUND");
     expect(err.status).toBe(404);
   });
@@ -93,6 +94,9 @@ describe("error mapping", () => {
     const err = await caught(api.getBusiness(PIZZA));
     expect(err.kind).toBe("invalid_response");
     expect(err.retryable).toBe(false);
+    // The owner reads plain words; the path stays in details for support.
+    expect(err.message).not.toMatch(/contract|\/api\//);
+    expect(err.details?.path).toBe(`/api/businesses/${PIZZA}`);
   });
 
   it("falls back to a code from the status when the body is not an envelope", async () => {
@@ -105,7 +109,7 @@ describe("error mapping", () => {
 
 describe("approval decision request", () => {
   it("sends the payload hash in the body and an Idempotency-Key header", async () => {
-    const apv = await api.getApproval(PIZZA, "apv_pizza_pending");
+    const apv = await api.getApproval(PIZZA, approvalOrderPending.id);
     await api.decideApproval(PIZZA, apv.id, { decision: "reject", payloadHash: apv.payloadHash }, { idempotencyKey: "key-1" });
     const req = requests.at(-1)!;
     expect(req.headers.get("Idempotency-Key")).toBe("key-1");

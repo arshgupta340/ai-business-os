@@ -17,7 +17,7 @@ import { FixtureBusinessKnowledge, type BusinessKnowledge } from './session/know
 import type { BuilderModel } from './session/model';
 import { OpenAiBuilderModel } from './session/openai-builder-model';
 import { RecordedBuilderModel } from './session/recorded-builder-model';
-import { BuilderSessionService } from './session/service';
+import { BuilderSessionService, type ProposeFactFromChat } from './session/service';
 import {
   InMemoryAgentDraftStore,
   InMemoryBuilderSessionStore,
@@ -59,6 +59,9 @@ export interface BuilderPluginOptions {
   realtimeMinter?: RealtimeMinter;
   extraction?: ExtractionOptions;
   publish?: PublishOptions;
+  // Opens a fact_edit approval for an owner's chat answer (P-09). Without it,
+  // chat answers stay drafts and a turn never carries proposedChange.
+  proposeFactFromChat?: ProposeFactFromChat;
 }
 
 // Params, queries and bodies are parsed with the endpoint schemas of the
@@ -73,6 +76,14 @@ export const builderPlugin: FastifyPluginAsync<BuilderPluginOptions> = async (ap
   const source = options.env ?? process.env;
   const env = parseBuilderEnv(source);
   const now = options.now ?? (() => new Date());
+
+  // Every route below declares that the builder's own BuilderAuth guards it,
+  // so the server's default-deny guard leaves it to the builder (auth/verify.ts).
+  // Registered first, so it sees every route this plugin and its parts add.
+  app.addHook('onRoute', (route) => {
+    const config = (route.config ?? {}) as Record<string, unknown>;
+    if (config.auth === undefined) route.config = { ...config, auth: 'builder' } as typeof route.config;
+  });
 
   // Fail closed: without a real auth option, the unverified stand-in runs only
   // on the explicit BUILDER_DEV_AUTH=1 opt-in, and never in production.
@@ -119,14 +130,17 @@ export const builderPlugin: FastifyPluginAsync<BuilderPluginOptions> = async (ap
   // get a guarded store, so a draft write cannot undo a publish or a pause.
   const publish = createPublishStores(options.publish, source);
   const draftAgents = publish.guardDraftWrites(agents);
-  const builder = new BuilderSessionService({ sessions, agents: draftAgents, draftFacts, knowledge, model: builderModel, now });
+  const builder = new BuilderSessionService({ sessions, agents: draftAgents, draftFacts, knowledge, model: builderModel, now, log: app.log,
+    ...(options.proposeFactFromChat ? { proposeFactFromChat: options.proposeFactFromChat } : {}) });
   const agentService = new AgentService({ agents: draftAgents, sessions, liveAgent: options.liveAgent ?? publish.liveAgentReader, activeVersions: publish.versions, now });
   const runs = new AgentRunService({ agents, knowledge, runner: new MockTextRunner(toolset, agentModel, now), toolset });
 
   registerVoiceRoutes(app, { auth, sessions, env: source, now, minter: options.realtimeMinter });
 
+  // The one route with no owner check. It returns nothing about any business.
+  // It stays until the server tests that call it (apps/server/test) are changed
+  // in the same pull request that removes it.
   app.get('/api/builder/ping', async () => ({ ok: true, lane: 'builder' }));
-
 
   // ---- 3.3 Builder sessions
   app.post('/api/builder/sessions', async (request, reply) => {

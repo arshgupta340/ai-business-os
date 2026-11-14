@@ -252,7 +252,8 @@ export const kidsServiceDraftFact: BusinessFact = {
   sourceType: 'upload', fileId: servicesFile.id, status: 'draft', confidence: 0.71, version: 1,
   createdAt: servicesFile.createdAt, updatedAt: servicesFile.createdAt,
 };
-barberFacts.push(kidsServiceDraftFact);
-export const allFacts: BusinessFact[] = [...pizzaFacts, ...barberFacts];
+// The draft stays out of barberFacts, which the database seed (packages/db/src/seed/world.ts) stores as
+// the verified barbershop facts with no files row; allFacts carries it.
+export const allFacts: BusinessFact[] = [...pizzaFacts, ...barberFacts, kidsServiceDraftFact];
 export const factConflicts: FactConflict[] = [menuPriceConflict, pickupWindowConflict];
 export const files: FileRecord[] = [menuFile, servicesFile];

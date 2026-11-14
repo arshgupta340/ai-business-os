@@ -7,6 +7,7 @@ import {QueryClientProvider} from '@tanstack/react-query';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {createApiQueryClient} from '@/lib/api/provider';
 import {BusinessProvider, useBusiness} from '@/lib/session';
+import {pizzaSpecV1, pizzaSpecV2} from '@abos/contracts/fixtures';
 import * as db from '@/mocks/db';
 import {getState, server} from '@/mocks/server';
 import {requests, useMockServer} from '@/mocks/test-setup';
@@ -136,17 +137,20 @@ describe('history and compare', () => {
     expect(within(v2).getByText('Active')).toBeTruthy();
     expect(within(v2).queryByRole('button', {name: 'Roll back to this version'})).toBeNull();
     expect(within(v1).getByRole('button', {name: 'Roll back to this version'})).toBeTruthy();
-    expect(within(v1).getByText(/Published .* by usr_owner_01/)).toBeTruthy();
+    expect(within(v1).getByText(/Published .* by the owner$/)).toBeTruthy();
     expect(screen.getByRole('link', {name: 'Back to the agent'}).getAttribute('href')).toBe('/agents/agt_pizza_01');
   });
 
   it('compares the active version with the one before it and shows both values of a changed field', async () => {
     renderScreen();
-    await screen.findByText('One part changed from Version 1 to Version 2.');
-    expect(screen.getByText('Take pickup orders by phone.')).toBeTruthy();
-    expect(screen.getByText('Take pickup orders by phone and send each one to the owner for approval.')).toBeTruthy();
+    // Shared versions: v2 changed the goal, the knowledge scopes (faq added) and the greeting.
+    await screen.findByText('3 parts changed from Version 1 to Version 2.');
+    expect(screen.getByText(pizzaSpecV1.goal)).toBeTruthy();
+    expect(screen.getByText(pizzaSpecV2.goal)).toBeTruthy();
+    expect(screen.getByText(pizzaSpecV1.greeting!)).toBeTruthy();
+    expect(screen.getByText(pizzaSpecV2.greeting!)).toBeTruthy();
     expect(screen.getAllByText('Same in both').length).toBeGreaterThan(0);
-    expect(screen.getByText('Changed')).toBeTruthy();
+    expect(screen.getAllByText('Changed')).toHaveLength(3);
   });
 });
 
@@ -235,8 +239,8 @@ describe('states', () => {
   });
 
   it('draft that was never published', async () => {
-    renderScreen('agt_barber_faq_01');
-    await toBarber();
+    // The shared draft is the pizza FAQ line.
+    renderScreen('agt_pizza_faq_01');
     await screen.findByText('This agent has not been published yet');
   });
 

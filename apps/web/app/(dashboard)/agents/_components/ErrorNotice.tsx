@@ -12,8 +12,20 @@ import {errorView, type ErrorContext} from '../_lib/agents-view';
  * ID behind the banner toggle, offers retry only when the error is retryable,
  * and handles UNAUTHENTICATED and FORBIDDEN_BUSINESS (data map rule 9).
  */
-export function ErrorNotice({error, context, onRetry}: {error: unknown; context: ErrorContext; onRetry?: () => void}) {
-  const view = errorView(error, context);
+export function ErrorNotice({
+  error,
+  context,
+  onRetry,
+  title,
+}: {
+  error: unknown;
+  context: ErrorContext;
+  onRetry?: () => void;
+  /** Names what did not load, for example "Could not load your agents". Replaces the generic title only. */
+  title?: string;
+}) {
+  const base = errorView(error, context);
+  const view = title && base.title === errorView(null, context).title ? {...base, title} : base;
   const {businesses, businessId, setBusinessId} = useBusiness();
   const first = businesses[0]?.id;
 

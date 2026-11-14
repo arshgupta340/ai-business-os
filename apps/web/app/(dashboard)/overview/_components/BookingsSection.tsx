@@ -21,7 +21,8 @@ export function BookingsSection({businessId}: {businessId: string}) {
   let body;
   if (bookings.isPending) {
     body = <LoadingState label="Loading bookings" />;
-  } else if (bookings.error) {
+  } else if (!bookings.data) {
+    // No data at all: the first load failed. A failed refetch keeps the old data and the page header says so.
     body = <BlockError title="Could not load bookings" error={bookings.error} onRetry={() => void bookings.refetch()} />;
   } else if (bookings.data.items.length === 0) {
     body = (

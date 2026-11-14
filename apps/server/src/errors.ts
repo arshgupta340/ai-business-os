@@ -1,23 +1,20 @@
-// The standard error envelope from docs/API.md.
-// The full ErrorCode list arrives with the contracts package (task S-02).
+import { ERROR_CODE_INFO, type ApiError, type ErrorCode } from '@abos/contracts';
 
-export interface ErrorEnvelope {
-  code: string;
-  message: string;
-  correlationId: string;
-  retryable: boolean;
-  details?: unknown;
-}
+export type ErrorEnvelope = ApiError;
 
 export class AppError extends Error {
+  public readonly status: number;
+  public readonly retryable: boolean;
   constructor(
-    public readonly code: string,
+    public readonly code: ErrorCode,
     message: string,
-    public readonly status: number,
-    public readonly retryable = false,
-    public readonly details?: unknown,
+    _status?: number,
+    _retryable?: boolean,
+    public readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'AppError';
+    this.status = ERROR_CODE_INFO[code].httpStatus;
+    this.retryable = ERROR_CODE_INFO[code].retryable;
   }
 }

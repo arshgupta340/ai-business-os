@@ -1,4 +1,4 @@
-import { HoursKeySchema, type BusinessFact, type CapabilityId, type DraftAgentSpec, type StopCondition } from '@abos/contracts';
+import { HoursKeySchema, type AgentSpec, type BusinessFact, type CapabilityId, type DraftAgentSpec, type StopCondition } from '@abos/contracts';
 import type { BusinessContext } from './knowledge';
 
 // Missing-field computation (FLOWS.md step A6): the union of the details each
@@ -101,23 +101,66 @@ function satisfiedBy(field: string, spec: DraftAgentSpec, context: BusinessConte
   return facts.find((f) => f.kind === kind && f.key === key)?.id ?? false;
 }
 
-// PRD section 6 stop conditions that the builder can see during the interview.
-// The codes are the builder's own (API.md gives only "missing_timezone"). The
-// contract's StopCondition is `{ code }`; `conflictIds` is an extra field the
-// builder sends with `open_conflict` (see docs/notes-saina.md).
+// PRD section 6 stop conditions that block a draft. The codes are the
+// builder's own (API.md gives only "missing_timezone"). The contract's
+// StopCondition is `{ code }`; `conflictIds` (on `open_conflict`) and `path`
+// (on `missing_required_fact`, the field name) are extra fields the builder
+// sends (see docs/notes-saina.md).
 export interface BuilderStopCondition extends StopCondition {
-  code: 'missing_timezone' | 'open_conflict' | 'missing_message_consent_policy';
+  code: 'missing_timezone' | 'open_conflict' | 'missing_message_consent_policy' | 'empty_catalog' | 'missing_required_fact';
   conflictIds?: string[];
+  path?: string;
 }
 
-export function stopConditions(spec: DraftAgentSpec, context: BusinessContext, status: FieldStatus): BuilderStopCondition[] {
+// Fields that have their own stop condition code, or that spec validation
+// already reports (name, goal), so they never become `missing_required_fact`.
+const OWN_CODE_FIELDS = new Set(['name', 'goal', 'policy.message_consent', 'catalog.items']);
+
+// The one list of stop conditions, for the interview turn and for publish
+// (FLOWS.md, Builder stop conditions 3, 5 and 6, the empty-catalog part of 1,
+// and every other fact the agent requires). Only verified facts count: a
+// deployed agent reads verified facts only, so an unconfirmed chat draft does
+// not fill a field here. A draft's existence never adds a stop condition
+// either. The turn's missingFields and progress do count drafts (they drive
+// the interview); this list says what publish would refuse on.
+//
+// What this cannot check: the builder sees only the catalog's item count, not
+// which products must have a price or whether a product mapping is ambiguous.
+// So stop condition 1 is checked only as `empty_catalog` (the spec needs a
+// catalog and the catalog has no item), and stop condition 2 is not checked.
+export function stopConditions(spec: DraftAgentSpec, context: BusinessContext): BuilderStopCondition[] {
+  const status = computeFieldStatus(spec, context, []);
   const out: BuilderStopCondition[] = [];
   if (!context.profile.timezone) out.push({ code: 'missing_timezone' });
   if (context.openRequiredConflictIds.length > 0) out.push({ code: 'open_conflict', conflictIds: [...context.openRequiredConflictIds] });
   const sendsMessages = (spec.capabilities ?? []).some((c) => c === 'message.checkout.send' || c === 'message.booking.confirm');
   if (sendsMessages && status.missing.includes('policy.message_consent')) out.push({ code: 'missing_message_consent_policy' });
+  if (status.missing.includes('catalog.items')) out.push({ code: 'empty_catalog' });
+  for (const field of status.missing) {
+    if (!OWN_CODE_FIELDS.has(field)) out.push({ code: 'missing_required_fact', path: field });
+  }
   return out;
 }
+
+// What publish refuses on with VALIDATION_FAILED: the same list without the
+// open conflict, which publish reports as CONFLICT_UNRESOLVED. Call this only
+// with a spec that passed validation.
+export function publishStopConditions(spec: AgentSpec, context: BusinessContext): BuilderStopCondition[] {
+  return stopConditions(spec, context).filter((c) => c.code !== 'open_conflict');
+}
+
+// One plain sentence for a `missing_required_fact` field, for details.issues.
+export function missingFactMessage(field: string): string {
+  return `The agent needs a confirmed answer for ${FIELD_LABELS[field] ?? field}.`;
+}
+
+const FIELD_LABELS: Record<string, string> = {
+  ...Object.fromEntries(DAY_KEYS.map((d) => [`hours.${d}`, `the opening hours on ${dayName(d)}`])),
+  'policy.pickup_window': 'the pickup window',
+  'policy.special_requests': 'whether special requests are accepted',
+  'policy.min_notice': 'the notice needed before an appointment',
+  services: 'the list of services',
+};
 
 export function suggestions(status: FieldStatus): string[] {
   const out: string[] = [];
