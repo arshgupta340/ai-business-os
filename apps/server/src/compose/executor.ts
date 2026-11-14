@@ -45,6 +45,16 @@ export const SHEETS_TABS = { order: 'Orders', booking: 'Bookings' } as const;
 /** 0005 refuses a stale window under one minute. */
 export const MIN_STALE_AFTER_MS = 60_000;
 
+/** True when every cart line's item and variation is in this business's catalog and available (FLOWS B18). */
+export async function cartAvailable(q: QueryDb, businessId: string, cart: Order['cart']): Promise<boolean> {
+  for (const line of cart.lines) {
+    const row = await one(q, `select is_available from public.catalog_items
+      where business_id = $1 and square_item_id = $2 and square_variation_id = $3`, [businessId, line.catalogItemId, line.variationId]);
+    if (!row || row.is_available !== true) return false;
+  }
+  return true;
+}
+
 export function orderFromDbRow(row: unknown): Order { return OrderSchema.parse(mapRow(row)); }
 export function bookingFromDbRow(row: unknown): Booking { return BookingSchema.parse(mapRow(row)); }
 
@@ -258,6 +268,10 @@ export function createDbExecutor(deps: SeamDeps, options: DbExecutorOptions = {}
     checkout: {
       async createCheckout({ order, idempotencyKey, approvedTotalMinor, currency, onLinkCreated }) {
         if (!providers.square || !providers.squareLocationId) throw { code: 'INTEGRATION_UNAVAILABLE', outcome: 'not_created', retryable: true };
+        // FLOWS B18: re-check that every approved line is still sold before the Square call. An item that
+        // is gone (or no longer in the catalog) fails the step with no request made; the executor then
+        // moves the order CREATING_CHECKOUT -> UNAVAILABLE (FLOWS 4, "Item unavailable").
+        if (!await cartAvailable(db, order.businessId, order.cart)) throw { code: 'ITEM_UNAVAILABLE', outcome: 'not_created', retryable: false };
         return providers.square.createCheckout({ order: orderFromCart(order.cart, providers.squareLocationId), idempotencyKey, approvedTotalMinor, currency,
           ...(onLinkCreated ? { onLinkCreated } : {}) });
       },

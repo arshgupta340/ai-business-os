@@ -417,10 +417,10 @@ describe('provider timeouts and ambiguous replies', () => {
     });
   });
 
-  // DEFECT (see the pull request): FLOWS B18 and section 4 say the checkout step re-checks availability
+  // Was DEFECT 1 in the pull request. FLOWS B18 and section 4: the checkout step re-checks availability
   // in catalog_items and, when an item is gone, fails with no Square call and moves the order to
-  // UNAVAILABLE. The re-check is not implemented, so the link is created and sent.
-  it.fails('an item that became unavailable after the proposal: no Square call, no message, order UNAVAILABLE', async () => {
+  // UNAVAILABLE. Fixed after the merge (cartAvailable in compose/executor.ts).
+  it('an item that became unavailable after the proposal: no Square call, no message, order UNAVAILABLE', async () => {
     const before = counts(w);
     const ids = await pizzaOrder(w);
     await w.t.admin((q) => q.query("update public.catalog_items set is_available = false where business_id = $1 and square_variation_id = 'SQ_VAR_PEP_LG'", [PIZZA]));
@@ -429,6 +429,8 @@ describe('provider timeouts and ambiguous replies', () => {
       await kickAndSettle(w);
       expect(delta(w, before)).toEqual(NONE);
       expect((await order(w, ids.orderId)).status).toBe('UNAVAILABLE');
+      expect((await steps(w, ids.approvalId)).map((x) => x.status)).toEqual(['FAILED', 'QUEUED', 'QUEUED']);
+      expect(await count(w, 'message_dispatches where approval_id = $1', [ids.approvalId])).toBe(0);
     } finally {
       await w.t.admin((q) => q.query("update public.catalog_items set is_available = true where business_id = $1 and square_variation_id = 'SQ_VAR_PEP_LG'", [PIZZA]));
     }
