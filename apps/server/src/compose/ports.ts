@@ -312,12 +312,12 @@ export function dbVoiceEventsPort(db: Db, newId: (prefix: string) => string, now
   };
 }
 
-// ---------- writes that wait for migration 0005 ----------
+// ---------- writes served by migration 0005 routines ----------
 
 /**
- * The few state changes that need one checked database routine which 0004 does not have yet.
- * `interim-db.ts` implements them as abos_app until migration 0005 lands; swapping that file for the
- * routine wrappers is the only change needed.
+ * The state changes that need one checked database routine. `interim-db.ts` implements them with the
+ * 0005 wrappers (and, where no routine exists yet, an INTERIM(0005) direct write); swapping a routine
+ * changes only that file.
  */
 export interface InterimDb {
   /**
@@ -331,7 +331,7 @@ export interface InterimDb {
    * PAYMENT_PENDING or PAYMENT_FAILED; save the payment ID; PAID_VERIFIED; enqueue the one Sheets job
    * and write sync.queued; FULFILLMENT_READY; append `events`.
    */
-  markPaid(tx: QueryDb, input: { businessId: string; orderId: string; paymentId: string; events: ActivityEvent[] }): Promise<void>;
+  markPaid(tx: QueryDb, input: { businessId: string; orderId: string; paymentId: string; amountMinor: number; currency: string; events: ActivityEvent[] }): Promise<void>;
   /** All or nothing: refuse unless PAYMENT_PENDING; PAYMENT_FAILED; append `events`. */
   markFailed(tx: QueryDb, input: { businessId: string; orderId: string; paymentId: string; events: ActivityEvent[] }): Promise<void>;
   /**

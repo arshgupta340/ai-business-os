@@ -36,6 +36,9 @@ describe('builder stores on Postgres', () => {
     const a = (await store.get('biz_a', 'agt_t1'))!;
     await store.update({ ...a, draftSpec: { ...spec, goal: 'Answer more' }, specRevision: 2 });
     expect(await store.get('biz_a', 'agt_t1')).toMatchObject({ specRevision: 2, draftSpec: { goal: 'Answer more' }, state: 'draft' });
+    // The revision lives in agents.spec_revision, so a new store (a restart) reads it back.
+    expect(await dbAgentDraftStore(h.db).get('biz_a', 'agt_t1')).toMatchObject({ specRevision: 2 });
+    expect((await h.db.query('select spec_revision from agents where id = $1', ['agt_t1'])).rows[0]).toEqual({ spec_revision: 2 });
   });
 
   // Review finding 6: the template column follows the draft, so the summary and call stage agree with it.

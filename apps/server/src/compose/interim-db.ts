@@ -1,79 +1,59 @@
-// INTERIM(0005): the writes in this file wait for migration 0005 (branch arsh/B-06b-migration-0005),
-// which adds one checked, all-or-nothing routine for each. Until then they run here, as abos_app, each
-// in one transaction, using only what 0004 grants: finish_execution and enqueue_sheets_sync (routines)
-// and direct UPDATEs on orders and bookings. Every function is marked INTERIM(0005).
+// The database writes that migration 0005 serves, behind the InterimDb port (compose/ports.ts).
+// Since the 0005 merge most of them call the routine wrappers from @abos/db. What still runs here
+// without a routine is marked INTERIM(0005), with the routine it waits for.
 //
-// To swap: implement InterimDb (compose/ports.ts) with the 0005 wrappers and pass it to composeServer
-// as `interim`, or replace the body of createInterimDb. Nothing else changes.
+// To swap again: change the bodies below. Callers see only InterimDb.
 import type { ActivityEvent } from '@abos/contracts';
-import { enqueueSheetsSync, finishExecution } from '@abos/db';
-import type { Db, QueryDb } from '../db/index';
+import { markOrderPaid, markOrderPaymentFailed, recoverStaleExecutions } from '@abos/db';
+import type { Db } from '../db/index';
 import { emitActivity } from '../policy/activity';
 import { executionFromRow } from '../policy/engine';
 import type { InterimDb } from './ports';
 
 type Row = Record<string, unknown>;
 
-export function createInterimDb(db: Db, deps: { newId(prefix: string): string; now(): Date }): InterimDb {
-  const statusEvent = (q: QueryDb, businessId: string, correlationId: string, type: 'order.status_changed' | 'booking.status_changed', payload: Record<string, unknown>) =>
-    emitActivity(q, { id: deps.newId('evt_'), businessId, correlationId, type, actorType: 'system', occurredAt: deps.now().toISOString(), payload });
+/** 0005 refuses a stale window under one minute. */
+export const MIN_STALE_AFTER_MS = 60_000;
 
+export function createInterimDb(db: Db, deps: { newId(prefix: string): string; now(): Date }): InterimDb {
   return {
-    // INTERIM(0005): replace with private.recover_stale_executions(p_older_than timestamptz) returns setof public.action_executions.
-    // abos_app cannot UPDATE action_executions, so this finishes each stale step through finish_execution
-    // under the dead worker's own lease and attempt (read from the row): the only path 0004 allows.
+    // private.recover_stale_executions, per business, on the database clock. The executor gives a
+    // cutoff; the routine wants the window, which is now minus that cutoff (at least one minute).
     async recoverStaleExecutions({ olderThan }) {
-      const stale = (await db.query(`select id from public.action_executions where status = 'RUNNING' and locked_at < $1 order by locked_at`, [olderThan])).rows as Row[];
+      const staleAfterMs = Math.max(MIN_STALE_AFTER_MS, deps.now().getTime() - olderThan.getTime());
+      const businesses = (await db.query("select distinct business_id from public.action_executions where status = 'RUNNING' order by business_id", [])).rows as Row[];
       const moved = [];
-      for (const s of stale) {
-        const row = await db.transaction(async (tx) => {
-          const x = (await tx.query(`select e.*, a.bundle_type, a.subject_id from public.action_executions e join public.approval_requests a on a.id = e.approval_id
-            where e.id = $1 and e.status = 'RUNNING' and e.locked_at < $2`, [s.id, olderThan])).rows[0] as Row | undefined;
-          if (!x || typeof x.locked_by !== 'string') return undefined;
-          const businessId = String(x.business_id);
-          const finished = await finishExecution(tx, { businessId, executionId: String(x.id), workerId: x.locked_by, attempt: Number(x.attempts),
-            status: 'NEEDS_REVIEW', error: 'INTERNAL: lease went stale; the provider outcome is unknown' });
-          if (x.action_type === 'square.checkout.create') {
-            const o = (await tx.query(`update public.orders set status = 'RECOVERY_REQUIRED' where id = $1 and business_id = $2 and status = 'CREATING_CHECKOUT' returning call_id`, [x.subject_id, businessId])).rows[0] as Row | undefined;
-            if (o) await statusEvent(tx, businessId, String(x.approval_id), 'order.status_changed', { orderId: x.subject_id, callId: o.call_id, from: 'CREATING_CHECKOUT', to: 'RECOVERY_REQUIRED' });
-          } else if (x.action_type === 'calendar.event.create') {
-            const b = (await tx.query(`update public.bookings set status = 'RETRY_REQUIRED' where id = $1 and business_id = $2 and status = 'RECHECKING_SLOT' returning call_id`, [x.subject_id, businessId])).rows[0] as Row | undefined;
-            if (b) await statusEvent(tx, businessId, String(x.approval_id), 'booking.status_changed', { bookingId: x.subject_id, ...(typeof b.call_id === 'string' ? { callId: b.call_id } : {}), from: 'RECHECKING_SLOT', to: 'RETRY_REQUIRED' });
-          }
-          return finished;
-        });
-        if (row) moved.push(executionFromRow(row));
+      for (const b of businesses) {
+        const rows = await recoverStaleExecutions(db, { businessId: String(b.business_id), staleAfterMs });
+        moved.push(...rows.map(executionFromRow));
       }
       return moved;
     },
 
-    // INTERIM(0005): replace with private.mark_order_paid(p_business text, p_order text, p_payment_id text, p_events jsonb) returns public.orders.
-    async markPaid(tx, { businessId, orderId, paymentId, events }) {
-      const paid = (await tx.query(`update public.orders set status = 'PAID_VERIFIED', square_payment_id = $3
-        where id = $1 and business_id = $2 and status in ('PAYMENT_PENDING', 'PAYMENT_FAILED') and (square_payment_id is null or square_payment_id = $3)
-        returning approval_id`, [orderId, businessId, paymentId])).rows[0] as Row | undefined;
-      if (!paid) throw new Error('INVALID_STATE: order is not waiting for payment');
-      const job = await enqueueSheetsSync(tx, { businessId, recordType: 'order', recordId: orderId });
+    // private.mark_order_paid writes PAID_VERIFIED, the payment ID, the Sheets job and the events
+    // order.status_changed, payment.verified and sync.queued itself, so only the caller's last event
+    // (PAID_VERIFIED to FULFILLMENT_READY) is written here.
+    async markPaid(tx, { businessId, orderId, paymentId, amountMinor, currency, events }) {
+      await markOrderPaid(tx, { businessId, orderId, paymentId, amountMinor, currency });
+      // INTERIM(0005): replace with a routine such as private.mark_order_fulfillment_ready(p_business text, p_order text).
+      // abos_app still has UPDATE on orders, so the move runs here, conditional on PAID_VERIFIED, in the same transaction.
       const ready = await tx.query(`update public.orders set status = 'FULFILLMENT_READY' where id = $1 and business_id = $2 and status = 'PAID_VERIFIED' returning id`, [orderId, businessId]);
       if (ready.rows.length !== 1) throw new Error('INVALID_STATE: paid order did not move to FULFILLMENT_READY');
-      // The caller's events, in order: to PAID_VERIFIED, payment.verified, to FULFILLMENT_READY. sync.queued follows the first.
-      const [toPaid, ...rest] = events;
-      if (toPaid) await emitActivity(tx, toPaid);
-      await emitActivity(tx, { id: deps.newId('evt_'), businessId, correlationId: String(paid.approval_id ?? orderId), type: 'sync.queued', actorType: 'system',
-        occurredAt: deps.now().toISOString(), payload: { target: 'google_sheets', syncJobId: job.id, recordType: 'order', recordId: orderId } });
-      for (const e of rest) await emitActivity(tx, e);
+      const last = events.filter((e: ActivityEvent) => e.type === 'order.status_changed').at(-1);
+      if (last && (last.payload as { to?: string }).to === 'FULFILLMENT_READY') await emitActivity(tx, last);
     },
 
-    // INTERIM(0005): replace with private.mark_order_payment_failed(p_business text, p_order text, p_payment_id text, p_events jsonb) returns public.orders.
-    async markFailed(tx, { businessId, orderId, events }: { businessId: string; orderId: string; paymentId: string; events: ActivityEvent[] }) {
-      const failed = await tx.query(`update public.orders set status = 'PAYMENT_FAILED' where id = $1 and business_id = $2 and status = 'PAYMENT_PENDING' returning id`, [orderId, businessId]);
-      if (failed.rows.length !== 1) throw new Error('INVALID_STATE: order is not PAYMENT_PENDING');
-      for (const e of events) await emitActivity(tx, e);
+    // private.mark_order_payment_failed writes the status change and payment.failed itself.
+    async markFailed(tx, { businessId, orderId, paymentId, events }) {
+      const failed = events.find((e: ActivityEvent) => e.type === 'payment.failed');
+      const reason = String((failed?.payload as { reason?: unknown } | undefined)?.reason ?? 'FAILED').slice(0, 200) || 'FAILED';
+      await markOrderPaymentFailed(tx, { businessId, orderId, paymentId, reason });
     },
 
-    // INTERIM(0005): replace with a routine such as private.mark_webhook_processed(p_id text, p_error text). It is not in the
-    // 0005 brief yet. 0004 grants abos_app INSERT but no UPDATE on webhook_events, so processed_at cannot be set here.
+    // INTERIM(0005): replace with a routine such as private.mark_webhook_processed(p_id text, p_error text). 0004 and 0005
+    // grant abos_app INSERT but no UPDATE on webhook_events, so processed_at cannot be set here.
     async markWebhookProcessed() {
+      void deps.newId;
       return false;
     },
   };

@@ -347,7 +347,8 @@ describe('an executor that crashes between claim and finish', () => {
     await healthy.drain();
     expect((await steps(w, approvalId))[0]!.status).toBe('RUNNING');
     // Past the stale window the step goes to review, never back to QUEUED, and the order to RECOVERY_REQUIRED.
-    w.clock.advance(16 * 60_000);
+    // Test-only time travel on the database clock: the lease was claimed 16 minutes ago.
+    await w.t.admin((q) => q.query("update public.action_executions set locked_at = locked_at - interval '16 minutes' where approval_id = $1 and status = 'RUNNING'", [approvalId]));
     await healthy.drain();
     expect((await steps(w, approvalId)).map((x) => x.status)).toEqual(['NEEDS_REVIEW', 'QUEUED', 'QUEUED']);
     expect((await order(w, orderId)).status).toBe('RECOVERY_REQUIRED');

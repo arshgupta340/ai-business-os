@@ -155,7 +155,7 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
             order,
             markPaid: async ({ paymentId, events }) => {
               if (!order) throw new Error('order not found');
-              await interim.markPaid(tx, { businessId: order.businessId, orderId: order.id, paymentId, events });
+              await interim.markPaid(tx, { businessId: order.businessId, orderId: order.id, paymentId, amountMinor: order.totalMinor, currency: order.currency, events });
             },
             markFailed: async ({ paymentId, events }) => {
               if (!order) throw new Error('order not found');

@@ -53,20 +53,19 @@ export function dbBuilderSessionStore(db: Db): BuilderSessionStore {
  * without one reports 1. It resets on restart; nothing but the preview response reads it.
  */
 export function dbAgentDraftStore(db: Db): AgentDraftStore {
-  const revisions = new Map<string, number>();
+  // agents.spec_revision (0005) holds the builder's revision, so it survives a restart.
   const fromRow = (r: Row): AgentRecord => ({
     id: String(r.id), businessId: String(r.business_id), name: String(r.name), template: r.template as AgentRecord['template'],
     channel: 'phone', state: r.state as AgentRecord['state'], draftSpec: (r.draft_spec ?? {}) as AgentRecord['draftSpec'],
     ...(typeof r.active_version_id === 'string' ? { activeVersionId: r.active_version_id } : {}),
-    seeded: r.seeded === true, specRevision: revisions.get(String(r.id)) ?? 1,
+    seeded: r.seeded === true, specRevision: typeof r.spec_revision === 'number' ? r.spec_revision : 1,
     createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
   });
   return {
     async insert(a) {
-      await db.query(`insert into public.agents (id, business_id, name, template, channel, state, draft_spec, active_version_id, seeded, created_at, updated_at)
-        values ($1,$2,$3,$4,'phone',$5,$6::jsonb,$7,$8,$9,$10)`,
-      [a.id, a.businessId, a.name, a.template, a.state, json(a.draftSpec), a.activeVersionId ?? null, a.seeded, a.createdAt, a.updatedAt]);
-      revisions.set(a.id, a.specRevision);
+      await db.query(`insert into public.agents (id, business_id, name, template, channel, state, draft_spec, active_version_id, seeded, created_at, updated_at, spec_revision)
+        values ($1,$2,$3,$4,'phone',$5,$6::jsonb,$7,$8,$9,$10,$11)`,
+      [a.id, a.businessId, a.name, a.template, a.state, json(a.draftSpec), a.activeVersionId ?? null, a.seeded, a.createdAt, a.updatedAt, a.specRevision]);
     },
     async get(businessId, id) {
       const r = (await db.query('select * from public.agents where id = $1 and business_id = $2', [id, businessId])).rows[0] as Row | undefined;
@@ -78,10 +77,9 @@ export function dbAgentDraftStore(db: Db): AgentDraftStore {
     async update(a) {
       // Publish state and versions belong to B-17. This store changes only the draft fields.
       // The template column follows the draft (review finding 6): the summary and the call stage read it.
-      const r = await db.query('update public.agents set name = $3, draft_spec = $4::jsonb, template = $5 where id = $1 and business_id = $2 returning id',
-        [a.id, a.businessId, a.name, json(a.draftSpec), a.template]);
+      const r = await db.query('update public.agents set name = $3, draft_spec = $4::jsonb, template = $5, spec_revision = $6 where id = $1 and business_id = $2 returning id',
+        [a.id, a.businessId, a.name, json(a.draftSpec), a.template, a.specRevision]);
       if (r.rows.length === 0) throw new Error(`unknown agent ${a.id}`);
-      revisions.set(a.id, a.specRevision);
     },
   };
 }
