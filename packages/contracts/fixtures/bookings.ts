@@ -1,6 +1,6 @@
 // Barbershop bookings and the fixed calendar busy blocks the mock availability tool reads.
 // All appointments are on Tuesday 2026-11-17 (PST, UTC-8): hours 09:00 to 18:00 local, 17:00Z to 02:00Z.
-import { BARBER_BUSINESS_ID, SEEDED_TIMEZONE, type Booking, type ServiceOffering } from '../src/index';
+import { BARBER_BUSINESS_ID, SEEDED_TIMEZONE, toCanonicalTimestamp, type Booking, type ServiceOffering } from '../src/index';
 import { serviceBeardTrim, serviceHaircut, serviceHaircutBeard } from './facts';
 import { storedKey } from './hashes';
 import { BARBER_CALENDAR_ID, MINUTE_MS, addMs } from './world';
@@ -28,8 +28,10 @@ function booking(b: BookingInput): Booking {
     status: b.status,
     serviceId: b.service.id,
     serviceName: b.service.name,
-    startUtc: b.startUtc,
-    endUtc: addMs(b.startUtc, b.service.durationMinutes * MINUTE_MS),
+    // Issue #103: the slot is written in `toISOString()` form, the form the approval payload hashes and the
+    // server stores (CONTRACTS 4), so the booking and its payload carry the same text.
+    startUtc: toCanonicalTimestamp(b.startUtc),
+    endUtc: toCanonicalTimestamp(addMs(b.startUtc, b.service.durationMinutes * MINUTE_MS)),
     timezone: SEEDED_TIMEZONE,
     calendarId: BARBER_CALENDAR_ID,
     customer: { name: b.customerName, messageRecipient: b.recipient, messageConsent: true },
@@ -63,10 +65,28 @@ export const bookingSlotConflict = booking({
   customerName: 'Chris', recipient: '+15555550142', createdAt: '2026-11-14T17:50:00Z', updatedAt: '2026-11-14T17:52:02Z',
 });
 
-export const bookingRejected: Booking = { ...bookingAwaitingApproval, id: 'bkg_demo_b88r', approvalId: 'apv_demo_b88r', status: 'REJECTED', startUtc: '2026-11-17T23:45:00Z', endUtc: '2026-11-18T00:30:00Z', createdAt: '2026-11-14T19:00:00Z', updatedAt: '2026-11-14T19:01:00Z' };
-export const bookingExpired: Booking = { ...bookingRejected, id: 'bkg_demo_b88e', approvalId: 'apv_demo_b88e', status: 'EXPIRED', startUtc: '2026-11-18T00:30:00Z', endUtc: '2026-11-18T01:15:00Z', updatedAt: '2026-11-14T19:10:00Z' };
-export const bookingRetryRequired: Booking = { ...bookingRejected, id: 'bkg_demo_b88t', approvalId: 'apv_demo_b88t', status: 'RETRY_REQUIRED', startUtc: '2026-11-18T01:15:00Z', endUtc: '2026-11-18T02:00:00Z' };
-export const bookingMessageUnknown: Booking = { ...bookingVerified, id: 'bkg_demo_b88u', approvalId: 'apv_demo_b88u', startUtc: '2026-11-18T00:00:00Z', endUtc: '2026-11-18T00:30:00Z', googleEventId: storedKey('idem:exe_demo_b88u_0') };
+/**
+ * A copy of `base` in another state. It keeps the service and the message recipient, which are hashed in
+ * its approval payload, and gets its own call and customer name (issue #103): Live operations shows one
+ * row per call.
+ */
+function variant(base: Booking, n: string, customerName: string, changes: Partial<Booking> & { startUtc: string; endUtc: string }): Booking {
+  return {
+    ...base,
+    ...changes,
+    id: `bkg_demo_${n}`,
+    callId: `call_demo_${n}`,
+    approvalId: `apv_demo_${n}`,
+    customer: { ...base.customer, name: customerName },
+    startUtc: toCanonicalTimestamp(changes.startUtc),
+    endUtc: toCanonicalTimestamp(changes.endUtc),
+  };
+}
+
+export const bookingRejected: Booking = variant(bookingAwaitingApproval, 'b88r', 'Dana', { status: 'REJECTED', startUtc: '2026-11-17T23:45:00Z', endUtc: '2026-11-18T00:30:00Z', createdAt: '2026-11-14T19:00:00Z', updatedAt: '2026-11-14T19:01:00Z' });
+export const bookingExpired: Booking = variant(bookingRejected, 'b88e', 'Eli', { status: 'EXPIRED', startUtc: '2026-11-18T00:30:00Z', endUtc: '2026-11-18T01:15:00Z', updatedAt: '2026-11-14T19:10:00Z' });
+export const bookingRetryRequired: Booking = variant(bookingRejected, 'b88t', 'Farah', { status: 'RETRY_REQUIRED', startUtc: '2026-11-18T01:15:00Z', endUtc: '2026-11-18T02:00:00Z' });
+export const bookingMessageUnknown: Booking = variant(bookingVerified, 'b88u', 'Gus', { startUtc: '2026-11-18T00:00:00Z', endUtc: '2026-11-18T00:30:00Z', googleEventId: storedKey('idem:exe_demo_b88u_0') });
 
 export const bookings: Booking[] = [bookingAwaitingApproval, bookingSlotConflict, bookingVerified, bookingRejected, bookingExpired, bookingRetryRequired, bookingMessageUnknown];
 

@@ -77,6 +77,17 @@ export const barberCalls: Call[] = [
     startedAt: '2026-11-14T17:48:00Z', endedAt: '2026-11-14T17:50:30Z' }),
   call({ id: 'call_demo_b04', business: 'barber', channel: 'phone', stage: 'SLOT_SEARCH', status: 'DROPPED', endReason: 'dropped', callerLast4: '0143',
     startedAt: '2026-11-14T17:10:00Z', endedAt: '2026-11-14T17:11:30Z' }),
+  // Issue #103: one call per booking. These four bookings used to reuse call_demo_b01 or call_demo_b02.
+  // All four are simulated calls: three ran after 18:55Z, when the pizza agent held the number, and the
+  // fourth ran while call_demo_b02 was on the line.
+  call({ id: 'call_demo_b88r', business: 'barber', channel: 'test_console', stage: 'CUSTOMER_CONFIRMED', status: 'COMPLETED', endReason: 'completed',
+    startedAt: '2026-11-14T18:56:40Z', endedAt: '2026-11-14T19:00:20Z' }),
+  call({ id: 'call_demo_b88e', business: 'barber', channel: 'test_console', stage: 'CUSTOMER_CONFIRMED', status: 'COMPLETED', endReason: 'completed',
+    startedAt: '2026-11-14T18:57:30Z', endedAt: '2026-11-14T19:00:35Z' }),
+  call({ id: 'call_demo_b88t', business: 'barber', channel: 'test_console', stage: 'CUSTOMER_CONFIRMED', status: 'COMPLETED', endReason: 'completed',
+    startedAt: '2026-11-14T18:58:10Z', endedAt: '2026-11-14T19:00:50Z' }),
+  call({ id: 'call_demo_b88u', business: 'barber', channel: 'test_console', stage: 'CUSTOMER_CONFIRMED', status: 'COMPLETED', endReason: 'completed',
+    startedAt: '2026-11-14T17:29:20Z', endedAt: '2026-11-14T17:32:25Z' }),
 ];
 
 export const calls: Call[] = [...pizzaCalls, ...barberCalls];
