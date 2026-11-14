@@ -72,7 +72,11 @@ export class PublishService {
       const agent = await this.getAgent(actor.businessId, agentId);
       const synced = await runCatalogSync(this.deps.syncCatalog, { businessId: agent.businessId, agentId: agent.id, correlationId: actor.correlationId });
       await assertNoOpenRequiredConflict(this.deps.conflicts, agent.businessId);
-      await this.assertStopConditions(agent);
+      // The draft is validated before any stop check reads it, so a malformed
+      // stored draft is the contract error, never a crash. The version number
+      // here is a placeholder; the version written below is validated again.
+      const candidate = this.validateSpec({ ...agent.draftSpec, id: agent.id, businessId: agent.businessId, version: 1, status: 'live' });
+      await this.assertStopConditions(agent, candidate);
 
       const active = await this.activeVersion(agent);
       let version: AgentVersionRecord;
@@ -154,20 +158,22 @@ export class PublishService {
   // conflict the knowledge reports is CONFLICT_UNRESOLVED; a required
   // integration that is down is INTEGRATION_UNAVAILABLE. Unconfirmed chat
   // drafts do not stop a publish. The spec itself (unsupported tools) is
-  // checked by validateSpec, and the owner's confirm by the route.
-  private async assertStopConditions(agent: AgentRecord): Promise<void> {
+  // checked by validateSpec before this, and the owner's confirm by the route.
+  // Not checked, because the builder has no data for them: which products must
+  // have a price, and ambiguous product mappings (FLOWS stop conditions 1, 2).
+  private async assertStopConditions(agent: AgentRecord, spec: AgentSpec): Promise<void> {
     const context = await this.deps.knowledge.getContext(agent.businessId);
     if (!context) throw apiError('NOT_FOUND', 'Business not found.');
     if (context.openRequiredConflictIds.length > 0) {
       throw apiError('CONFLICT_UNRESOLVED', 'Resolve the open conflicts before publishing.', { conflictIds: [...context.openRequiredConflictIds] });
     }
-    const stops = publishStopConditions(agent.draftSpec, context);
+    const stops = publishStopConditions(spec, context);
     if (stops.length > 0) {
       throw apiError('VALIDATION_FAILED', 'The agent cannot be published until these are fixed.', {
         issues: stops.map((c) => ({ path: c.code, code: c.code, message: STOP_MESSAGES[c.code] })),
       });
     }
-    const down = await unavailableIntegrations(this.deps.integrations, agent.draftSpec.capabilities ?? []);
+    const down = await unavailableIntegrations(this.deps.integrations, spec);
     if (down.length > 0) {
       throw apiError('INTEGRATION_UNAVAILABLE', 'A provider this agent needs is not reachable right now. Try again.', { provider: down[0], providers: down });
     }
@@ -305,7 +311,7 @@ export class PublishService {
 const STOP_MESSAGES: Record<string, string> = {
   missing_timezone: 'The business has no time zone.',
   missing_message_consent_policy: 'The message consent policy is missing.',
-  missing_price: 'The catalog has no priced items for this agent to sell.',
+  empty_catalog: 'The agent needs a catalog, and the catalog has no items.',
 };
 
 function last4(phone: string): string {
