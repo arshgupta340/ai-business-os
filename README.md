@@ -52,3 +52,7 @@ node scripts/board.mjs next saina
 ## Secrets
 
 Copy `.env.example` to `.env.local` and fill it in. Never commit it.
+
+## License
+
+All rights reserved. This repository is public for the hackathon organizers and judges to read. It is not open source: see [LICENSE](LICENSE). Do not copy or reuse this code.

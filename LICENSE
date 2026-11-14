@@ -1,0 +1,12 @@
+Copyright (c) 2026 Arsh Gupta and Saina Kakkar. All rights reserved.
+
+This repository is public so that the organizers and judges of the hackathon
+it was built for can read the code and check how it was built.
+
+No license is granted. You may view the source on GitHub. You may not copy,
+reuse, modify, publish, distribute or submit this code, or any part of it, in
+this or any other project or competition, without written permission from
+both authors.
+
+Third-party packages named in package.json and package-lock.json remain under
+their own licenses.
