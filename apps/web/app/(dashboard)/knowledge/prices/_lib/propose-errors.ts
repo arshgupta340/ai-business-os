@@ -1,9 +1,12 @@
 /**
  * Owner-facing text for each documented error of
  * POST /api/businesses/:id/catalog/prices/propose (API.md 3.1), plus the
- * errors every screen handles (screen data map, rule 9).
+ * errors every screen handles (screen data map, rule 9). Any other code reads
+ * the shared sentence from errorText. The server message is never shown.
  */
 import {isApiError} from '@/lib/api';
+import {errorCodeText, errorText} from '@/lib/error-text';
+import {providerLabel} from '@/lib/labels';
 
 export type ProposeErrorView = {
   title: string;
@@ -24,7 +27,7 @@ export function isMissingRoute(error: unknown): boolean {
 
 export function proposeErrorView(error: unknown): ProposeErrorView {
   if (!isApiError(error)) {
-    return {title: 'The change was not proposed', message: error instanceof Error ? error.message : 'Something went wrong.', retryable: true};
+    return {title: 'The change was not proposed', message: errorText(error), retryable: true};
   }
   const base = {retryable: error.retryable, correlationId: error.correlationId};
   switch (error.code) {
@@ -43,7 +46,7 @@ export function proposeErrorView(error: unknown): ProposeErrorView {
         message: 'Square no longer has this variation, or the catalog here is out of date. Run Sync from Square on Business Knowledge, then try again.',
       };
     case 'INTEGRATION_UNAVAILABLE': {
-      const provider = typeof error.details?.provider === 'string' ? error.details.provider : 'Square';
+      const provider = typeof error.details?.provider === 'string' ? providerLabel(error.details.provider) : 'Square';
       return {
         ...base,
         title: `${provider} is not responding`,
@@ -57,18 +60,15 @@ export function proposeErrorView(error: unknown): ProposeErrorView {
         message: 'Payment work is refused, so this price change was not proposed.',
       };
     case 'VALIDATION_FAILED': {
-      const issues = Array.isArray(error.details?.issues) ? error.details.issues : [];
-      const text = issues
-        .map((i) => (i && typeof i === 'object' && 'message' in i ? String((i as {message: unknown}).message) : ''))
-        .filter(Boolean)
-        .join('. ');
-      return {...base, title: 'The server did not accept this price', message: error.message, fieldMessage: text || error.message};
+      // The issue messages are written by the server and can name a field, so they are not shown.
+      const message = errorCodeText('VALIDATION_FAILED');
+      return {...base, title: 'The server did not accept this price', message, fieldMessage: message};
     }
     case 'FORBIDDEN_BUSINESS':
       return {...base, title: 'No access', message: 'You do not have access to this business.'};
     case 'RATE_LIMITED':
       return {...base, title: 'Too many requests', message: 'Wait a moment, then try again.'};
     default:
-      return {...base, title: 'The change was not proposed', message: error.message};
+      return {...base, title: 'The change was not proposed', message: errorText(error)};
   }
 }

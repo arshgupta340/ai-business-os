@@ -8,6 +8,7 @@ import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import type {Order, OrderCheckout} from '@/lib/api';
 import {formatTime} from '@/lib/format';
+import {messageChannelSender} from '@/lib/labels';
 import {statusView} from '@/lib/status';
 import {SandboxBadge} from '@/components/SandboxBadge';
 import {StatusBadge} from '@/components/StatusBadge';
@@ -32,7 +33,7 @@ export function messageCopy(message: MessageView | undefined, qrOnly: boolean, p
     };
   }
   const view = statusView('messageDispatch', message.status);
-  const via = message.channel ? ` (${message.channel})` : '';
+  const via = message.channel ? ` through ${messageChannelSender(message.channel)}` : '';
   switch (message.status) {
     case 'QUEUED':
       return {title: `${view.label}${via}`, description: 'The message is waiting to go out. It has not been sent yet.', tone: view.tone};

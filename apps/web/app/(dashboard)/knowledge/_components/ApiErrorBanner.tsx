@@ -4,8 +4,9 @@ import {Banner} from '@astryxdesign/core/Banner';
 import {Button} from '@astryxdesign/core/Button';
 import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
-import {PROVIDER_LABELS} from '@/components/shell/ConnectionHealth';
 import {isApiError} from '@/lib/api';
+import {errorText} from '@/lib/error-text';
+import {providerLabel} from '@/lib/labels';
 
 /**
  * The real server's answer to POST /api/conflicts/:id/resolve for a conflict
@@ -23,33 +24,26 @@ export function isResolveOnFactsList(error: unknown): boolean {
   );
 }
 
-/** Owner-facing text for an error from the API layer (screen data map, "Rules every screen follows" 9). */
-export function errorText(error: unknown): string {
-  if (!isApiError(error)) return error instanceof Error ? error.message : 'Something went wrong.';
+/**
+ * Owner-facing text for an error from the API layer (screen data map, "Rules
+ * every screen follows" 9). This screen keeps its own sentence for the two
+ * codes it handles in a special way. Every other code reads the shared
+ * sentence from errorText. The server message is never shown.
+ */
+export function knowledgeErrorText(error: unknown): string {
+  if (!isApiError(error)) return errorText(error);
   switch (error.code) {
-    case 'FORBIDDEN_BUSINESS':
-      return 'You do not have access to this business.';
-    case 'NOT_FOUND':
-      return 'Not found in this business.';
     case 'ENVIRONMENT_MISMATCH':
       return 'Square is not in sandbox. Payment work is refused.';
     case 'INTEGRATION_UNAVAILABLE': {
       if (isResolveOnFactsList(error)) {
         return 'This server resolves this conflict with a change that you confirm in Approvals. Nothing changed yet.';
       }
-      const raw = typeof error.details?.provider === 'string' ? error.details.provider : null;
-      const provider = raw ? ((PROVIDER_LABELS as Record<string, string>)[raw] ?? raw) : 'A provider';
-      return `${provider} is not responding.`;
-    }
-    case 'VALIDATION_FAILED': {
-      const issues = Array.isArray(error.details?.issues) ? error.details.issues : [];
-      const text = issues
-        .map((issue) => (issue && typeof issue === 'object' && 'message' in issue ? String(issue.message) : ''))
-        .filter(Boolean);
-      return text.length ? `${error.message} (${text.join('. ')})` : error.message;
+      if (typeof error.details?.provider === 'string') return `${providerLabel(error.details.provider)} is not responding.`;
+      return errorText(error);
     }
     default:
-      return error.message;
+      return errorText(error);
   }
 }
 
@@ -70,7 +64,7 @@ export function ApiErrorBanner({
     <Banner
       status="error"
       title={title}
-      description={errorText(error)}
+      description={knowledgeErrorText(error)}
       container="card"
       endContent={onRetry && retryable ? <Button label="Try again" onClick={() => onRetry()} /> : undefined}>
       {correlationId ? (

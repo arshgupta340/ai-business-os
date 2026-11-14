@@ -25,14 +25,12 @@ import {formatMoney} from '@/lib/format';
 import {conflictView} from '@/lib/status';
 import {ApiErrorBanner, isResolveOnFactsList} from './ApiErrorBanner';
 import {ProposalNotice} from './ProposalNotice';
+import {factKeyLabel, factKindGroupLabel, factSourceLabel} from '@/lib/labels';
 import {
-  KIND_LABELS,
   conflictVariationId,
   describeValue,
-  factKeyLabel,
   findVariation,
   isPriceConflict,
-  sourceTypeLabel,
   splitCandidates,
   summarizeConflicts,
 } from './knowledge-model';
@@ -81,7 +79,7 @@ export function ConflictCard({businessId, conflict, facts, catalog, onResolved, 
   const subject = match
     ? `${match.item.name}, ${match.variation.name}`
     : factKeyLabel(conflict.kind, conflict.key, uploadedFact?.value ?? uploaded?.value);
-  const authorityName = authority ? sourceTypeLabel(authority.sourceType) : 'the current value';
+  const authorityName = authority ? factSourceLabel(authority.sourceType) : 'the current value';
   const keepLabel = price && authority?.sourceType === 'square' ? 'Keep the Square price' : 'Keep the current value';
   const busy = resolve.isPending || propose.isPending;
 
@@ -138,7 +136,7 @@ export function ConflictCard({businessId, conflict, facts, catalog, onResolved, 
           <VStack gap={0.5}>
             <Heading level={3}>{subject}</Heading>
             <Text type="supporting">
-              {price ? 'Menu price' : KIND_LABELS[conflict.kind]}, key {conflict.key}
+              {price ? 'Menu price' : factKindGroupLabel(conflict.kind)}, key {conflict.key}
             </Text>
           </VStack>
           <StatusBadge label={view.label} tone={view.tone} />
@@ -149,7 +147,7 @@ export function ConflictCard({businessId, conflict, facts, catalog, onResolved, 
             title="In your uploaded file"
             kind={conflict.kind}
             value={uploaded?.value}
-            source={`${uploaded ? sourceTypeLabel(uploaded.sourceType) : 'Uploaded file'}${
+            source={`${uploaded ? factSourceLabel(uploaded.sourceType) : 'Uploaded file'}${
               file.data ? `: ${file.data.name}` : ''
             }${uploaded?.sourceRef ? `, reference ${uploaded.sourceRef}` : ''}`}
           />
