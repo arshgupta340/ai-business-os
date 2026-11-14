@@ -90,6 +90,16 @@ describe('fixtures parse with the contract schemas', () => {
     parsesAll(ActivityEventSchema, F.allActivityEvents, 'activity');
   });
 
+  it('the agentphone examples parse and stay out of the shared lists', () => {
+    parses(MessageDispatchSchema, F.messageDispatchAgentphone, 'agentphone dispatch');
+    expect(F.messageDispatchAgentphone).toMatchObject({ channel: 'agentphone', status: 'DELIVERED' });
+    parses(ActivityEventSchema, F.webhookRejectedAgentphoneEvent, 'agentphone webhook.rejected');
+    expect(F.webhookRejectedAgentphoneEvent).toMatchObject({ type: 'webhook.rejected', payload: { provider: 'agentphone' } });
+    expect(F.messageDispatches.some((d) => d.id === F.messageDispatchAgentphone.id)).toBe(false);
+    expect(F.allActivityEvents.some((e) => e.id === F.webhookRejectedAgentphoneEvent.id)).toBe(false);
+    expect(ms(F.webhookRejectedAgentphoneEvent.occurredAt)).toBeLessThanOrEqual(ms(F.FIXTURE_NOW));
+  });
+
   it('has a valid success fixture for every endpoint in ENDPOINTS', () => {
     const names = Object.keys(ENDPOINTS) as EndpointName[];
     expect(names.length).toBeGreaterThan(40);
@@ -626,6 +636,9 @@ async function checkWorld(W: FixtureWorld): Promise<void> {
     expect(e.idempotencyKey, e.id).toBe(await idempotencyKey({ businessId: e.businessId, subjectId: a?.subjectId ?? '', actionType: e.actionType, approvalId: e.approvalId }));
   }
   for (const d of W.messageDispatches) expect(d.idempotencyKey).toBe(W.executions.find((e) => e.id === d.executionId)?.idempotencyKey);
+  parses(MessageDispatchSchema, W.messageDispatchAgentphone, 'agentphone dispatch');
+  expect(W.messageDispatchAgentphone.idempotencyKey).toBe(W.executions.find((e) => e.id === W.messageDispatchAgentphone.executionId)?.idempotencyKey);
+  parses(ActivityEventSchema, W.webhookRejectedAgentphoneEvent, 'agentphone webhook.rejected');
   expect(W.bookingVerified.googleEventId).toBe(W.executions.find((e) => e.id === 'exe_demo_b02_0')?.idempotencyKey);
 }
 
