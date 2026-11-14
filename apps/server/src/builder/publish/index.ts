@@ -10,6 +10,7 @@ import type { AgentDraftStore } from '../session/stores';
 import { checkedResponse } from '../respond';
 import { parseOrThrow } from '../util';
 import { RecordingCatalogSync, type CatalogSync } from './catalog-sync';
+import type { IntegrationHealthReader } from './integrations';
 import { KeyedLock } from './lock';
 import { PublishService } from './service';
 import {
@@ -31,6 +32,7 @@ import {
 
 export { RecordingCatalogSync, type CatalogSync, type CatalogSyncInput } from './catalog-sync';
 export * from './stores';
+export type { IntegrationHealthReader, IntegrationKey } from './integrations';
 
 // Everything here has an in-memory or recording default.
 export interface PublishOptions {
@@ -38,6 +40,9 @@ export interface PublishOptions {
   liveAgents?: LiveAgentStore;
   events?: PublishEventSink;
   syncCatalog?: CatalogSync;
+  // Integration state for the "integration unreachable" stop condition.
+  // Without it, publish does not check integrations.
+  integrations?: IntegrationHealthReader;
 }
 
 // The demo number of the shared fixtures (the API.md 3.6 example), used only
@@ -49,6 +54,7 @@ export interface PublishStores {
   liveAgents: LiveAgentStore;
   events: PublishEventSink;
   syncCatalog: CatalogSync;
+  integrations?: IntegrationHealthReader;
   lock: KeyedLock;
   // Reads isLiveAgent from the live-agent pointer, for agent summaries.
   liveAgentReader: LiveAgentReader;
@@ -67,6 +73,7 @@ export function createPublishStores(options: PublishOptions | undefined, env: Re
     liveAgents,
     events: options?.events ?? new InMemoryPublishEventSink(),
     syncCatalog: options?.syncCatalog ?? new RecordingCatalogSync().sync,
+    ...(options?.integrations ? { integrations: options.integrations } : {}),
     lock,
     liveAgentReader: {
       async isLiveAgent(businessId, agentId) {
