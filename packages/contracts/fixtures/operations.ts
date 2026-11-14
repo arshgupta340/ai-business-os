@@ -102,6 +102,15 @@ export const otherActivityEvents = [
     payload: { approvalId: 'apv_demo_f01', rule: 'no_approval_bypass', reasonCode: 'approval_pending' } },
 ] satisfies ActivityEvent[];
 
+/**
+ * An AgentPhone webhook that failed its signature check (D-12). It is an example only and is not in
+ * `otherActivityEvents` or `allActivityEvents`, so the activity list and its counts do not change.
+ */
+export const webhookRejectedAgentphoneEvent: ActivityEvent = {
+  id: 'evt_o08', businessId: PIZZA_BUSINESS_ID, type: 'webhook.rejected', correlationId: 'whk_rejected_02', actorType: 'provider', occurredAt: '2026-11-14T19:35:00Z',
+  payload: { provider: 'agentphone', reason: 'signature_invalid' },
+};
+
 /** Every stored event, oldest first. Nothing here is later than `FIXTURE_NOW`. */
 export const allActivityEvents: ActivityEvent[] = [
   ...pizzaOrderTimeline.entries.map((e) => e.event),
