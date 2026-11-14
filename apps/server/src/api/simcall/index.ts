@@ -14,6 +14,9 @@
 // taken at the webhook. It also has one check the phone does not: the caller's text is matched against
 // a fixed list before the model runs (checkCallerMessage). The phone worker reads no transcript.
 //
+// The turn itself (guardrail check, prompt, tools, the proposal cap, stage logic, plain speech) lives in
+// turn.ts and is shared with the AgentPhone phone path (D-12), so both run the same three checks.
+//
 // Why a small runner here: the builder's MockTextRunner refuses any toolset that is not the mock
 // one (AC-03), which is right for preview and test, so it cannot be reused for the real toolset.
 // This runner reuses the builder's exported pieces (the AgentModel interface and its two
@@ -22,52 +25,21 @@
 // It can never skip approval: the model reaches only the seven read and propose tools, a propose
 // tool only stores a proposal and opens a PENDING approval, and nothing here can decide one.
 import {
-  ENDPOINTS, ToolNameSchema, AgentSpecSchema,
-  type AgentSpec, type AgentRunResponse, type CallStage, type CapabilityId, type MessageChannelSetting, type ToolContext, type ToolName,
+  ENDPOINTS, AgentSpecSchema,
+  type AgentSpec, type AgentRunResponse, type CapabilityId, type MessageChannelSetting,
 } from '@abos/contracts';
 import type { FastifyInstance } from 'fastify';
 import type { AgentModel } from '../../builder/runner/agent-model';
-import { checkCallerMessage, refusalReply } from '../../builder/runner/guardrails';
 import type { Db } from '../../db/index';
 import { AppError } from '../../errors';
-import { emitActivity } from '../../policy/activity';
 import type { RealToolset } from '../../tools/real/types';
-import { buildInstructions } from '../../voice/prompt';
-import { DEFAULT_LIMITS, checkSessionCapabilities, nextStage } from '../../voice/relay';
-import { PLAIN_SPEECH_RULE, plainSpeech } from './plain';
+import { checkSessionCapabilities } from '../../voice/relay';
+import { initialTurnStage, runAgentTurn, type TurnSession } from './turn';
 import type { CallsStore } from '../../compose/ports';
 
-const MAX_TOOL_CALLS_PER_TURN = 8;
-/**
- * Issue #95 item 8: the phone path's cap on proposals per call, here too. A turn is bounded by the cap
- * above, but a call has any number of turns. The count is read from the proposals the database holds
- * for the call, so it survives a restart, which the in-memory session does not.
- */
-const MAX_PROPOSALS_PER_CALL = DEFAULT_LIMITS.maxProposals;
-
-/**
- * Live run 2026-11-14: turns carry only spoken text, so after propose_order the model no longer saw its
- * own tool result and told the caller nothing was submitted. Once the call has a proposal (stage
- * CUSTOMER_CONFIRMED, kept on the call row), every later turn is told so. The phone relay needs no such
- * line: its Realtime session keeps the function call outputs in the conversation.
- */
-export function proposalSentNote(template: AgentSpec['template'], stage: CallStage): string | undefined {
-  if (stage !== 'CUSTOMER_CONFIRMED') return undefined;
-  return template === 'appointment_booker'
-    ? 'On this call you already sent this booking request to the shop for approval with propose_booking. If the caller asks or says goodbye, tell them the request was sent to the shop for approval and they will hear once the owner approves it. Do not call propose_booking again, and never say it is not submitted.'
-    : 'On this call you already sent this order to the shop for approval with propose_order. If the caller asks or says goodbye, tell them the order was sent to the shop for approval and that a payment link will follow once the owner approves it. Do not call propose_order again, and never say it is not submitted.';
-}
+// Moved to turn.ts (D-12) so sim-call and the AgentPhone path share them; re-exported for existing imports.
+export { proposalSentNote, simCallInstructions } from './turn';
 const MAX_SESSIONS = 200;
-
-/**
- * The instructions for one simulated turn: the phone prompt for the pinned spec, unchanged, then the
- * text-only lines (issue #95 item 10). A simulated call test therefore exercises the prompt a phone
- * call gets, on a text model.
- */
-export function simCallInstructions(spec: AgentSpec, facts: { businessName: string; messageChannel: MessageChannelSetting }, stage: CallStage): string {
-  const sentNote = proposalSentNote(spec.template, stage);
-  return `${buildInstructions(spec, facts)}\n${PLAIN_SPEECH_RULE}${sentNote ? `\n${sentNote}` : ''}`;
-}
 
 export interface SimCallDeps {
   db: Db;
@@ -84,7 +56,7 @@ export interface SimCallDeps {
   log?: { warn(data: Record<string, unknown>, msg: string): void };
 }
 
-type Session = { toolset: RealToolset; history: { role: 'caller' | 'agent'; text: string }[]; stage: CallStage };
+type Session = TurnSession;
 
 export function registerSimCall(app: FastifyInstance, deps: SimCallDeps): void {
   // SPEC 2.9 "Not persisted": test sessions live in server memory. After a restart a call's next
@@ -108,14 +80,14 @@ export function registerSimCall(app: FastifyInstance, deps: SimCallDeps): void {
     let callId: string;
     let agentVersionId: string;
     let spec: AgentSpec;
-    let tools: ToolName[];
     // The phone path's check (voice/plugin.ts at the webhook, voice/relay.ts on the socket): a pinned spec
     // with a capability an agent may not hold is refused, not run with that capability filtered out.
-    const allowedTools = (pinnedSpec: AgentSpec, versionId: string): ToolName[] | undefined => {
+    // The turn runner applies the same check again and takes its tool list from it (turn.ts).
+    const allowedTools = (pinnedSpec: AgentSpec, versionId: string): boolean => {
       const check = checkSessionCapabilities(pinnedSpec);
-      if (check.ok) return check.tools;
+      if (check.ok) return true;
       deps.log?.warn({ agentVersionId: versionId, unknown: check.unknown.length, notAllowed: check.notAllowed.length }, 'sim-call: agent spec has a capability that is not allowed; call refused');
-      return undefined;
+      return false;
     };
     if (input.callId === undefined) {
       if (agent.state !== 'live' || typeof agent.active_version_id !== 'string') {
@@ -128,7 +100,6 @@ export function registerSimCall(app: FastifyInstance, deps: SimCallDeps): void {
       const allowed = allowedTools(spec, agentVersionId);
       // Refused before the call starts, as on the phone: no call row and no model turn.
       if (!allowed) throw new AppError('INVALID_STATE', 'The published version cannot take calls: it lists a capability an agent may not hold.', undefined, false);
-      tools = allowed;
       ({ callId } = await deps.calls.startSimulatedCall({ businessId, agentId, agentVersionId }));
     } else {
       const call = (await deps.db.query(`select c.status, c.agent_version_id, c.channel, c.stage, v.spec from public.calls c
@@ -149,75 +120,22 @@ export function registerSimCall(app: FastifyInstance, deps: SimCallDeps): void {
         sessions.delete(callId);
         throw new AppError('INVALID_STATE', 'The pinned version cannot take calls: it lists a capability an agent may not hold.', undefined, false);
       }
-      tools = allowed;
       if (!sessions.has(callId)) {
-        sessions.set(callId, { toolset: deps.toolsetFor({ businessId, agentVersionId, callId, capabilities: spec.capabilities }), history: [], stage: call.stage as CallStage });
+        sessions.set(callId, { toolset: deps.toolsetFor({ businessId, agentVersionId, callId, capabilities: spec.capabilities }), history: [], stage: call.stage as TurnSession['stage'] });
       }
     }
     let session = sessions.get(callId);
     if (!session) {
       if (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value as string);
-      session = { toolset: deps.toolsetFor({ businessId, agentVersionId, callId, capabilities: spec.capabilities }), history: [], stage: spec.template === 'appointment_booker' ? 'INQUIRY' : 'CALL_STARTED' };
+      session = { toolset: deps.toolsetFor({ businessId, agentVersionId, callId, capabilities: spec.capabilities }), history: [], stage: initialTurnStage(spec) };
       sessions.set(callId, session);
     }
 
-    const ctx: ToolContext = { businessId, agentVersionId, callId, correlationId: callId };
-    let response: AgentRunResponse;
-
-    const refused = checkCallerMessage(input.message);
-    if (refused) {
-      // AC-06: a refused attempt runs no tool.
-      await emitActivity(deps.db, { id: deps.newId('evt_'), businessId, correlationId: callId, type: 'guardrail.refused', actorType: 'deployed_agent',
-        occurredAt: deps.now().toISOString(), payload: { callId, reasonCode: 'caller_message', rule: refused } });
-      response = { callId, reply: plainSpeech(refusalReply(refused, tools)), toolTrace: [], guardrail: { refused: true, rule: refused } };
-    } else {
-      session.toolset.clearTrace();
-      let calls = 0;
-      const s = session;
-      const executeTool = async (rawName: string, rawInput: unknown): Promise<unknown> => {
-        calls += 1;
-        if (calls > MAX_TOOL_CALLS_PER_TURN) return { ok: false, reason: 'VALIDATION_FAILED', message: 'Too many tool calls in one turn.' };
-        const named = ToolNameSchema.safeParse(rawName);
-        // There is no tool for any write or external_message capability (AGENTS rule 6).
-        if (!named.success || !tools.includes(named.data)) {
-          // Recorded as the phone relay records it: guardrail.refused with a fixed code, and a log line with
-          // the name's length only. The name and the arguments came from the model and are never stored.
-          const known = named.success ? named.data : undefined;
-          deps.log?.warn({ callId, tool: known ?? 'unknown_tool', nameLength: rawName.length }, known ? 'sim-call: model asked for a tool this agent does not have' : 'sim-call: model asked for an unknown tool');
-          await emitActivity(deps.db, { id: deps.newId('evt_'), businessId, correlationId: callId, type: 'guardrail.refused', actorType: 'deployed_agent',
-            occurredAt: deps.now().toISOString(), payload: { callId, rule: 'unsupported_request', reasonCode: known ? 'tool_not_allowed' : 'unknown_tool', ...(known ? { toolName: known } : {}) } });
-          return { ok: false, reason: 'CAPABILITY_NOT_ALLOWED', message: 'This agent does not have that tool.' };
-        }
-        const tool: ToolName = named.data;
-        if (tool === 'propose_order' || tool === 'propose_booking') {
-          const stored = (await deps.db.query(`select (select count(*) from public.orders where call_id = $1 and business_id = $2)
-            + (select count(*) from public.bookings where call_id = $1 and business_id = $2) as n`, [callId, businessId])).rows[0] as { n: string | number } | undefined;
-          if (Number(stored?.n ?? 0) >= MAX_PROPOSALS_PER_CALL) {
-            deps.log?.warn({ callId, tool, maxProposals: MAX_PROPOSALS_PER_CALL }, 'sim-call: proposal limit reached; proposal refused');
-            await emitActivity(deps.db, { id: deps.newId('evt_'), businessId, correlationId: callId, type: 'guardrail.refused', actorType: 'deployed_agent',
-              occurredAt: deps.now().toISOString(), payload: { callId, rule: 'unsupported_request', reasonCode: 'proposal_limit', toolName: tool } });
-            return { ok: false, reason: 'VALIDATION_FAILED', message: 'The limit for this call is reached. No more requests can be sent to the shop on this call.' };
-          }
-        }
-        const result = await s.toolset.handler.call(tool, (rawInput ?? {}) as never, ctx);
-        const stage = nextStage(spec.template, s.stage, tool, result);
-        if (stage !== s.stage) { s.stage = stage; await deps.calls.updateStage(callId, stage); }
-        return result;
-      };
-      let reply: string;
-      try {
-        ({ reply } = await deps.model.respond({
-          instructions: simCallInstructions(spec, { businessName: String(agent.business_name), messageChannel: deps.messageChannel }, s.stage),
-          history: s.history, message: input.message, tools, now: deps.now(), executeTool,
-        }));
-      } catch {
-        throw new AppError('INTEGRATION_UNAVAILABLE', 'The agent model is not available.', undefined, undefined, { provider: 'openai' });
-      }
-      // The agent's line is what a caller would hear: no Markdown.
-      reply = plainSpeech(reply).slice(0, 2000);
-      s.history.push({ role: 'caller', text: input.message }, { role: 'agent', text: reply });
-      response = { callId, reply, toolTrace: s.toolset.trace() };
-    }
+    // The same turn runner the AgentPhone phone path uses (turn.ts, D-12).
+    const turn = await runAgentTurn(deps, { spec, businessName: String(agent.business_name), businessId, agentVersionId, callId, message: input.message, session });
+    const response: AgentRunResponse = turn.refused
+      ? { callId, reply: turn.reply, toolTrace: [], guardrail: { refused: true, rule: turn.refused } }
+      : { callId, reply: turn.reply, toolTrace: turn.toolTrace };
 
     if (input.end) {
       await deps.calls.endCall(callId, 'completed');

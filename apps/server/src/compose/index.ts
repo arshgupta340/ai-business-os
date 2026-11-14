@@ -47,6 +47,9 @@ import { dbExtractionOptions } from './builder-extraction';
 import type { DocumentExtractor } from '../builder/extraction/index';
 import { createProposeFactFromChat, dbAgentDraftStore, dbBuilderSessionStore, dbBusinessKnowledge, dbDraftFactStore, dbLiveAgentReader, type ProposeFactFromChat } from './builder';
 import { notWiredExecutor, notWiredWebhooks, type Executor, type ExecutorFactory, type SeamDeps, type WebhooksFactory } from './seams';
+import { buildTelephony, type Telephony } from '../telephony/index';
+import type { HttpPort } from '../telephony/agentphone/client';
+import { createAgentPhoneWiring, type AgentPhoneWiring } from './agentphone';
 
 
 export type { ExecutorFactory, WebhooksFactory, Executor, SeamDeps } from './seams';
@@ -72,6 +75,8 @@ export interface ComposeOptions {
   versionEnablesFallback?: FallbackDeps['versionEnablesFallback'];
   /** Bound on each integration health probe (tests use a short one). */
   healthProbeTimeoutMs?: number;
+  /** D-12: the AgentPhone HTTP ports and voice-turn timings (tests inject fakes and short times). */
+  telephony?: { http?: HttpPort; interimAfterMs?: number; turnTimeoutMs?: number };
 }
 
 export interface ComposedServer {
@@ -110,6 +115,10 @@ export interface ComposedServer {
   prices: PricesDependencies;
   /** Integration health: configuration plus cached read-only probe results (API 3.11). */
   health: HealthMonitor;
+  /** D-12: the selected telephony provider (TELEPHONY_PROVIDER) and, when used, the AgentPhone one. */
+  telephony: Telephony;
+  /** D-12: the AgentPhone webhook, voice turns and receipt polling, or why it is off. */
+  agentphone: AgentPhoneWiring;
   /** GET /api/telemetry (B-30) and the recorder modules may record into. */
   telemetry: TelemetryPluginOptions;
   /**
@@ -246,6 +255,20 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     now,
   };
 
+  // What keeps the Twilio phone path off, by name. Also the Twilio telephony provider's `missing`.
+  const voiceMissing = [
+    ...(env.PUBLIC_SERVER_URL ? [] : ['PUBLIC_SERVER_URL']),
+    ...(providers.twilioValidator ? [] : ['TWILIO_AUTH_TOKEN']),
+    ...(providers.openaiSocketFactory ? [] : ['OPENAI_API_KEY']),
+    ...(hasDb ? [] : ['DATABASE_URL']),
+  ];
+  const telephony = buildTelephony(env, { now,
+    twilio: { validator: providers.twilioValidator, probe: providers.probes?.twilio, missing: voiceMissing },
+    ...(options.telephony?.http ? { http: options.telephony.http } : {}) });
+  const phoneLine = telephony.active.phoneNumber;
+  // The AgentPhone path answers with the text agent model; without one it stays off (never the recorded stand-in).
+  const modelMissing = options.agentModel || (env.OPENAI_API_KEY && env.OPENAI_BUILDER_MODEL) ? [] : ['OPENAI_API_KEY', 'OPENAI_BUILDER_MODEL'].filter((k) => !env[k as keyof Env]);
+
   const agentModel: AgentModel = options.agentModel
     ?? (env.OPENAI_API_KEY && env.OPENAI_BUILDER_MODEL ? new OpenAiAgentModel({ apiKey: env.OPENAI_API_KEY, model: env.OPENAI_BUILDER_MODEL }) : new RecordedAgentModel());
 
@@ -275,19 +298,14 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     extraction: dbExtractionOptions(db, options.documentExtractor),
     publish: {
       versions: dbAgentVersionStore(db), events: dbPublishEventSink(db), syncCatalog: squareCatalogSync(db, providers, now), integrations,
-      ...(env.TWILIO_PHONE_NUMBER ? { liveAgents: dbLiveAgentStore(db, env.TWILIO_PHONE_NUMBER) } : {}),
+      // D-12: publish binds the live agent to the number of the selected telephony provider.
+      ...(phoneLine ? { liveAgents: dbLiveAgentStore(db, phoneLine) } : {}),
     },
   } : { proposeFactFromChat, publish: { integrations }, ...(options.documentExtractor ? { extraction: { extractor: options.documentExtractor } } : {}) };
 
   const fallback = createDbFallback({ db, providers, ownedNumber: env.TWILIO_PHONE_NUMBER, newId,
     ...(options.versionEnablesFallback ? { versionEnablesFallback: options.versionEnablesFallback } : {}) });
 
-  const voiceMissing = [
-    ...(env.PUBLIC_SERVER_URL ? [] : ['PUBLIC_SERVER_URL']),
-    ...(providers.twilioValidator ? [] : ['TWILIO_AUTH_TOKEN']),
-    ...(providers.openaiSocketFactory ? [] : ['OPENAI_API_KEY']),
-    ...(hasDb ? [] : ['DATABASE_URL']),
-  ];
   const voice: ComposedServer['voice'] = voiceMissing.length === 0 && env.PUBLIC_SERVER_URL && providers.twilioValidator && providers.openaiSocketFactory
     ? { ok: true, options: {
       publicServerUrl: env.PUBLIC_SERVER_URL, liveAgent: dbLiveAgentPort(db), calls,
@@ -304,7 +322,25 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   // Health reports the phone path as off, with the settings that keep it off (names only, never values).
   if (!voice.ok) providers.status.twilio = { configured: false, detail: `phone voice off: missing ${voiceMissing.join(', ')}` };
 
-  const health = createHealthMonitor({ status: providers.status, probes: providers.probes ?? {}, now, ...(options.healthProbeTimeoutMs ? { timeoutMs: options.healthProbeTimeoutMs } : {}) });
+  // D-12: with TELEPHONY_PROVIDER=agentphone the phone-line entry (key `twilio`, "the phone line your agent
+  // answers") reports AgentPhone and runs AgentPhone's read-only probe. It never falls back to Twilio.
+  // The same probes object as before (tests and the publish check read and patch it in place).
+  const probes = providers.probes ?? (providers.probes = {});
+  if (telephony.name === 'agentphone') {
+    const ap = telephony.agentphone!;
+    const off = [...ap.missing, ...(hasDb ? [] : ['DATABASE_URL']), ...modelMissing];
+    providers.status.twilio = off.length ? { configured: false, detail: `telephony provider agentphone: missing ${off.join(', ')}` } : { configured: true, detail: 'telephony provider agentphone' };
+    if (ap.probe) probes.twilio = ap.probe; else delete probes.twilio;
+  }
+  // D-12: MESSAGE_CHANNEL=agentphone has a read-only check, with either telephony provider: the number's
+  // outbound SMS state. The channel is connected only when AgentPhone reports outbound texting enabled, so
+  // publish refuses an agent with a message capability while the 10DLC registration is still pending.
+  // (The other message channels have no read-only check and stay "not confirmed", as on main.)
+  if (messageChannel === 'agentphone' && providers.status.message_channel.configured && telephony.agentphone?.messageProbe) {
+    probes.message_channel ??= telephony.agentphone.messageProbe;
+  }
+
+  const health = createHealthMonitor({ status: providers.status, probes, now, ...(options.healthProbeTimeoutMs ? { timeoutMs: options.healthProbeTimeoutMs } : {}) });
 
   // Telemetry (B-30): one in-memory recorder (created above); approval_time is derived from activity events.
   const telemetryOptions: TelemetryPluginOptions = {
@@ -324,10 +360,15 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     } : undefined,
   };
 
+  const agentphone = createAgentPhoneWiring({ telephony, db, hasDb, calls, toolsetFor, model: agentModel, messageChannel, decisions, now, newId, log,
+    ...(options.telephony?.interimAfterMs !== undefined ? { interimAfterMs: options.telephony.interimAfterMs } : {}),
+    ...(options.telephony?.turnTimeoutMs !== undefined ? { turnTimeoutMs: options.telephony.turnTimeoutMs } : {}),
+    receiptsEnabled: messageChannel === 'agentphone', modelMissing });
+
   let sweep: ReturnType<typeof setInterval> | undefined;
   return {
     env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, prices, recovery, fallback, decisions,
-    databaseProbe: hasDb ? async () => (await db.query('select 1 as ok', [])).rows.length === 1 : undefined, telemetry: telemetryOptions, health, now, newId, log,
+    databaseProbe: hasDb ? async () => (await db.query('select 1 as ok', [])).rows.length === 1 : undefined, telemetry: telemetryOptions, health, telephony, agentphone, now, newId, log,
     async close() { if (pool) await pool.end(); },
     async assertRuntimeRole() { if (hasDb) await assertRestrictedRuntimeRole(db); },
     startJobs() {
@@ -339,6 +380,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       sweep.unref();
       executor.start();
       webhooks?.start();
+      agentphone.start();
       // Review finding 4: one bounded, read-only health refresh in the background at startup, so the
       // health screens show checked results on a fresh deploy. It never blocks listen; publish refreshes too.
       void health.read({ refresh: true }).catch(() => log.warn({ job: 'health' }, 'startup integration check failed'));
@@ -348,6 +390,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       sweep = undefined;
       await executor.stop();
       await webhooks?.stop();
+      await agentphone.stop();
     },
   };
 }

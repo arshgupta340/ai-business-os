@@ -34,6 +34,7 @@ This is the master spec. It amends the PRD (`docs/PRD.md`). Where this file and 
 
 | D-10 | The server connects to Postgres as a restricted login, `abos_app`, not as the table owner. It can read and write the application tables but cannot disable guards, truncate, or delete approvals, executions, audit events or published versions. Migrations and the operator reset use the owner connection, `DATABASE_ADMIN_URL`. The server uses `DATABASE_URL`. |
 | D-11 | The Twilio account is upgraded (pay as you go), so callers hear no trial announcement. Done by Arsh on 2026-11-13. The number is a local 10DLC number; Twilio SMS from it fails with error 30034, as expected, so D-08 stands. |
+| D-12 | AgentPhone is added alongside Twilio behind one telephony interface (`apps/server/src/telephony/`), chosen by `TELEPHONY_PROVIDER` (`twilio` or `agentphone`). Twilio remains the default and is unchanged. Both are to be tested and compared (`docs/TELEPHONY-COMPARISON.md`). AgentPhone runs in its `webhook` voice mode, so our agent, tools and approvals answer every turn; it can also send texts as `MESSAGE_CHANNEL=agentphone`. Decided by Arsh on 2026-11-14: "Keep Twilio as it is and add AgentPhone alongside it, so I can test both and see which works better." |
 
 Everything the PRD lists under "Confirmed by the founding team" still holds unless a row here changes it.
 
@@ -345,7 +346,9 @@ Names only. Values live in `.env.local` and in the host's secret store. They are
 | `OPENAI_API_KEY`, `OPENAI_BUILDER_MODEL`, `OPENAI_REALTIME_MODEL` | server |
 | `SQUARE_ENVIRONMENT` (must be `sandbox`), `SQUARE_ACCESS_TOKEN`, `SQUARE_LOCATION_ID`, `SQUARE_WEBHOOK_SIGNATURE_KEY`, `SQUARE_WEBHOOK_URL` | server |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` | server |
-| `MESSAGE_CHANNEL` (`surge`, `android_gateway`, `whatsapp_sandbox`, `qr_only`), plus that channel's own keys | server |
+| `MESSAGE_CHANNEL` (`surge`, `android_gateway`, `whatsapp_sandbox`, `qr_only`, `agentphone`), plus that channel's own keys | server |
+| `TELEPHONY_PROVIDER` (`twilio`, the default, or `agentphone`, D-12) | server |
+| `AGENTPHONE_API_KEY`, `AGENTPHONE_WEBHOOK_SECRET`, `AGENTPHONE_NUMBER_ID`, `AGENTPHONE_PHONE_NUMBER` (D-12; the texting channel needs only the key and the number ID) | server |
 | `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_CALENDAR_ID`, `GOOGLE_SHEET_ID` | server |
 | `PUBLIC_SERVER_URL`, `PORT` | server |
 | `WEB_ORIGIN` (the web app address allowed by CORS), `NODE_ENV` (`production` on any deployed server) | server |
@@ -374,6 +377,14 @@ Checked against official documentation on 2026-11-13. Anything marked "spike" mu
 - An Android phone running textbee or SMSGate sends real SMS from its own SIM and can be triggered over HTTP.
 - Twilio WhatsApp sandbox works the same day. Each recipient texts a join code once.
 - Spike: a trial Twilio account probably plays an announcement to callers and accepts calls only from verified numbers.
+
+**AgentPhone (D-12)** Each item is from the vendor's documentation, not tested. Details and the list of what the docs do not say: `docs/notes-agentphone.md`.
+- One REST API at `https://api.agentphone.ai` with `Authorization: Bearer <key>`; numbers are US or Canada only. https://agentphone.ai/skills.md
+- Voice mode `webhook` sends each transcribed caller turn to our webhook as `agent.message` with `channel: "voice"`; we answer with a JSON object (`text`, `hangup`, `action`) or NDJSON chunks (`interim: true` keeps the turn open). Default timeout 30 seconds; on timeout the caller hears silence. Voice mode `hosted` runs AgentPhone's own model instead. https://docs.agentphone.ai/documentation/guides/calls.md
+- One webhook for calls and texts. Signature: `X-Webhook-Signature: sha256=<hex>`, HMAC-SHA256 with the webhook secret over `{X-Webhook-Timestamp}.` plus the raw body; reject a timestamp more than 5 minutes off. `X-Webhook-ID` stays the same across retries and is the dedupe key. Non-voice messages are retried up to 8 attempts; voice turns and `agent.call_ended` are not retried. https://docs.agentphone.ai/documentation/guides/webhooks.md
+- Setting the webhook (`POST /v1/webhooks`) generates a new secret each time. https://docs.agentphone.ai/openapi.json
+- `POST /v1/messages` has no idempotency key; a timeout, 5xx or 409 `DELIVERY_UNCONFIRMED` may already have sent and must not be resent. There is no delivery-receipt webhook; message history carries `sent`, `delivered` or `failed`. https://docs.agentphone.ai/documentation/reference/error-handling.md, https://docs.agentphone.ai/documentation/guides/messages.md
+- Outbound SMS to US numbers needs A2P 10DLC registration through AgentPhone (`POST /v1/register`): the owner submits business details, use case, samples and opt-in proof, pays 25 or 70 dollars, and waits for carrier review with no stated time. Inbound SMS works before that. https://docs.agentphone.ai/sms-registration.md
 
 **OpenAI**
 - Realtime API model `gpt-realtime-2.1`. Twilio publishes a Media Streams sample (`twilio-samples/speech-assistant-openai-realtime-api-node`), and the Agents SDK has a Twilio transport in `@openai/agents-extensions`.

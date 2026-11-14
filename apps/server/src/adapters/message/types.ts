@@ -33,6 +33,8 @@ export interface MessageAdapterConfig {
     password?: string;
   };
   whatsappSandbox?: { accountSid?: string; authToken?: string; from?: string };
+  /** D-12. The sending number is selected by its AgentPhone number ID. */
+  agentphone?: { apiKey?: string; numberId?: string; baseUrl?: string };
 }
 
 /** The store supplies business, execution and template metadata from the approved execution. */
