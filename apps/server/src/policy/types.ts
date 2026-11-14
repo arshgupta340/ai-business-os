@@ -1,4 +1,4 @@
-import type { ApprovalDecision, Order, Booking, BusinessFact, MessageChannelSetting, ErrorCode } from '@abos/contracts';
+import type { ApprovalDecision, Order, Booking, BusinessFact, MessageChannelSetting, ErrorCode, JsonValue } from '@abos/contracts';
 
 export interface QueryInterface {
   query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
@@ -25,6 +25,13 @@ export type FactEditInput = Pick<BusinessFact, 'businessId' | 'kind' | 'key' | '
   ownerUserId: string;
   reason?: string;
   resolvesConflictId?: string;
+  /**
+   * What the caller (the builder) believes the subject is. When given, the engine checks them against
+   * the database and refuses a stale view with VALIDATION_FAILED instead of signing a different subject.
+   */
+  subjectId?: string;
+  fromVersion?: number;
+  before?: JsonValue | null;
 };
 export type DecisionInput = ApprovalDecision & { approvalId: string; businessId: string; ownerUserId: string };
 export class PolicyError extends Error {

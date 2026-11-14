@@ -11,6 +11,7 @@
 // Tests pass overrides for the database, the token verifier, the providers and the model.
 import { randomUUID } from 'node:crypto';
 import { ActivityEventSchema, type MessageChannelSetting } from '@abos/contracts';
+import { assertRestrictedRuntimeRole } from '@abos/db';
 import type { FastifyPluginAsync } from 'fastify';
 // The in-memory engine in api/ports.ts is a test fake and is never wired here.
 import type { CatalogPort as RouteCatalogPort, EnginePorts } from '../api/ports';
@@ -107,6 +108,11 @@ export interface ComposedServer {
   health: HealthMonitor;
   /** GET /api/telemetry (B-30) and the recorder modules may record into. */
   telemetry: TelemetryPluginOptions;
+  /**
+   * Startup check (0006): throws unless the database connection is the restricted abos_app role.
+   * index.ts refuses to start when it throws. Without a database there is nothing to check.
+   */
+  assertRuntimeRole(): Promise<void>;
   /** Background jobs: the approval expiry sweep (API 3.7) and the executor loop. */
   startJobs(): void;
   stopJobs(): Promise<void>;
@@ -233,8 +239,10 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   // The builder's own seams (issue #65). Without a database it keeps its in-memory defaults, and
   // without a way to verify tokens it keeps its fail-closed auth default.
   const proposeFactFromChat = createProposeFactFromChat(engine);
-  // Publish stops on a disconnected integration, read from the last stored health results.
-  const integrations = { read: () => health.read({ refresh: false }) };
+  // Publish stops on a disconnected integration (Twilio, OpenAI, Square, Calendar as the spec needs).
+  // A publish runs the bounded read-only probes now, so a provider never checked is not taken as down
+  // and a provider that went down since the last check is caught.
+  const integrations = { read: () => health.read({ refresh: true }) };
   // Extraction keeps its in-memory stores: uploaded bytes have no database column or storage bucket
   // wired, and upload facts reference their files row, so the set moves together (see the report).
   const builder: BuilderPluginOptions = hasDb ? {
@@ -296,6 +304,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, prices, recovery, fallback, decisions,
     databaseProbe: hasDb ? async () => (await db.query('select 1 as ok', [])).rows.length === 1 : undefined, telemetry: telemetryOptions, health, now, newId,
     async close() { if (pool) await pool.end(); },
+    async assertRuntimeRole() { if (hasDb) await assertRestrictedRuntimeRole(db); },
     startJobs() {
       if (!hasDb || sweep) return;
       // API 3.7: a background job moves past-due approvals to EXPIRED. The routine writes the events.

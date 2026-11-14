@@ -280,7 +280,24 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
           const expiresAt = new Date(at.getTime() + APPROVAL_EXPIRY_MS).toISOString();
           // A brand-new key (0005): the subject is a draft row whose value is exactly `after`, with
           // fromVersion 0 and before null. Confirming promotes that draft to verified version 1.
-          const subjectId = current ? String(current.id) : await newKeyDraft(tx, input.businessId, kind, input.key, input.value);
+          if (input.fromVersion !== undefined && input.fromVersion !== (current ? Number(current.version) : 0)) throw new PolicyError('VALIDATION_FAILED', 'The fact changed since it was read.');
+          if (input.before !== undefined && canonicalJson(input.before ?? null) !== canonicalJson(current ? current.value : null)) throw new PolicyError('VALIDATION_FAILED', 'The fact changed since it was read.');
+          if (current && input.subjectId !== undefined && input.subjectId !== String(current.id)) throw new PolicyError('VALIDATION_FAILED', 'The subject is not the verified fact.');
+          let subjectId: string;
+          if (current) subjectId = String(current.id);
+          else if (input.subjectId !== undefined) {
+            const draft = await one(tx, `select id, value from public.business_facts where id=$1 and business_id=$2 and kind=$3 and key=$4 and status='draft' for update`,
+              [input.subjectId, input.businessId, kind, input.key]);
+            if (!draft || canonicalJson(draft.value) !== canonicalJson(input.value)) throw new PolicyError('VALIDATION_FAILED', 'The subject is not a draft with this value.');
+            subjectId = String(draft.id);
+          } else subjectId = await newKeyDraft(tx, input.businessId, kind, input.key, input.value);
+          // The same answer for the same subject returns the approval already pending for it.
+          const pending = await one(tx, `select * from public.approval_requests where business_id=$1 and subject_id=$2 and bundle_type='fact_edit' and state='PENDING'
+            and expires_at > $3 order by created_at desc limit 1`, [input.businessId, subjectId, at.toISOString()]);
+          if (pending) {
+            const existing = approvalFromRow(pending);
+            if (existing.bundleType === 'fact_edit' && canonicalJson((existing.payload as { after: unknown }).after) === canonicalJson(input.value)) return { approval: existing };
+          }
           const approval = await storeApproval(tx, 'fact_edit', {
             businessId: input.businessId, subjectId, kind, key: input.key, fromVersion: current ? Number(current.version) : 0,
             before: current ? current.value as JsonValue : null, after: input.value, actionBundle: BUNDLE_ACTIONS.fact_edit, expiresAt,

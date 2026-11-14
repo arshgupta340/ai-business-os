@@ -5,6 +5,7 @@
 import type { AgentRecord, AgentDraftStore, BuilderSessionRecord, BuilderSessionStore, DraftFactStore } from '../builder/session/stores';
 import type { BusinessContext, BusinessKnowledge } from '../builder/session/knowledge';
 import type { LiveAgentReader } from '../builder/agents';
+import type { ProposeFactFromChat as BuilderProposeFactFromChat } from '../builder/session/service';
 import type { BusinessFact } from '@abos/contracts';
 import type { Db } from '../db/index';
 import { mapRow } from '../api/rows';
@@ -140,15 +141,14 @@ export function dbLiveAgentReader(db: Db): LiveAgentReader {
 /**
  * Creates a `fact_edit` approval for the owner's own chat answer and returns what the builder turn
  * puts in `proposedChange`. Nothing changes until the owner confirms through the decision endpoint.
- * The builder plugin has no option that takes this function yet (see the integration report).
+ * The builder's subjectId, fromVersion and before are forwarded; the engine refuses a stale view.
  */
-export type ProposeFactFromChat = (input: { businessId: string; ownerUserId: string; kind: BusinessFact['kind']; key: string; value: unknown; reason?: string }) =>
-  Promise<{ approvalId: string; bundleType: 'fact_edit' }>;
+export type ProposeFactFromChat = BuilderProposeFactFromChat;
 
 export function createProposeFactFromChat(engine: PolicyEngine): ProposeFactFromChat {
   return async (input) => {
     const { approval } = await engine.proposeFactEdit({ businessId: input.businessId, ownerUserId: input.ownerUserId, kind: input.kind, key: input.key,
-      value: input.value as import('@abos/contracts').JsonValue, ...(input.reason ? { reason: input.reason } : {}) });
+      value: input.value, subjectId: input.subjectId, fromVersion: input.fromVersion, before: input.before, ...(input.reason ? { reason: input.reason } : {}) });
     return { approvalId: approval.id, bundleType: 'fact_edit' };
   };
 }

@@ -6,7 +6,7 @@
 // "on conflict do nothing". Only a newly inserted row is processed, after the response. Processing
 // reads the payment from Square afresh; the webhook body is never trusted for status or amount.
 import { PAYMENT_POLL_INTERVAL_MS, PAYMENT_POLL_DURATION_MS, WEBHOOK_ENDPOINTS, type ActivityEvent, type Call, type MessageChannel } from '@abos/contracts';
-import { fulfillOrder, markOrderPaid, markOrderPaymentFailed } from '@abos/db';
+import { fulfillOrder, markOrderPaid, markOrderPaymentFailed, markWebhookProcessed, updateDispatchStatus } from '@abos/db';
 import type { FastifyPluginAsync } from 'fastify';
 import { verifyWebhookSignature } from '../adapters/square/index';
 import { unavailableDb, type QueryDb } from '../db/index';
@@ -93,10 +93,11 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
 
   const storedAt = new Map<string, { businessId: string; at: number }>();
   const pending = new Set<string>();
-  const done = new Set<string>();
+  // The business each row was stored with, until its job runs (mark_webhook_processed checks it).
+  const businessOf = new Map<string, string | null>();
   let flights: Promise<void> = Promise.resolve();
 
-  async function runJob(webhookId: string, run: () => Promise<void>) {
+  async function runJob(webhookId: string, businessId: string | null, run: () => Promise<void>) {
     pending.add(webhookId);
     try {
       for (let attempt = 1; ; attempt++) {
@@ -111,13 +112,15 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
       // webhook_delay: from the verified row being stored to its job finishing (rows stored in this process).
       const stored = storedAt.get(webhookId);
       if (stored) { storedAt.delete(webhookId); hooks.telemetry?.record('webhook_delay', { businessId: stored.businessId, correlationId: webhookId, ms: Math.max(0, deps.now().getTime() - stored.at) }); }
-      // No routine records webhook_events.processed_at for abos_app (needs private.mark_webhook_processed),
-      // so the processed marker stays in this process; recovery re-runs rows after a restart (idempotent).
-      done.add(webhookId);
+      // processed_at is stored through mark_webhook_processed (0006), so recovery skips the row after a restart.
+      // If the mark fails the row stays a recovery candidate; re-running it is idempotent.
+      await markWebhookProcessed(db, { businessId, webhookEventId: webhookId })
+        .catch(() => log.warn({ job: 'webhook', webhookId }, 'webhook processed mark failed; left for recovery'));
       // A payment that just verified has a Sheets job waiting: let the executor pick it up now.
       hooks.afterJob?.();
     } finally {
       pending.delete(webhookId);
+      businessOf.delete(webhookId);
     }
   }
 
@@ -151,6 +154,7 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
         const row = await one(db, `insert into public.webhook_events (source, provider_event_id, event_type, business_id, payload)
           values ($1,$2,$3,$4,$5::jsonb) on conflict (source, provider_event_id) do nothing returning id`,
         [input.source, input.providerEventId, input.eventType, input.businessId, JSON.stringify(input.payload)]);
+        if (row) businessOf.set(String(row.id), input.businessId ?? null);
         if (row && input.businessId) storedAt.set(String(row.id), { businessId: input.businessId, at: deps.now().getTime() });
         return row ? { ...input, id: String(row.id) } : undefined;
       },
@@ -230,15 +234,21 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
         const row = await one(db, 'select id, business_id, subject_id, channel from public.message_dispatches where provider_message_id = $1', [id]);
         return row ? { id: String(row.id), businessId: String(row.business_id), subjectId: String(row.subject_id), channel: row.channel as MessageChannel } : undefined;
       },
-      // abos_app cannot update message_dispatches, and update_dispatch needs the sending step's lease.
-      // A delivery receipt is therefore stored as the verified webhook row only. See the report.
-      async updateStatus() { return false; },
+      // A delivery receipt moves SENT forward through update_dispatch_status (0006, no lease). It reports a
+      // move only when the dispatch was SENT and is now the receipt's status, so a repeated receipt is a no-op.
+      async updateStatus(id, status) {
+        if (status !== 'DELIVERED' && status !== 'FAILED') return false;
+        const before = await one(db, 'select business_id, status from public.message_dispatches where id = $1', [id]);
+        if (!before || before.status !== 'SENT') return false;
+        const after = await updateDispatchStatus(db, { businessId: String(before.business_id), dispatchId: id, status });
+        return after.status === status;
+      },
     },
     activity: { write: (event) => emitActivity(db, event) },
     clock: { now: deps.now },
     jobs: {
       async enqueue(webhookId, run) {
-        flights = flights.then(() => runJob(webhookId, run));
+        flights = flights.then(() => runJob(webhookId, businessOf.get(webhookId) ?? null, run));
       },
     },
   };
@@ -251,20 +261,19 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
   }
 
   async function recoverNow(): Promise<number> {
-    // processed_at cannot be written by abos_app (no routine), so every row of
-    // the payment window is a candidate; rows finished in this process are skipped. Re-running is safe:
-    // a paid order is never paid twice and a call ends once.
+    // Rows of the payment window without processed_at are candidates (a finished job marks its row).
+    // Re-running is safe: a paid order is never paid twice and a call ends once.
     const since = new Date(deps.now().getTime() - PAYMENT_POLL_DURATION_MS);
     const rows = (await db.query(`select id, source, provider_event_id, event_type, business_id, payload from public.webhook_events
       where processed_at is null and source in ('square','twilio_status') and received_at >= $1 order by received_at`, [since])).rows as Row[];
     let n = 0;
     for (const r of rows) {
       const id = String(r.id);
-      if (done.has(id) || pending.has(id) || typeof r.business_id !== 'string') continue;
+      if (pending.has(id) || typeof r.business_id !== 'string') continue;
       const stored: StoredWebhook = { id, source: r.source as StoredWebhook['source'], providerEventId: String(r.provider_event_id), eventType: String(r.event_type),
         businessId: r.business_id, payload: (r.payload ?? {}) as Record<string, string> };
       n++;
-      flights = flights.then(() => runJob(id, jobFor(stored)));
+      flights = flights.then(() => runJob(id, stored.businessId, jobFor(stored)));
     }
     await flights;
     return n;

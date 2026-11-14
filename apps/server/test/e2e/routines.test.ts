@@ -78,8 +78,9 @@ describe('a payment that arrives before the order waits for it', () => {
     // mark_order_paid would refuse the jump; nothing changed and no receipt was stored.
     expect(await order(w, orderId)).toMatchObject({ status: 'PAYMENT_LINK_READY', square_payment_id: null });
     expect(await n(w, 'select count(*)::int as n from payment_receipts where order_id = $1', [orderId])).toBe(0);
-    // The stored webhook row stays unprocessed in the database (no routine marks it processed).
-    expect(await n(w, "select count(*)::int as n from webhook_events where provider_event_id = 'evt_sq_early' and processed_at is null", [])).toBe(1);
+    // The job finished (it changed nothing), so mark_webhook_processed (0006) recorded the row as processed;
+    // the payment is picked up by the reconcile poll below, which reads Square again.
+    expect(await n(w, "select count(*)::int as n from webhook_events where provider_event_id = 'evt_sq_early' and processed_at is not null", [])).toBe(1);
     await executor.drain();
     expect((await order(w, orderId)).status).toBe('PAYMENT_PENDING');
     await c.webhooks!.reconcileNow();
@@ -270,7 +271,13 @@ describe('a new-key fact', () => {
 
   it('an owner chat answer for a new key becomes a pending fact_edit, and confirming it verifies the fact', async () => {
     const propose = w.app.composed.builder.proposeFactFromChat!;
-    const r = await propose({ businessId: PIZZA, ownerUserId: 'usr_owner_01', kind: 'policy', key: 'wifi_e2e', value: 'Free wifi', fromVersion: 0, before: null });
+    const draftId = 'fact_wifi_e2e_draft';
+    await w.t.db.query(`insert into public.business_facts (id, business_id, kind, key, value, source_type, status, version) values ($1,$2,'policy','wifi_e2e','"Free wifi"'::jsonb,'owner_ui','draft',1)`, [draftId, PIZZA]);
+    const r = await propose({ businessId: PIZZA, ownerUserId: 'usr_owner_01', kind: 'policy', key: 'wifi_e2e', value: 'Free wifi', subjectId: draftId, fromVersion: 0, before: null });
+    // The same answer again returns the same pending approval; a stale view is refused.
+    expect((await propose({ businessId: PIZZA, ownerUserId: 'usr_owner_01', kind: 'policy', key: 'wifi_e2e', value: 'Free wifi', subjectId: draftId, fromVersion: 0, before: null })).approvalId).toBe(r.approvalId);
+    await expect(propose({ businessId: PIZZA, ownerUserId: 'usr_owner_01', kind: 'policy', key: 'wifi_e2e', value: 'Free wifi', subjectId: draftId, fromVersion: 3, before: null })).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    await expect(propose({ businessId: PIZZA, ownerUserId: 'usr_owner_01', kind: 'policy', key: 'wifi_e2e', value: 'Paid wifi', subjectId: draftId, fromVersion: 0, before: null })).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
     expect(r.bundleType).toBe('fact_edit');
     const list = ENDPOINTS.listApprovals.response.parse((await w.app.inject({ url: `/api/approvals?businessId=${PIZZA}`, headers: OWNER })).json());
     expect(list.items.find((a) => a.id === r.approvalId)).toMatchObject({ state: 'PENDING', bundleType: 'fact_edit' });

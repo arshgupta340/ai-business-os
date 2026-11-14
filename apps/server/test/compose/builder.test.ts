@@ -83,7 +83,7 @@ describe('builder stores on Postgres', () => {
     await h.insert('business_facts', { id: 'fact_hours_a', business_id: 'biz_a', kind: 'hours', key: 'fri', value: { open: '11:00', close: '22:00' }, source_type: 'seed', status: 'verified', verified_at: NOW });
     const newId = (p: string) => `${p}${Date.now()}${Math.random().toString(36).slice(2, 8)}`;
     const propose = createProposeFactFromChat(createPolicyEngine(h.db, { now: () => new Date(), newId }));
-    const change = await propose({ businessId: 'biz_a', ownerUserId: 'usr_a', kind: 'hours', key: 'fri', value: { open: '11:00', close: '23:00' } });
+    const change = await propose({ businessId: 'biz_a', ownerUserId: 'usr_a', kind: 'hours', key: 'fri', value: { open: '11:00', close: '23:00' }, subjectId: 'fact_hours_a', fromVersion: 1, before: { open: '11:00', close: '22:00' } });
     expect(change).toMatchObject({ bundleType: 'fact_edit', approvalId: expect.stringMatching(/^apv_/) });
     expect((await h.db.query('select state, actor_type from approval_requests where id = $1', [change.approvalId])).rows[0]).toEqual({ state: 'PENDING', actor_type: 'owner' });
     expect((await h.db.query("select value from business_facts where id = 'fact_hours_a'")).rows[0]).toEqual({ value: { open: '11:00', close: '22:00' } });
