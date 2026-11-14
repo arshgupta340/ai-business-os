@@ -1,7 +1,8 @@
-// The AgentPhone telephony provider (D-12). Built from injected ports: HTTP for the REST reads and the send,
-// a clock for the signature window. Nothing here reads the environment or the network by itself.
+// The AgentPhone telephony provider (D-12). Built from injected ports: HTTP for the REST reads (GET only)
+// and a clock for the signature window. Nothing here reads the environment or the network by itself, and
+// nothing here can send a text: the agentphone message channel is built once, in compose/providers.ts, and
+// only the executor's approved message step reaches it.
 import { WEBHOOK_ENDPOINTS } from '@abos/contracts';
-import { createMessageAdapter, type FetchLike, type MessageAdapter } from '../../adapters/message/index';
 import type { HealthProbe } from '../../compose/health';
 import type { TelephonyProvider, VerifiedWebhook } from '../types';
 import { createAgentPhoneClient, type AgentPhoneClient, type HttpPort } from './client';
@@ -28,18 +29,13 @@ export function missingAgentPhoneSettings(s: AgentPhoneSettings, publicServerUrl
   ];
 }
 
-export type AgentPhoneProvider = TelephonyProvider & { name: 'agentphone'; client: AgentPhoneClient | undefined; messageAdapter: MessageAdapter | undefined };
+export type AgentPhoneProvider = TelephonyProvider & { name: 'agentphone'; client: AgentPhoneClient | undefined };
 
-export function createAgentPhoneProvider(settings: AgentPhoneSettings, ports: { fetch: FetchLike; http: HttpPort; nowMs(): number; publicServerUrl: string | undefined }): AgentPhoneProvider {
+export function createAgentPhoneProvider(settings: AgentPhoneSettings, ports: { http: HttpPort; nowMs(): number; publicServerUrl: string | undefined }): AgentPhoneProvider {
   const missing = missingAgentPhoneSettings(settings, ports.publicServerUrl);
   const client = settings.apiKey && settings.numberId
     ? createAgentPhoneClient({ apiKey: settings.apiKey, numberId: settings.numberId, http: ports.http, ...(settings.baseUrl ? { baseUrl: settings.baseUrl } : {}) })
     : undefined;
-  let messageAdapter: MessageAdapter | undefined;
-  try {
-    messageAdapter = createMessageAdapter({ channel: 'agentphone', fetch: ports.fetch,
-      agentphone: { apiKey: settings.apiKey, numberId: settings.numberId, ...(settings.baseUrl ? { baseUrl: settings.baseUrl } : {}) } });
-  } catch { messageAdapter = undefined; }
 
   // Read only and bounded by the client's timeout: the number exists and its outbound SMS readiness.
   const probe: HealthProbe | undefined = client ? async () => {
@@ -57,7 +53,6 @@ export function createAgentPhoneProvider(settings: AgentPhoneSettings, ports: { 
     phoneNumber: settings.phoneNumber,
     answering: { kind: 'turn_webhook', webhookPath: WEBHOOK_ENDPOINTS.agentphone.path, contentType: AGENTPHONE_NDJSON, format: formatTurnChunks },
     client,
-    messageAdapter,
     probe,
     verifyWebhook({ rawBody, headers }): VerifiedWebhook {
       const sig = verifyAgentPhoneSignature({ rawBody, headers, secret: settings.webhookSecret, nowMs: ports.nowMs() });
@@ -65,10 +60,6 @@ export function createAgentPhoneProvider(settings: AgentPhoneSettings, ports: { 
       const parsed = parseAgentPhoneEvent(rawBody);
       if (!parsed) return { ok: false, reason: 'malformed' };
       return { ok: true, deliveryId: sig.deliveryId, eventType: parsed.eventType, test: parsed.test, event: parsed.event };
-    },
-    async sendText(input) {
-      if (!messageAdapter) return { status: 'FAILED', errorCode: 'INTEGRATION_UNAVAILABLE' };
-      return messageAdapter.send(input);
     },
   };
 }

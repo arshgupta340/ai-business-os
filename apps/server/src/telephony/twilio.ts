@@ -1,9 +1,8 @@
 // The Twilio telephony provider (D-12): the thinnest wrapper over code that already exists, with no change
 // in behavior. The voice webhook and the Media Stream relay (voice/plugin.ts, voice/relay.ts) and the status
 // webhook (webhooks/plugin.ts) stay registered exactly as before; this object only describes them behind the
-// shared interface and reuses their validator, parser, message adapter and health probe.
+// shared interface and reuses their validator, parser and health probe. It sends nothing.
 import { WEBHOOK_ENDPOINTS } from '@abos/contracts';
-import type { MessageAdapter } from '../adapters/message/index';
 import type { HealthProbe } from '../compose/health';
 import type { TwilioRequestValidator } from '../voice/types';
 import { parseTwilioStatus } from '../webhooks/twilio-status';
@@ -18,8 +17,6 @@ export function createTwilioProvider(input: {
   phoneNumber: string | undefined;
   publicServerUrl: string | undefined;
   validator: TwilioRequestValidator | undefined;
-  /** The message adapter Twilio texts through today, if one is configured (the WhatsApp sandbox, D-08). */
-  messageAdapter: MessageAdapter | undefined;
   probe: HealthProbe | undefined;
   /** What already keeps the Twilio phone path off (compose/index.ts voiceMissing). */
   missing: readonly string[];
@@ -43,10 +40,6 @@ export function createTwilioProvider(input: {
       if (parsed.eventType === 'call.status' && CALL_REASON[status]) event = { kind: 'call_status', providerCallId: providerId, reason: CALL_REASON[status]! };
       if (parsed.eventType === 'message.status' && RECEIPT[status]) event = { kind: 'delivery_receipt', providerMessageId: providerId, status: RECEIPT[status]! };
       return { ok: true, deliveryId: parsed.providerEventId, eventType: parsed.eventType, test: false, event };
-    },
-    async sendText(send) {
-      if (!input.messageAdapter) return { status: 'FAILED', errorCode: 'INTEGRATION_UNAVAILABLE' };
-      return input.messageAdapter.send(send);
     },
   };
 }

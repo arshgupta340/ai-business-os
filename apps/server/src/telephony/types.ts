@@ -5,10 +5,11 @@
 //     (voice/relay.ts) then speaks. Nothing in that path changed.
 //   - AgentPhone transcribes the caller and posts each turn to /webhooks/agentphone; we answer the turn
 //     with text it speaks (webhook voice mode, docs/notes-agentphone.md).
-// Texting goes through the MessageAdapter channel of each provider, only from the executor's approved
-// message step with the database dispatch key (AGENTS rules 1 and 3).
+// Texting is NOT part of this interface. A text is sent only by the executor's approved message step,
+// through sendOnce and the MessageAdapter of the approved channel (adapters/message, compose/executor.ts),
+// with the database dispatch row as the gate (AGENTS rules 1 and 3). A telephony provider holds no send
+// function, so nothing that is handed a provider (the webhook route, health) can send a text.
 import type { CallEndReason, MessageDispatchStatus } from '@abos/contracts';
-import type { SendInput, SendResult } from '../adapters/message/types';
 import type { HealthProbe } from '../compose/health';
 
 export type TelephonyProviderName = 'twilio' | 'agentphone';
@@ -50,8 +51,6 @@ export interface TelephonyProvider {
   readonly answering: CallAnswering;
   /** Verifies the signature, then parses. Never throws; never logs the body. */
   verifyWebhook(request: WebhookRequest): VerifiedWebhook | Promise<VerifiedWebhook>;
-  /** Sends one text. Only the executor's approved message step calls it, with the dispatch key unchanged. */
-  sendText(input: SendInput): Promise<SendResult>;
   /** A bounded read-only access check, or undefined when none exists. */
   readonly probe: HealthProbe | undefined;
 }

@@ -148,7 +148,7 @@ describe('the agentphone message channel', () => {
 });
 
 describe('the TELEPHONY_PROVIDER switch', () => {
-  const twilioPorts = { validator: undefined, messageAdapter: undefined, probe: undefined, missing: [] };
+  const twilioPorts = { validator: undefined, probe: undefined, missing: [] };
   it('defaults to twilio and refuses an unknown value', () => {
     expect(parseEnv({}).TELEPHONY_PROVIDER).toBe('twilio');
     expect(parseEnv({ TELEPHONY_PROVIDER: '' }).TELEPHONY_PROVIDER).toBe('twilio');
@@ -202,7 +202,7 @@ describe('the TELEPHONY_PROVIDER switch', () => {
 
 describe('AgentPhone health probe (read only, bounded)', () => {
   const settings = { apiKey: 'k', webhookSecret: SECRET, numberId: 'num_1', phoneNumber: '+15555550111' };
-  const provider = (http: HttpPort) => createAgentPhoneProvider(settings, { fetch: async () => new Response('{}'), http, nowMs: () => NOW_MS, publicServerUrl: 'https://x.example.test' });
+  const provider = (http: HttpPort) => createAgentPhoneProvider(settings, { http, nowMs: () => NOW_MS, publicServerUrl: 'https://x.example.test' });
   it('reads the number with GET only and reports outbound SMS readiness', async () => {
     const seen: { url: string; method: string }[] = [];
     const p = provider(async (url, init) => { seen.push({ url, method: init.method }); return { status: 200, json: async () => ({ id: 'num_1', outboundSms: 'registration_required' }) }; });
@@ -229,7 +229,7 @@ describe('AgentPhone health probe (read only, bounded)', () => {
 describe('the Twilio provider is a thin wrapper with unchanged behavior', () => {
   const TOKEN = 'test-twilio-token';
   const URL_BASE = 'https://x.example.test';
-  const p = createTwilioProvider({ phoneNumber: '+15555550199', publicServerUrl: URL_BASE, validator: createTwilioRequestValidator(TOKEN), messageAdapter: undefined, probe: undefined, missing: [] });
+  const p = createTwilioProvider({ phoneNumber: '+15555550199', publicServerUrl: URL_BASE, validator: createTwilioRequestValidator(TOKEN), probe: undefined, missing: [] });
   const req = (params: Record<string, string>, token = TOKEN) => ({
     rawBody: Buffer.from(new URLSearchParams(params).toString()),
     headers: { 'x-twilio-signature': twilio.getExpectedTwilioSignature(token, `${URL_BASE}/webhooks/twilio/status`, params) },
@@ -240,7 +240,7 @@ describe('the Twilio provider is a thin wrapper with unchanged behavior', () => 
     expect(await p.verifyWebhook(req({ MessageSid: 'SM1', MessageStatus: 'sent' }))).toMatchObject({ ok: true, event: { kind: 'ignored' } });
     expect(await p.verifyWebhook(req({ CallSid: 'CA1', CallStatus: 'completed' }, 'other-token'))).toEqual({ ok: false, reason: 'signature_invalid' });
   });
-  it('has no texting without a configured message adapter', async () => {
-    expect(await p.sendText({ to: '+15555550123', body: 'x', idempotencyKey: KEY })).toEqual({ status: 'FAILED', errorCode: 'INTEGRATION_UNAVAILABLE' });
+  it('has no texting at all: a text is sent only by the approved message step (agentphone-review.test.ts)', () => {
+    expect('sendText' in p).toBe(false);
   });
 });

@@ -72,7 +72,7 @@ export interface ComposeOptions {
   /** Bound on each integration health probe (tests use a short one). */
   healthProbeTimeoutMs?: number;
   /** D-12: the AgentPhone HTTP ports and voice-turn timings (tests inject fakes and short times). */
-  telephony?: { http?: HttpPort; fetch?: (url: string, init: RequestInit) => Promise<Response>; interimAfterMs?: number; turnTimeoutMs?: number };
+  telephony?: { http?: HttpPort; interimAfterMs?: number; turnTimeoutMs?: number };
 }
 
 export interface ComposedServer {
@@ -246,8 +246,8 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   };
 
   const telephony = buildTelephony(env, { now,
-    twilio: { validator: providers.twilioValidator, messageAdapter: messageChannel === 'whatsapp_sandbox' ? providers.message : undefined, probe: providers.probes?.twilio, missing: [] },
-    ...(options.telephony?.http ? { http: options.telephony.http } : {}), ...(options.telephony?.fetch ? { fetch: options.telephony.fetch } : {}) });
+    twilio: { validator: providers.twilioValidator, probe: providers.probes?.twilio, missing: [] },
+    ...(options.telephony?.http ? { http: options.telephony.http } : {}) });
   const phoneLine = telephony.active.phoneNumber;
   // The AgentPhone path answers with the text agent model; without one it stays off (never the recorded stand-in).
   const modelMissing = options.agentModel || (env.OPENAI_API_KEY && env.OPENAI_BUILDER_MODEL) ? [] : ['OPENAI_API_KEY', 'OPENAI_BUILDER_MODEL'].filter((k) => !env[k as keyof Env]);
