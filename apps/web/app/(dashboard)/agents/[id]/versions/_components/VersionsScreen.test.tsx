@@ -137,7 +137,7 @@ describe('history and compare', () => {
     expect(within(v2).getByText('Active')).toBeTruthy();
     expect(within(v2).queryByRole('button', {name: 'Roll back to this version'})).toBeNull();
     expect(within(v1).getByRole('button', {name: 'Roll back to this version'})).toBeTruthy();
-    expect(within(v1).getByText(/Published .* by usr_owner_01/)).toBeTruthy();
+    expect(within(v1).getByText(/Published .* by the owner$/)).toBeTruthy();
     expect(screen.getByRole('link', {name: 'Back to the agent'}).getAttribute('href')).toBe('/agents/agt_pizza_01');
   });
 

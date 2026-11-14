@@ -162,7 +162,13 @@ Run `npm run dev:mock` (or set `NEXT_PUBLIC_MOCK=1`). Requests go to MSW in the 
 | `simulateQrOnlyChannel?()` | The next pizza call is proposed with `messageChannel: "qr_only"`. After approval the message step is `SKIPPED`: no dispatch, no message event, `checkout.message` is absent, and the order goes from `PAYMENT_LINK_READY` straight to `PAYMENT_PENDING`, then to a verified sandbox payment. |
 | `simulateSheetsDisconnected?()` | Google Sheets reports `disconnected` (the shared `integrationHealthDisconnected`) until `reset()`. The default health is the shared `integrationHealth`, where Sheets is connected and Google Calendar is degraded. The Live operations "Sheets disconnects" button runs it. |
 
-The last four are optional members of `MockControls`, so call them as `controls.simulateQrOnlyChannel?.()`.
+| `simulateEmptyBusiness?(businessId)` | That business has nothing yet: no agents, versions, calls, orders, bookings, approvals, executions, messages, sync jobs, activity, facts, conflicts, files, catalog, builder sessions or telemetry, until `reset()`. The business stays in the selector, and nothing answers the number for it. Screens refetch at once (it tells `subscribeMockReset` listeners). Use it for every empty state. |
+| `simulateRequestFailure?({ path, method?, mode?, code?, message?, times? })` | Requests whose path starts with `path` (for example `"/api/calls"`, or `"/api/"` for all) fail until `reset()` or `clearRequestFailures()`. `method` defaults to `GET`. `mode: "error"` (default) answers with the API error envelope and `code` (default `INTERNAL`, which is retryable, so React Query retries twice before the screen shows the error). `mode: "invalid"` answers 200 with a body that does not match the contract, so the client throws `kind: "invalid_response"`. `times` limits how many requests fail. With `method: "POST"` it fails a mutation with the server's reason. |
+| `clearRequestFailures?()` | Removes every `simulateRequestFailure` rule. |
+
+The last seven are optional members of `MockControls`, so call them as `controls.simulateQrOnlyChannel?.()`.
+
+In the browser, mock mode also puts the same controls on `window.__abosMock` once the mock is ready, for Playwright scripts and the console. Wait for it with `page.waitForFunction(() => !!window.__abosMock)`. Navigate with in-app links after you use it: a reload seeds the mock again. A control that changes data a screen already holds (`simulateSheetsDisconnected`) needs a refetch; the Mock controls panel buttons do that for you.
 
 Approving a `price_edit` (from `useProposePrice`) runs `square.catalog.price.update` and `local.catalog.sync`; afterwards `useCatalog` shows the new price.
 

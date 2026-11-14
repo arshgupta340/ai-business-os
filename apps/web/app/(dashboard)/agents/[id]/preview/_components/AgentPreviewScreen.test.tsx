@@ -359,6 +359,9 @@ describe('Agent preview', {timeout: 30000}, () => {
     renderScreen('agt_pizza_paused_88');
     expect(await screen.findByText('This agent is paused')).toBeTruthy();
     expect(screen.getByText(/Simulated call is off: This agent is paused/)).toBeTruthy();
+    // The live agent has the same name: it is told apart by its version, never by its raw ID.
+    expect(await screen.findByText(/^Phone\. The other Pizza Order Assistant \(version 2\) answers/)).toBeTruthy();
+    expect(screen.queryByText(/agt_pizza_01/)).toBeNull();
   });
 
   it('an agent of the other business shows not found and none of its data', async () => {

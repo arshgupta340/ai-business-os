@@ -79,7 +79,7 @@ describe('AgentsListScreen', {timeout: 20_000}, () => {
     );
     renderList();
     // The query client retries a retryable read twice before it shows the error.
-    expect(await screen.findByText('Could not load this', undefined, {timeout: 10_000})).toBeTruthy();
+    expect(await screen.findByText('Could not load your agents', undefined, {timeout: 10_000})).toBeTruthy();
     expect(screen.getByText('Unexpected server error.')).toBeTruthy();
     expect(screen.getByRole('button', {name: 'Try again'})).toBeTruthy();
   });

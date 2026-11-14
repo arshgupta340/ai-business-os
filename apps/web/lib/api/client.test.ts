@@ -94,6 +94,9 @@ describe("error mapping", () => {
     const err = await caught(api.getBusiness(PIZZA));
     expect(err.kind).toBe("invalid_response");
     expect(err.retryable).toBe(false);
+    // The owner reads plain words; the path stays in details for support.
+    expect(err.message).not.toMatch(/contract|\/api\//);
+    expect(err.details?.path).toBe(`/api/businesses/${PIZZA}`);
   });
 
   it("falls back to a code from the status when the body is not an envelope", async () => {

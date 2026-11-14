@@ -180,6 +180,13 @@ export const mockControls: MockControls = {
   simulateCatalogSyncFailed,
   simulateQrOnlyChannel,
   simulateSheetsDisconnected,
+  simulateEmptyBusiness: (businessId) => {
+    db.emptyBusiness(businessId);
+    // Screens drop what they hold and refetch, the same as after reset().
+    publishMockReset();
+  },
+  simulateRequestFailure: (rule) => db.addRequestFailure(rule),
+  clearRequestFailures: () => db.clearRequestFailures(),
 };
 
 /** Returns mockControls in mock mode once the worker started, otherwise null. Same hook as "@/lib/api". */
