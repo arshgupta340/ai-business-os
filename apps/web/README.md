@@ -29,11 +29,11 @@ Real mode without `NEXT_PUBLIC_SUPABASE_URL` or `NEXT_PUBLIC_SUPABASE_ANON_KEY`:
 | `app/sign-in/page.tsx` | Sign-in. Outside the dashboard group. |
 | `components/` | Shared building blocks (below). |
 | `components/shell/` | Shell parts. `useShellBadges()` sets the Approvals count. |
-| `components/providers/AppProviders.tsx` | Theme, links, auth, business. The lead adds `ApiProvider` here. |
+| `components/providers/AppProviders.tsx` | Theme, links, auth, business and `ApiProvider` (React Query, plus the mock API in mock mode). |
 | `lib/session/` | `useBusiness()`, `BusinessProvider`, seeded businesses. |
 | `lib/session/auth/` | `useAuth()`, `getAccessToken()`. |
 | `lib/supabase/client.ts` | `getSupabaseBrowserClient()`, null when not configured. |
-| `lib/api/`, `mocks/` | API client and MSW mocks (another task). |
+| `lib/api/`, `mocks/` | Typed API client, React Query hooks and the MSW mock layer. Read `lib/api/README.md`. |
 
 ## Shared components
 
