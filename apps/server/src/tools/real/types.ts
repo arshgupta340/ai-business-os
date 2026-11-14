@@ -142,6 +142,32 @@ export type RealToolsetPorts = {
   availability: AvailabilityPort;
 };
 
+/**
+ * PROPOSED (SPEC 2.9 "Consent evidence on a phone call"): the caller agreed to one message, as the
+ * phone relay observed it. Produced and held only by the server, in memory, for one call. Nothing
+ * here comes from the model: the recipient is the signed webhook's `From`, and the times are the
+ * server clock.
+ */
+export type ConsentEvidence = {
+  callId: string;
+  agentVersionId: string;
+  /** E.164, from the signed Twilio webhook. */
+  recipient: string;
+  /** When the relay saw the offer finish playing (ISO, server clock). */
+  offerSpokenAt: string;
+  /** How the caller answered: the server's transcript of the one answer turn, or a keypad `1`. */
+  method: 'spoken' | 'keypad';
+  /** When the relay recorded the answer (ISO, server clock). */
+  consentAt: string;
+};
+
+/** A trusted reader of the call's consent evidence, bound to one call. Never a tool argument. */
+export type ConsentSource = {
+  callId: string;
+  agentVersionId: string;
+  read: () => ConsentEvidence | undefined;
+};
+
 export type RealToolsetDeps = {
   businessId: string;
   /** The server's MESSAGE_CHANNEL setting. A caller who declines messages always gets `qr_only`. */
@@ -155,6 +181,11 @@ export type RealToolsetDeps = {
   now?: (() => Date) | undefined;
   /** Overrides the registry `timeoutMs` of every tool (tests). */
   toolTimeoutMs?: number | undefined;
+  /**
+   * The phone relay's consent evidence for this call. Absent (sim-call, tests) means every proposal
+   * is `qr_only` with no recipient. Whatever the model sends in `contact` beyond the name is ignored.
+   */
+  consent?: ConsentSource | undefined;
 };
 
 /** One trace entry holds metadata only: field names and outcome codes, never values. */

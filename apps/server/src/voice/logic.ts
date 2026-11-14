@@ -84,12 +84,20 @@ export class StreamTokenStore<T extends { providerCallId: string }> {
     /** How long a used credential is remembered, to refuse late retries. */
     private readonly retentionMs = 4 * 60 * 60 * 1000,
     private readonly onUnusable?: ((value: T, why: UnusableCredential) => void) | undefined,
+    /** Removes private data from a value once its credential can no longer be used. Only what replay protection needs is kept. */
+    private readonly onRetire?: ((value: T) => void) | undefined,
   ) {}
 
   private unusable(c: Credential<T>, why: UnusableCredential): void {
     if (c.reported) return;
     c.reported = true;
     this.onUnusable?.(c.value, why);
+    this.onRetire?.(c.value);
+  }
+
+  /** The value pinned for a call, or undefined. For inspection and tests; it is never sent anywhere. */
+  valueOf(providerCallId: string): T | undefined {
+    return this.byCall.get(providerCallId)?.value;
   }
 
   /** Reports every credential that expired without being presented. Call it once the life of a credential has passed. */
@@ -138,6 +146,7 @@ export class StreamTokenStore<T extends { providerCallId: string }> {
     if (c === undefined) return;
     c.state = 'ended';
     this.byToken.delete(c.token);
+    this.onRetire?.(c.value);
   }
 
   get size(): number {

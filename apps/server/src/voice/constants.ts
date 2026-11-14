@@ -32,7 +32,20 @@ export const OAI_SERVER = {
   speechStopped: 'input_audio_buffer.speech_stopped',
   responseDone: 'response.done',
   error: 'error',
+  /** The PROPOSED text step reads these only while it waits for the caller's one answer turn. */
+  audioCommitted: 'input_audio_buffer.committed',
+  transcriptionCompleted: 'conversation.item.input_audio_transcription.completed',
+  transcriptionFailed: 'conversation.item.input_audio_transcription.failed',
+  /** The model's own transcript of one response's audio, read only for the server's offer line. */
+  outputTranscriptDone: 'response.output_audio_transcript.done',
 } as const;
+
+/**
+ * PROPOSED text step. Input transcription is turned on only while the relay waits for the caller's
+ * answer to the text offer (`audio.input.transcription`), and off again after. Field and event names
+ * were read from OpenAI's Realtime reference on 2026-11-14; not yet run against the live API.
+ */
+export const TRANSCRIBE_MODEL = 'gpt-4o-transcribe';
 
 /** Item types inside `response.done` output and `conversation.item.create`. */
 export const OAI_ITEM = {
@@ -48,6 +61,8 @@ export const TWILIO_EVENT = {
   mark: 'mark',
   stop: 'stop',
   clear: 'clear',
+  /** A keypad press on a bidirectional stream: `{ event: 'dtmf', dtmf: { track: 'inbound', digit } }`. Read from Twilio's docs on 2026-11-14; not yet seen on a real call. */
+  dtmf: 'dtmf',
 } as const;
 
 /** G.711 u-law at 8000 Hz: one byte per sample, so 8 bytes per millisecond. */
