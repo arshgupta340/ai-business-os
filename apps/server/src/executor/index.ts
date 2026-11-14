@@ -5,10 +5,20 @@ import {
 import { handlers } from './handlers.js';
 import type { ExecutorDeps, StepOutcome } from './types.js';
 
+/** Far above any provider timeout, so a live call is never mistaken for a crashed one. */
+export const DEFAULT_STALE_AFTER_MS = 15 * 60 * 1000;
+
 export type { ExecutorDeps, QueuePort, SubjectsPort, PolicyPort, StepOutcome, SyncDeps } from './types.js';
 
 /** No SDK exception text crosses this boundary. Timeouts always require review. */
 export function classifyFailure(error: unknown, attempt: number, externalAttempted: boolean): StepOutcome {
+  const outcome = classify(error, attempt, externalAttempted);
+  // A provider ID already known (for example a created Square order) is kept on the step for reconciliation.
+  const ref = typeof error === 'object' && error !== null && 'externalRef' in error ? error.externalRef : undefined;
+  return typeof ref === 'string' && ref ? { ...outcome, externalRef: ref } : outcome;
+}
+
+function classify(error: unknown, attempt: number, externalAttempted: boolean): StepOutcome {
   const object = typeof error === 'object' && error !== null ? error : {};
   const parsed = ErrorCodeSchema.safeParse('code' in object ? object.code : undefined);
   const code = parsed.success ? parsed.data : 'INTERNAL';
@@ -54,7 +64,21 @@ export function createExecutor(deps: ExecutorDeps) {
     return { ok: true as const, execution, material };
   }
 
+  const staleAfterMs = deps.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
+  if (!Number.isFinite(staleAfterMs) || staleAfterMs <= 0) throw new RangeError('staleAfterMs must be positive');
+
+  /** A step left RUNNING by a crash is sent to review, never rerun: its provider call may have happened. */
+  async function recoverStale() {
+    const recovered = await deps.queue.recoverStale({ olderThan: new Date(deps.clock.now().getTime() - staleAfterMs) });
+    for (const step of recovered) {
+      await deps.activity.write({ id: deps.ids.next('evt_'), businessId: step.businessId, correlationId: step.approvalId,
+        actorType: 'system', occurredAt: deps.clock.now().toISOString(), type: 'execution.failed',
+        payload: { executionId: step.id, actionType: step.actionType, errorCode: 'INTERNAL', retryable: false, nextStatus: 'NEEDS_REVIEW' } });
+    }
+  }
+
   async function runTick(): Promise<boolean> {
+    await recoverStale();
     const step = await deps.queue.claimNext(deps.workerId);
     if (!step) return false;
     let externalAttempted = false;
@@ -107,7 +131,7 @@ export function createExecutor(deps: ExecutorDeps) {
         continueBundle: externalAttempted && isMessage(step) };
       await deps.queue.finish(step.id, deps.workerId, outcome);
     }
-    const event: ActivityEvent = outcome.status === 'SUCCEEDED' || outcome.status === 'SKIPPED'
+    const event: ActivityEvent = outcome.status === 'SUCCEEDED'
       ? { ...envelope(), type: 'execution.succeeded', payload: { executionId: step.id, actionType: step.actionType,
         ...(outcome.externalRef ? { externalRef: outcome.externalRef } : {}) } }
       : { ...envelope(), type: 'execution.failed', payload: { executionId: step.id, actionType: step.actionType,
@@ -131,7 +155,8 @@ export function createExecutor(deps: ExecutorDeps) {
   async function stop() {
     if (timer) clearInterval(timer);
     timer = undefined;
-    await inFlight;
+    // A failed tick was already reported by the timer; stop only waits for it to settle.
+    await inFlight?.catch(() => {});
   }
   return { tick, start, stop };
 }

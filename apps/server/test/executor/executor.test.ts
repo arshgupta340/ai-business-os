@@ -41,7 +41,7 @@ describe('executor', () => {
     expect(h.deps.messages.sendOnce).not.toHaveBeenCalled();
   });
   it.each(['UNKNOWN', 'FAILED'] as const)('continues after a %s message without resending', async (status) => {
-    const h = harness(); vi.mocked(h.deps.messages.sendOnce).mockResolvedValue(status);
+    const h = harness(); vi.mocked(h.deps.messages.sendOnce).mockResolvedValue({ status });
     await ticks(createExecutor(h.deps), 23);
     expect(h.rows[1]?.status).toBe(status === 'UNKNOWN' ? 'NEEDS_REVIEW' : 'FAILED');
     expect(h.order.status).toBe('PAYMENT_PENDING'); expect(h.deps.messages.sendOnce).toHaveBeenCalledTimes(1);
@@ -52,10 +52,11 @@ describe('executor', () => {
     await ticks(createExecutor(h.deps), 5);
     expect(h.deps.messages.sendOnce).not.toHaveBeenCalled(); expect(h.order.status).toBe('PAYMENT_PENDING');
   });
-  it('defensively skips a queued qr_only message', async () => {
+  it('a claimed qr_only message sends nothing and is never finished SKIPPED by a worker', async () => {
     const h = harness(); h.setMaterial({ ...h.material, messageChannel: 'qr_only', messageRecipient: undefined, messageConsent: false } as OrderApprovalPayload);
     await ticks(createExecutor(h.deps));
-    expect(h.rows[1]?.status).toBe('SKIPPED'); expect(h.deps.messages.sendOnce).not.toHaveBeenCalled();
+    expect(h.rows[1]?.status).toBe('FAILED');
+    expect(h.history.every((o) => (o.status as string) !== 'SKIPPED')).toBe(true); expect(h.deps.messages.sendOnce).not.toHaveBeenCalled();
     expect(h.order.status).toBe('PAYMENT_PENDING');
   });
   it('requeues with growing delays, caps attempts at three, and preserves the stored key', async () => {
@@ -85,7 +86,7 @@ describe('executor', () => {
     expect(h.deps.checkout.createCheckout).not.toHaveBeenCalled();
   });
   it('marks persistence after provider success for review without a blind replay', async () => {
-    const h = harness(); vi.mocked(h.deps.subjects.saveCheckout).mockRejectedValue(new Error('database unavailable'));
+    const h = harness(); vi.mocked(h.deps.subjects.completeCheckout).mockRejectedValue(new Error('database unavailable'));
     await ticks(createExecutor(h.deps), 10);
     expect(h.rows[0]?.status).toBe('NEEDS_REVIEW'); expect(h.order.checkoutUrl).toBeUndefined();
     expect(h.deps.checkout.createCheckout).toHaveBeenCalledTimes(1);
@@ -100,7 +101,7 @@ describe('executor', () => {
     expect(h.deps.messages.sendOnce).not.toHaveBeenCalled();
   });
   it('books only after the saved event, even with an unknown confirmation', async () => {
-    const h = harness('booking_bundle'); vi.mocked(h.deps.messages.sendOnce).mockResolvedValue('UNKNOWN');
+    const h = harness('booking_bundle'); vi.mocked(h.deps.messages.sendOnce).mockResolvedValue({ status: 'UNKNOWN' });
     await ticks(createExecutor(h.deps), 20);
     expect(h.booking.googleEventId).toBe('google_event'); expect(h.booking.status).toBe('BOOKED_VERIFIED');
     expect(h.deps.calendar.createEvent).toHaveBeenCalledTimes(1); expect(h.deps.messages.sendOnce).toHaveBeenCalledTimes(1);

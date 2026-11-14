@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ActivityEventSchema, APPROVAL_SWEEP_INTERVAL_MS, SYNC_JOB_MAX_ATTEMPTS } from '@abos/contracts';
 import { orderPaid } from '@abos/contracts/fixtures';
 import { registerJobs, runExpirySweep, runSyncJob } from '../../src/executor/jobs.js';
-import type { SyncDeps, SyncJob, SyncOutcome } from '../../src/executor/types.js';
+import type { ReportingResult, SyncDeps, SyncJob, SyncOutcome } from '../../src/executor/types.js';
 import { harness } from './fakes.js';
 import { createExecutor } from '../../src/executor/index.js';
 
@@ -23,7 +23,7 @@ function syncHarness() {
       finish: vi.fn(async (_id, _worker, outcome) => { outcomes.push(outcome); delay = outcome.delayMs ?? 0; }),
     },
     policy: { authorizeSync: vi.fn(async () => ({ ok: true as const })) },
-    reporting: { appendOnce: vi.fn(async () => 'appended' as const) },
+    reporting: { appendOnce: vi.fn(async (): Promise<ReportingResult> => ({ ok: true, status: 'appended' })) },
   };
   return { deps, job, outcomes, events: h.events, retry() { if (outcomes.at(-1)?.status === 'RETRYING') { ready = true; h.advance(delay); } } };
 }
@@ -31,7 +31,7 @@ function syncHarness() {
 afterEach(() => vi.useRealTimers());
 describe('Sheets jobs', () => {
   it.each(['appended', 'skipped'] as const)('finishes %s once and does nothing without a due job', async (result) => {
-    const h = syncHarness(); vi.mocked(h.deps.reporting.appendOnce).mockResolvedValue(result);
+    const h = syncHarness(); vi.mocked(h.deps.reporting.appendOnce).mockResolvedValue({ ok: true, status: result });
     expect(await runSyncJob(h.deps)).toBe(true); expect(await runSyncJob(h.deps)).toBe(false);
     expect(h.outcomes).toEqual([{ status: 'DONE' }]);
     expect(h.deps.reporting.appendOnce).toHaveBeenCalledWith({ recordId: h.job.recordId, row: h.job.row });
@@ -58,7 +58,7 @@ describe('Sheets jobs', () => {
   it('recovers an uncertain append by the same record ID without a second row', async () => {
     const h = syncHarness(); const records = new Set<string>();
     vi.mocked(h.deps.reporting.appendOnce).mockImplementation(async ({ recordId }) => {
-      if (records.has(recordId)) return 'skipped';
+      if (records.has(recordId)) return { ok: true, status: 'skipped' };
       records.add(recordId); throw new Error('timeout after append');
     });
     await runSyncJob(h.deps); h.retry(); await runSyncJob(h.deps);

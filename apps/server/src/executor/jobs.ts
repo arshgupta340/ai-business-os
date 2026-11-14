@@ -1,4 +1,4 @@
-import { APPROVAL_SWEEP_INTERVAL_MS, SYNC_JOB_MAX_ATTEMPTS, type ActivityEvent, type ErrorCode } from '@abos/contracts';
+import { APPROVAL_SWEEP_INTERVAL_MS, ErrorCodeSchema, SYNC_JOB_MAX_ATTEMPTS, type ActivityEvent, type ErrorCode } from '@abos/contracts';
 import type { SyncDeps, SyncOutcome } from './types.js';
 
 /** Sheets is an eventual projection. This port deliberately has no subject mutation methods. */
@@ -12,8 +12,14 @@ export async function runSyncJob(deps: SyncDeps): Promise<boolean> {
     else {
       // appendOnce checks the record ID column on every attempt, including after a timeout.
       const result = await deps.reporting.appendOnce({ recordId: job.recordId, row: job.row });
-      if (result !== 'appended' && result !== 'skipped') throw new Error('Invalid append result');
-      outcome = { status: 'DONE' };
+      if (typeof result !== 'object' || result === null) throw new Error('Invalid append result');
+      if (result.ok === true) {
+        if (result.status !== 'appended' && result.status !== 'skipped') throw new Error('Invalid append result');
+        outcome = { status: 'DONE' };
+      } else if (result.retryable === false) {
+        // A definite refusal (for example an invalid row) cannot succeed on a retry.
+        outcome = { status: 'FAILED', errorCode: ErrorCodeSchema.safeParse(result.reason).success ? result.reason : 'INTEGRATION_UNAVAILABLE' };
+      } else throw new Error('Retryable append failure');
     }
   } catch {
     outcome = job.attempts < SYNC_JOB_MAX_ATTEMPTS
