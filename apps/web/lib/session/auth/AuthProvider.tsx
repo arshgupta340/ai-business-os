@@ -32,7 +32,7 @@ function ownerFromUser(user: User): Owner {
   const email = user.email ?? '';
   const metadata = user.user_metadata as Record<string, unknown> | undefined;
   const name = metadata?.display_name ?? metadata?.full_name ?? metadata?.name;
-  return {email, displayName: typeof name === 'string' && name ? name : email};
+  return {id: user.id, email, displayName: typeof name === 'string' && name ? name : email};
 }
 
 export function AuthProvider({children}: {children: ReactNode}) {

@@ -55,6 +55,12 @@ export function registerVoiceRoutes(app: FastifyInstance, deps: VoiceRouteDeps):
     const { builderSessionId } = parseOrThrow(ENDPOINTS.createRealtimeClientSecret.body, request.body ?? {});
     const session = await deps.sessions.get(scope.businessId, builderSessionId);
     if (!session) throw apiError('NOT_FOUND', 'Builder session not found.');
+    // A closed session (its agent was created, or it was abandoned) takes no
+    // more owner turns, so it gets no voice secret either. Checked before the
+    // rate limit and before any call to OpenAI.
+    if (session.status !== 'active') {
+      throw apiError('INVALID_STATE', 'This builder session is closed. Start a new one to use voice.', { state: session.status });
+    }
 
     const limit = limiter.take(scope.owner.userId);
     if (!limit.ok) {

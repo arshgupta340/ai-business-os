@@ -51,9 +51,19 @@ describe('server skeleton', () => {
     expect(res.json().correlationId).toBe(res.headers['x-correlation-id']);
   });
 
-  it('registers the builder plugin', async () => {
+  it('registers the builder plugin: its routes exist and refuse a request without a token', async () => {
+    await app.ready();
+    const builderRoutes = app.routeInventory().filter((r) => r.auth === 'builder').map((r) => `${r.method} ${r.url}`);
+    expect(builderRoutes).toEqual(expect.arrayContaining(['POST /api/builder/sessions', 'GET /api/agents', 'POST /api/agents/:id/publish']));
+    const res = await app.inject({ method: 'POST', url: '/api/builder/sessions?businessId=biz_pizza_01', payload: {} });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toMatchObject({ code: 'UNAUTHENTICATED' });
+  });
+
+  it('has no builder ping route (issue #96): the path is not registered and answers no 200', async () => {
+    await app.ready();
+    expect(app.routeInventory().filter((r) => r.url.includes('ping'))).toEqual([]);
     const res = await app.inject({ method: 'GET', url: '/api/builder/ping' });
-    expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ ok: true, lane: 'builder' });
+    expect([401, 404]).toContain(res.statusCode);
   });
 });

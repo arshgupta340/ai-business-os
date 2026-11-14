@@ -6,6 +6,7 @@ import { NotConfiguredAuth, requireBusiness, UnverifiedSeedOwnerAuth, type Build
 import { builderAuthMode, parseBuilderEnv } from './env';
 import { registerExtractionRoutes, withConflicts, type ExtractionOptions } from './extraction/index';
 import { createPublishStores, registerPublishRoutes, type PublishOptions } from './publish/index';
+import { KeyedLock } from './publish/lock';
 import { checkedResponse } from './respond';
 import type { AgentModel } from './runner/agent-model';
 import { OpenAiAgentModel } from './runner/openai-agent-model';
@@ -95,7 +96,7 @@ export const builderPlugin: FastifyPluginAsync<BuilderPluginOptions> = async (ap
     if (mode === 'dev') {
       auth = new UnverifiedSeedOwnerAuth();
       app.log.warn(
-        'BUILDER_DEV_AUTH=1: builder routes use UnverifiedSeedOwnerAuth and the bearer token is NOT verified. It answers only requests from the loopback address (127.0.0.1, ::1); any other address gets UNAUTHENTICATED',
+        'BUILDER_DEV_AUTH=1: builder routes use UnverifiedSeedOwnerAuth and the bearer token is NOT verified. It answers only requests from the loopback address (127.0.0.1, ::1) with Host localhost, 127.0.0.1 or [::1] and no forwarding header (Forwarded, X-Forwarded-*, X-Real-IP, CF-Connecting-IP, CF-Ray, True-Client-IP). Requests through a tunnel such as cloudflared or ngrok get UNAUTHENTICATED',
       );
     } else {
       auth = new NotConfiguredAuth();
@@ -130,17 +131,14 @@ export const builderPlugin: FastifyPluginAsync<BuilderPluginOptions> = async (ap
   // get a guarded store, so a draft write cannot undo a publish or a pause.
   const publish = createPublishStores(options.publish, source);
   const draftAgents = publish.guardDraftWrites(agents);
-  const builder = new BuilderSessionService({ sessions, agents: draftAgents, draftFacts, knowledge, model: builderModel, now, log: app.log,
+  // One lock per builder session, shared by chat turns and agent creates.
+  const sessionLock = new KeyedLock();
+  const builder = new BuilderSessionService({ sessions, agents: draftAgents, draftFacts, knowledge, model: builderModel, now, log: app.log, sessionLock,
     ...(options.proposeFactFromChat ? { proposeFactFromChat: options.proposeFactFromChat } : {}) });
-  const agentService = new AgentService({ agents: draftAgents, sessions, liveAgent: options.liveAgent ?? publish.liveAgentReader, activeVersions: publish.versions, now });
+  const agentService = new AgentService({ agents: draftAgents, sessions, liveAgent: options.liveAgent ?? publish.liveAgentReader, activeVersions: publish.versions, now, sessionLock });
   const runs = new AgentRunService({ agents, knowledge, runner: new MockTextRunner(toolset, agentModel, now), toolset });
 
   registerVoiceRoutes(app, { auth, sessions, env: source, now, minter: options.realtimeMinter });
-
-  // The one route with no owner check. It returns nothing about any business.
-  // It stays until the server tests that call it (apps/server/test) are changed
-  // in the same pull request that removes it.
-  app.get('/api/builder/ping', async () => ({ ok: true, lane: 'builder' }));
 
   // ---- 3.3 Builder sessions
   app.post('/api/builder/sessions', async (request, reply) => {

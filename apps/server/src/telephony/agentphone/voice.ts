@@ -12,11 +12,12 @@
 // a second proposal). One bound covers waiting and running: when it passes, the caller hears a fixed
 // apology, the turn is abandoned (it starts no further tool call and its unheard reply is not kept), and the
 // next turn waits only for a tool call that is still running.
-import { AgentSpecSchema, toolsForCapabilities, type AgentSpec, type CallEndReason, type CapabilityId } from '@abos/contracts';
+import { AgentSpecSchema, type AgentSpec, type CallEndReason, type CapabilityId, type MessageChannelSetting, type ToolName } from '@abos/contracts';
 import type { AgentModel } from '../../builder/runner/agent-model';
 import type { QueryDb } from '../../db/index';
 import type { CallsStore } from '../../compose/ports';
 import type { RealToolset } from '../../tools/real/types';
+import { checkSessionCapabilities } from '../../voice/relay';
 import type { CallDecision, CallDecisionsPort, LiveAgentPort } from '../../voice/types';
 import { initialTurnStage, runAgentTurn, type TurnSession } from '../../api/simcall/turn';
 import type { TurnReply } from '../types';
@@ -40,7 +41,7 @@ export function decisionSpeech(template: AgentSpec['template'], decision: CallDe
   return 'An update from the shop: the request expired before the shop answered.';
 }
 
-type Session = TurnSession & { spec: AgentSpec; businessId: string; businessName: string; agentVersionId: string; callId: string;
+type Session = TurnSession & { spec: AgentSpec; tools: ToolName[]; businessId: string; businessName: string; agentVersionId: string; callId: string;
   decision?: CallDecision | undefined; unsubscribe(): void;
   /** Set when the call ended or the session was evicted: a turn still running stops acting. */
   closed: boolean };
@@ -51,6 +52,8 @@ export interface AgentPhoneVoiceDeps {
   calls: CallsStore;
   toolsetFor(ctx: { businessId: string; agentVersionId: string; callId: string; capabilities: readonly CapabilityId[] }): RealToolset;
   model: AgentModel;
+  /** The server's MESSAGE_CHANNEL setting, which the phone prompt takes (shared runner). */
+  messageChannel: MessageChannelSetting;
   decisions?: CallDecisionsPort | undefined;
   now(): Date;
   newId(prefix: string): string;
@@ -107,11 +110,18 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
     if (row.status !== 'IN_PROGRESS') return { speak: { text: SPEECH.callEnded, hangup: true }, businessId };
     const spec = AgentSpecSchema.safeParse(row.spec);
     if (!spec.success) return { speak: { text: SPEECH.notTakingCalls, hangup: true }, businessId };
+    // The phone path's session check (voice/relay.ts), as for Twilio and sim-call: a pinned spec with a
+    // capability an agent may not hold takes no call, rather than running with it filtered out.
+    const check = checkSessionCapabilities(spec.data);
+    if (!check.ok) {
+      deps.log?.warn({ agentVersionId: String(row.agent_version_id), unknown: check.unknown.length, notAllowed: check.notAllowed.length }, 'agentphone: agent spec has a capability that is not allowed; call refused');
+      return { speak: { text: SPEECH.notTakingCalls, hangup: true }, businessId };
+    }
     const callId = String(row.id);
     const agentVersionId = String(row.agent_version_id);
     if (sessions.size >= MAX_SESSIONS) drop(sessions.keys().next().value as string);
     const s: Session = {
-      spec: spec.data, businessId, businessName: String(row.business_name), agentVersionId, callId,
+      spec: spec.data, tools: check.tools, businessId, businessName: String(row.business_name), agentVersionId, callId,
       toolset: deps.toolsetFor({ businessId, agentVersionId, callId, capabilities: spec.data.capabilities }),
       history: [], stage: (typeof row.stage === 'string' ? row.stage : initialTurnStage(spec.data)) as TurnSession['stage'],
       unsubscribe: () => undefined, closed: false,
@@ -127,7 +137,7 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
     /** Number of live sessions (tests). */
     get size() { return sessions.size; },
     /** The tools the agent of a call holds (tests prove no write or external_message tool). */
-    toolsOf(providerCallId: string) { const s = sessions.get(providerCallId); return s ? toolsForCapabilities(s.spec.capabilities) : undefined; },
+    toolsOf(providerCallId: string) { const s = sessions.get(providerCallId); return s ? [...s.tools] : undefined; },
 
     async turn(input: { providerCallId: string; to: string; callerLast4?: string | undefined; text: string }): Promise<TurnOutcome> {
       const id = input.providerCallId;
@@ -161,7 +171,7 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
         let finished = false;
         let toolsRunning = 0;
         const quiet = () => { if (finished || ((abandoned || s.closed) && toolsRunning === 0)) release(); };
-        const run = runAgentTurn(deps, { spec: s.spec, businessName: s.businessName, businessId: s.businessId, agentVersionId: s.agentVersionId, callId: s.callId, message: text, session: s,
+        const run = runAgentTurn(deps, { spec: s.spec, businessName: s.businessName, businessId: s.businessId, agentVersionId: s.agentVersionId, callId: s.callId, message: text, session: s, tools: s.tools,
           abandoned: () => abandoned || s.closed,
           onToolCall: (settled) => { toolsRunning += 1; void settled.then(() => { toolsRunning -= 1; quiet(); }); } });
         running = true;
