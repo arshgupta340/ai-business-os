@@ -1,5 +1,5 @@
 import type {
-  ActionExecution, ActivityEvent, ApprovalRequest, Booking, ErrorCode, MessageDispatch, Order,
+  ActionExecution, ActivityEvent, ApprovalRequest, Booking, MessageDispatch, Order,
   ResolveExecutionBody,
 } from '@abos/contracts';
 
@@ -20,33 +20,40 @@ export type RecoveryLookup =
   | { outcome: 'absent' }
   | { outcome: 'unknown' };
 
+/** One durable decision per execution attempt. A new generation begins only when a worker
+ * later reaches NEEDS_REVIEW again with a new attempt number. */
+export type RecoveryDecision = {
+  action: ResolveExecutionBody['action'];
+  generation: number;
+  execution: ActionExecution;
+};
+
 export interface RecoveryTransaction {
   loadOrder(): Promise<Order | undefined>;
   loadExecution(): Promise<RecoveryRecord | undefined>;
-  /** Durable receipt, scoped to business, execution, action and the stored idempotency key.
-   * Return the CURRENT execution on replay, even if a worker has since advanced it.
+  /** Durable receipt, scoped to business, execution and the current attempt. It is not keyed
+   * by owner action: the opposite action must be refused for the same recovery generation.
+   * Return the current execution only when the stored generation equals the current attempt.
    */
-  replay(action: ResolveExecutionBody['action']): Promise<ActionExecution | undefined>;
+  recoveryDecision(): Promise<RecoveryDecision | undefined>;
   /** Local cancellation only. Fence queued work and refuse running/uncertain external effects.
    * Re-read the order under its lock; paid orders cannot be cancelled. No provider cancellation.
    */
   cancelOrder(order: Order): Promise<Order>;
-  /** Checked routine: apply verified references and subject transitions, preserve the key and
-   * attempts, and save the receipt atomically. Requeue only below EXECUTION_MAX_ATTEMPTS.
-   * FAILED on abandon never fabricates success or deletes a provider object.
+  /** Direct wrapper for the migration's checked NEEDS_REVIEW recovery routine. The routine
+   * locks the execution, verifies owner, business, approval material, key and attempts, writes
+   * the one recovery decision and audit event atomically, then returns the current execution.
+   * It cannot be implemented with private.finish_execution because that routine needs a worker
+   * lease on RUNNING. This module uses it only for abandon until downstream recovery routines
+   * and contract transitions are available.
    */
-  resolve(input: {
+  resolveNeedsReview(input: {
     record: RecoveryRecord;
     action: ResolveExecutionBody['action'];
-    status: ActionExecution['status'];
+    status: Extract<ActionExecution['status'], 'SUCCEEDED' | 'QUEUED' | 'FAILED'>;
     lookup: RecoveryLookup;
-  }): Promise<ActionExecution>;
-  /** Enqueue the original message execution using the EXISTING dispatch row and dispatch key.
-   * Never send here, insert a second dispatch, or reset a delivered dispatch. The worker must
-   * reauthorize the exact payload and use sendOnce with dispatchKey before any provider call.
-   * Save the recovery receipt atomically with this enqueue.
-   */
-  retryMessage(input: { record: RecoveryRecord; dispatchKey: string; idempotencyKey: string }): Promise<ActionExecution>;
+    event: ActivityEvent;
+  }): Promise<RecoveryDecision>;
   /** Transaction-scoped activity writer. Rolls back with the mutation and receipt on failure. */
   activity: { write(event: ActivityEvent): Promise<void> };
 }
@@ -64,11 +71,6 @@ export interface RecoveryPorts {
    * Called outside the recovery lock. Throw if verification is unavailable or ambiguous.
    */
   reconcilePayment(order: Order): Promise<Order>;
-  /** Compare the stored approval against CURRENT subject, integration and dispatch material.
-   * Same policy as executor authorization; no replacement approval or key may be created.
-   * The executor rechecks once more immediately before making an external call.
-   */
-  authorizeRetry(record: RecoveryRecord): Promise<{ ok: true } | { ok: false; code: ErrorCode }>;
   clock: { now(): Date };
   ids: { next(prefix: 'evt_'): string };
 }

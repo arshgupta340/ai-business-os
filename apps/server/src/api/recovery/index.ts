@@ -2,13 +2,13 @@ import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import {
   ActionExecutionSchema, ActivityEventSchema, ApprovalRequestSchema, BusinessScopeQuerySchema,
   CancelOrderResponseSchema, ENDPOINTS, ERROR_CODE_INFO, ErrorCodeSchema,
-  EXECUTION_MAX_ATTEMPTS, OrderSchema,
+  OrderSchema,
   ResolveExecutionBodySchema, ResolveExecutionResponseSchema, canTransition, makeApiError,
-  payloadHash, type ActionExecution, type ActivityEvent, type ErrorCode,
+  type ActionExecution, type ActivityEvent, type ErrorCode, type ResolveExecutionBody,
 } from '@abos/contracts';
-import type { RecoveryLookup, RecoveryPorts, RecoveryRecord, RecoveryScope } from './types';
+import type { RecoveryDecision, RecoveryLookup, RecoveryPorts, RecoveryRecord, RecoveryScope } from './types';
 
-export type { RecoveryLookup, RecoveryPorts, RecoveryRecord, RecoveryScope, RecoveryTransaction } from './types';
+export type { RecoveryDecision, RecoveryLookup, RecoveryPorts, RecoveryRecord, RecoveryScope, RecoveryTransaction } from './types';
 
 class RecoveryError extends Error {
   constructor(readonly code: ErrorCode) { super('Recovery request was refused.'); }
@@ -41,22 +41,20 @@ function checkRecord(record: RecoveryRecord, scope: RecoveryScope): void {
   if (d && (d.businessId !== scope.businessId || d.executionId !== e.id || d.subjectId !== a.subjectId || d.idempotencyKey !== e.idempotencyKey)) refuse('INVALID_STATE');
 }
 
-async function authorize(ports: RecoveryPorts, record: RecoveryRecord): Promise<void> {
-  const a = record.approval;
-  if (a.state === 'EXPIRED' || Date.parse(a.expiresAt) <= ports.clock.now().getTime()) refuse('APPROVAL_EXPIRED');
-  if (a.state !== 'APPROVED' || !a.decidedBy || !a.decidedAt) refuse('INVALID_STATE');
-  if (await payloadHash(a.payload) !== a.payloadHash) refuse('PAYLOAD_HASH_MISMATCH');
-  if (record.execution.attempts >= EXECUTION_MAX_ATTEMPTS) refuse('INVALID_STATE');
-  const authorization = await ports.authorizeRetry(record);
-  if (!authorization.ok) refuse(authorization.code);
-}
-
 function checkResult(before: ActionExecution, after: ActionExecution, status?: ActionExecution['status']): ActionExecution {
   const parsed = ActionExecutionSchema.parse(after);
   if (parsed.id !== before.id || parsed.businessId !== before.businessId || parsed.approvalId !== before.approvalId ||
     parsed.actionType !== before.actionType || parsed.stepIndex !== before.stepIndex ||
     parsed.idempotencyKey !== before.idempotencyKey || parsed.attempts !== before.attempts ||
     (status !== undefined && parsed.status !== status)) refuse('INTERNAL');
+  return parsed;
+}
+
+function checkDecision(before: ActionExecution, decision: RecoveryDecision, action: ResolveExecutionBody['action']): ActionExecution {
+  if (decision.action !== action || decision.generation !== before.attempts) refuse('INVALID_STATE');
+  const parsed = ActionExecutionSchema.parse(decision.execution);
+  if (parsed.id !== before.id || parsed.businessId !== before.businessId || parsed.approvalId !== before.approvalId ||
+    parsed.actionType !== before.actionType || parsed.stepIndex !== before.stepIndex || parsed.idempotencyKey !== before.idempotencyKey) refuse('INTERNAL');
   return parsed;
 }
 
@@ -72,6 +70,10 @@ export function createRecoveryPlugin(ports: RecoveryPorts): FastifyPluginAsync {
       return reply.header('X-Correlation-Id', request.id).code(ERROR_CODE_INFO[code].httpStatus)
         .send(makeApiError(code, 'Recovery request could not be completed.', request.id));
     });
+    // Fastify's default 404 includes the request URL, which may contain a bearer token or phone
+    // number. This encapsulated handler keeps malformed recovery-path requests redacted too.
+    app.setNotFoundHandler((request, reply) => reply.header('X-Correlation-Id', request.id)
+      .code(404).send(makeApiError('NOT_FOUND', 'Recovery route was not found.', request.id)));
 
     app.post(ENDPOINTS.cancelOrder.path, async (request, reply) => {
       reply.header('X-Correlation-Id', request.id);
@@ -122,37 +124,25 @@ export function createRecoveryPlugin(ports: RecoveryPorts): FastifyPluginAsync {
         if (!record) return refuse('NOT_FOUND');
         checkRecord(record, scope);
         const e = structuredClone(record.execution);
-        const replay = await tx.replay(body.data.action);
-        if (replay) {
-          // Attempts may legitimately advance after an earlier recovery queued the worker.
-          const parsed = ActionExecutionSchema.parse(replay);
-          if (parsed.id !== e.id || parsed.businessId !== e.businessId || parsed.approvalId !== e.approvalId || parsed.idempotencyKey !== e.idempotencyKey) return refuse('INTERNAL');
-          return parsed;
-        }
-        const message = e.actionType === 'message.checkout.send' || e.actionType === 'message.booking.confirm';
-        const bookingRetry = e.actionType === 'calendar.event.create' && record.booking?.status === 'RETRY_REQUIRED' && e.status === 'FAILED';
-        const messageRetry = message && record.dispatch?.status === 'FAILED' && e.status === 'FAILED';
-        if (e.status !== 'NEEDS_REVIEW' && !bookingRetry && !messageRetry) return refuse('INVALID_STATE');
+        const prior = await tx.recoveryDecision();
+        if (prior && prior.generation === e.attempts) return checkDecision(e, prior, body.data.action);
+        if (prior && prior.generation > e.attempts) return refuse('INTERNAL');
+        if (e.status !== 'NEEDS_REVIEW') return refuse('INVALID_STATE');
         if (record.order && ['CANCELLED', 'REJECTED', 'APPROVAL_EXPIRED', 'UNAVAILABLE'].includes(record.order.status)) return refuse('INVALID_STATE');
         if (record.booking && ['REJECTED', 'EXPIRED', 'SLOT_CONFLICT'].includes(record.booking.status)) return refuse('INVALID_STATE');
-        if (message && !record.dispatch) return refuse('INVALID_STATE');
-        // Includes definite failures: a previous request may have succeeded after our timeout.
+        // Retry needs additive subject and dispatch transitions plus checked routines that are not
+        // in this checkout. Do not report a queue that no restricted-role worker can consume.
+        if (body.data.action === 'retry') return refuse('INVALID_STATE');
         const lookup: RecoveryLookup = await ports.lookup(record);
         if (lookup.outcome === 'unknown') return refuse('INVALID_STATE');
-        if (lookup.outcome === 'exists' && !lookup.externalRef) return refuse('INVALID_STATE');
-        if (message && (record.dispatch?.status === 'SENT' || record.dispatch?.status === 'DELIVERED') && lookup.outcome !== 'exists') return refuse('INVALID_STATE');
-        const status = lookup.outcome === 'exists' ? 'SUCCEEDED' : body.data.action === 'abandon' ? 'FAILED' : 'QUEUED';
-        if (status === 'QUEUED') await authorize(ports, record);
-        const result = status === 'QUEUED' && message
-          ? await tx.retryMessage({ record, idempotencyKey: e.idempotencyKey, dispatchKey: record.dispatch!.idempotencyKey })
-          : await tx.resolve({ record, action: body.data.action, status, lookup });
-        const next = checkResult(e, result, status);
-        if (lookup.outcome === 'exists' && next.externalRef !== lookup.externalRef) return refuse('INTERNAL');
-        await tx.activity.write(event(ports, scope, request.id, next.status === 'SUCCEEDED'
-          ? { type: 'execution.succeeded', payload: { executionId: e.id, actionType: e.actionType, externalRef: lookup.outcome === 'exists' ? lookup.externalRef : undefined } }
-          : { type: 'execution.failed', payload: { executionId: e.id, actionType: e.actionType,
-            errorCode: e.errorCode ?? 'INVALID_STATE', retryable: next.status === 'QUEUED', nextStatus: next.status } }));
-        return next;
+        if ((record.dispatch?.status === 'SENT' || record.dispatch?.status === 'DELIVERED') && lookup.outcome !== 'exists') return refuse('INVALID_STATE');
+        // A found effect needs checkout or booking subject routines, not just an execution state.
+        if (lookup.outcome !== 'absent') return refuse('INVALID_STATE');
+        const audit = event(ports, scope, request.id, { type: 'execution.failed', payload: {
+          executionId: e.id, actionType: e.actionType, errorCode: e.errorCode ?? 'INVALID_STATE', retryable: false, nextStatus: 'FAILED',
+        } });
+        const decision = await tx.resolveNeedsReview({ record, action: 'abandon', status: 'FAILED', lookup, event: audit });
+        return checkResult(e, checkDecision(e, decision, 'abandon'), 'FAILED');
       });
       return ResolveExecutionResponseSchema.parse({ execution });
     });
