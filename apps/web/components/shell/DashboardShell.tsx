@@ -12,6 +12,7 @@ import {HStack} from '@astryxdesign/core/HStack';
 import {TopNav, TopNavHeading} from '@astryxdesign/core/TopNav';
 import {LoadingState} from '@/components/LoadingState';
 import {useAuth} from '@/lib/session/auth';
+import {ApprovalsBadgeSync} from './ApprovalsBadgeSync';
 import {BusinessSelector} from './BusinessSelector';
 import {ConnectionHealth} from './ConnectionHealth';
 import {OwnerControls} from './OwnerControls';
@@ -59,6 +60,7 @@ function ShellFrame({children}: {children: ReactNode}) {
 export function DashboardShell({children}: {children: ReactNode}) {
   return (
     <ShellBadgesProvider>
+      <ApprovalsBadgeSync />
       <ShellFrame>{children}</ShellFrame>
     </ShellBadgesProvider>
   );
