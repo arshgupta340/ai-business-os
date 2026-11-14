@@ -146,7 +146,10 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   const channelKeys: Record<MessageChannelSetting, [string, string | undefined][]> = {
     qr_only: [],
     surge: [['SURGE_API_KEY', env.SURGE_API_KEY], ['SURGE_ACCOUNT_ID', env.SURGE_ACCOUNT_ID]],
-    android_gateway: [['ANDROID_GATEWAY_URL', env.ANDROID_GATEWAY_URL], ['ANDROID_GATEWAY_API_KEY', env.ANDROID_GATEWAY_API_KEY]],
+    android_gateway: [['ANDROID_GATEWAY_KIND', env.ANDROID_GATEWAY_KIND],
+      ...(env.ANDROID_GATEWAY_KIND === 'smsgate'
+        ? [['ANDROID_GATEWAY_URL', env.ANDROID_GATEWAY_URL], ['ANDROID_GATEWAY_USERNAME', env.ANDROID_GATEWAY_USERNAME], ['ANDROID_GATEWAY_PASSWORD', env.ANDROID_GATEWAY_PASSWORD]] as [string, string | undefined][]
+        : [['ANDROID_GATEWAY_API_KEY', env.ANDROID_GATEWAY_API_KEY]] as [string, string | undefined][])],
     whatsapp_sandbox: [['TWILIO_ACCOUNT_SID', env.TWILIO_ACCOUNT_SID], ['TWILIO_AUTH_TOKEN', env.TWILIO_AUTH_TOKEN]],
   };
   const absent = channelKeys[messageChannel].filter(([, v]) => !v).map(([k]) => k);
@@ -154,13 +157,21 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   else if (absent.length > 0) status.message_channel = missing(...absent);
   else if (messageChannel === 'qr_only') status.message_channel = { configured: true, detail: 'qr_only sends nothing', noProviderNeeded: true };
   else {
-    message = createMessageAdapter({
-      channel: messageChannel, fetch: (url, init) => fetch(url, init),
-      surge: { apiKey: env.SURGE_API_KEY, accountId: env.SURGE_ACCOUNT_ID },
-      androidGateway: { baseUrl: env.ANDROID_GATEWAY_URL, apiKey: env.ANDROID_GATEWAY_API_KEY },
-      whatsappSandbox: { accountSid: env.TWILIO_ACCOUNT_SID, authToken: env.TWILIO_AUTH_TOKEN },
-    });
-    status.message_channel = ok(messageChannel);
+    try {
+      message = createMessageAdapter({
+        channel: messageChannel, fetch: (url, init) => fetch(url, init),
+        surge: { apiKey: env.SURGE_API_KEY, accountId: env.SURGE_ACCOUNT_ID },
+        androidGateway: { ...(env.ANDROID_GATEWAY_KIND ? { kind: env.ANDROID_GATEWAY_KIND } : {}), baseUrl: env.ANDROID_GATEWAY_URL, apiKey: env.ANDROID_GATEWAY_API_KEY,
+          username: env.ANDROID_GATEWAY_USERNAME, password: env.ANDROID_GATEWAY_PASSWORD, deviceId: env.ANDROID_GATEWAY_DEVICE_ID },
+        whatsappSandbox: { accountSid: env.TWILIO_ACCOUNT_SID, authToken: env.TWILIO_AUTH_TOKEN, ...(env.TWILIO_WHATSAPP_FROM ? { from: env.TWILIO_WHATSAPP_FROM } : {}) },
+      });
+      status.message_channel = ok(messageChannel);
+    } catch (error) {
+      // Issue #94 item 2: a bad channel setting never stops the server. The adapter's message names
+      // the setting only, never its value; nothing is sent and health says why.
+      const named = error instanceof Error ? /setting: ([A-Z_]+)/.exec(error.message)?.[1] : undefined;
+      status.message_channel = invalid(named ?? 'MESSAGE_CHANNEL settings');
+    }
   }
 
   let twilioCalls: Providers['twilioCalls'];
