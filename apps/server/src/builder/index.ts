@@ -137,11 +137,6 @@ export const builderPlugin: FastifyPluginAsync<BuilderPluginOptions> = async (ap
 
   registerVoiceRoutes(app, { auth, sessions, env: source, now, minter: options.realtimeMinter });
 
-  // The one route with no owner check. It returns nothing about any business.
-  // It stays until the server tests that call it (apps/server/test) are changed
-  // in the same pull request that removes it.
-  app.get('/api/builder/ping', async () => ({ ok: true, lane: 'builder' }));
-
   // ---- 3.3 Builder sessions
   app.post('/api/builder/sessions', async (request, reply) => {
     const scope = await requireBusiness(auth, request);

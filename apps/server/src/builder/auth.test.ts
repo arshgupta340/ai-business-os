@@ -113,10 +113,4 @@ describe('builder auth fails closed', () => {
     expect(isLoopbackAddress('0.0.0.0')).toBe(false);
     expect(isLoopbackAddress('127.0.0.1 ')).toBe(false);
   });
-
-  it('keeps /api/builder/ping open', async () => {
-    app = await appWith({});
-    const res = await app.inject({ method: 'GET', url: '/api/builder/ping' });
-    expect(res.json()).toEqual({ ok: true, lane: 'builder' });
-  });
 });
