@@ -12,7 +12,7 @@ import {
   ToolNameSchema,
 } from '../enums';
 import { AgentIdSchema, AgentVersionIdSchema, BusinessIdSchema, CallIdSchema, FactIdSchema, TestSessionIdSchema, UserIdSchema } from '../ids';
-import { E164Schema, IsoDateTimeSchema, Last4Schema } from '../primitives';
+import { E164Schema, IsoDateTimeSchema, Last4Schema, msBetween } from '../primitives';
 
 export const AgentSpecSchema = z.object({
   id: AgentIdSchema,
@@ -70,7 +70,7 @@ export const AgentSchema = z.object({
 });
 export type Agent = z.infer<typeof AgentSchema>;
 
-export const CallSchema = z.object({
+export const CallBaseSchema = z.object({
   id: CallIdSchema,
   businessId: BusinessIdSchema,
   agentId: AgentIdSchema,
@@ -83,6 +83,25 @@ export const CallSchema = z.object({
   endReason: CallEndReasonSchema.optional(),
   startedAt: IsoDateTimeSchema,
   endedAt: IsoDateTimeSchema.optional(),
+});
+
+const END_REASON_FOR_STATUS = { COMPLETED: 'completed', DROPPED: 'dropped', FAILED: 'failed' } as const;
+
+export const CallSchema = CallBaseSchema.superRefine((c, ctx) => {
+  // DATA-MODEL 2.13 checks.
+  if ((c.channel === 'phone') !== (c.providerCallId !== undefined)) {
+    ctx.addIssue({ code: 'custom', path: ['providerCallId'], message: 'providerCallId is present exactly for phone calls' });
+  }
+  if ((c.status === 'IN_PROGRESS') !== (c.endedAt === undefined)) {
+    ctx.addIssue({ code: 'custom', path: ['endedAt'], message: 'endedAt is absent exactly while IN_PROGRESS' });
+  }
+  if (c.endedAt !== undefined && msBetween(c.startedAt, c.endedAt) < 0) {
+    ctx.addIssue({ code: 'custom', path: ['endedAt'], message: 'endedAt must not be before startedAt' });
+  }
+  // CONTRACTS 6: COMPLETED/completed, DROPPED/dropped, FAILED/failed.
+  if (c.endReason !== undefined && (c.status === 'IN_PROGRESS' || END_REASON_FOR_STATUS[c.status] !== c.endReason)) {
+    ctx.addIssue({ code: 'custom', path: ['endReason'], message: `endReason ${c.endReason} does not match status ${c.status}` });
+  }
 });
 export type Call = z.infer<typeof CallSchema>;
 

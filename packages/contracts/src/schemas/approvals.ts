@@ -19,7 +19,9 @@ import {
   MinorAmountSchema,
   Sha256HashSchema,
   TimezoneSchema,
+  msBetween,
 } from '../primitives';
+import { APPROVAL_EXPIRY_MS } from '../constants';
 
 // SPEC 2.3: each bundle type carries exactly its own ordered action list.
 export const OrderBundleActionsSchema = z.tuple([
@@ -66,7 +68,7 @@ export const BookingApprovalPayloadSchema = z.object({
   messageChannel: MessageChannelSettingSchema,
   actionBundle: BookingBundleActionsSchema,
   expiresAt: IsoDateTimeSchema,
-});
+}).refine((p) => msBetween(p.startUtc, p.endUtc) > 0, { path: ['endUtc'], message: 'endUtc must be after startUtc' });
 export type BookingApprovalPayload = z.infer<typeof BookingApprovalPayloadSchema>;
 
 export const FactEditApprovalPayloadSchema = z.object({
@@ -115,7 +117,7 @@ const approvalBase = {
   createdAt: IsoDateTimeSchema,
 };
 
-export const OrderApprovalRequestSchema = z.object({
+export const OrderApprovalRequestBaseSchema = z.object({
   ...approvalBase,
   actorType: z.literal('deployed_agent'),
   bundleType: z.literal('order_bundle'),
@@ -123,7 +125,7 @@ export const OrderApprovalRequestSchema = z.object({
   subjectId: OrderIdSchema,
   payload: OrderApprovalPayloadSchema,
 });
-export const BookingApprovalRequestSchema = z.object({
+export const BookingApprovalRequestBaseSchema = z.object({
   ...approvalBase,
   actorType: z.literal('deployed_agent'),
   bundleType: z.literal('booking_bundle'),
@@ -132,7 +134,7 @@ export const BookingApprovalRequestSchema = z.object({
   payload: BookingApprovalPayloadSchema,
 });
 // P-09: owner edits reuse the approval table with actorType owner.
-export const FactEditApprovalRequestSchema = z.object({
+export const FactEditApprovalRequestBaseSchema = z.object({
   ...approvalBase,
   actorType: z.literal('owner'),
   bundleType: z.literal('fact_edit'),
@@ -140,7 +142,7 @@ export const FactEditApprovalRequestSchema = z.object({
   subjectId: FactIdSchema,
   payload: FactEditApprovalPayloadSchema,
 });
-export const PriceEditApprovalRequestSchema = z.object({
+export const PriceEditApprovalRequestBaseSchema = z.object({
   ...approvalBase,
   actorType: z.literal('owner'),
   bundleType: z.literal('price_edit'),
@@ -148,6 +150,44 @@ export const PriceEditApprovalRequestSchema = z.object({
   subjectId: CatalogItemRowIdSchema,
   payload: PriceEditApprovalPayloadSchema,
 });
+type ApprovalRequestShape = {
+  businessId: string;
+  subjectId: string;
+  actionBundle: readonly string[];
+  expiresAt: string;
+  createdAt: string;
+  state: string;
+  decidedBy?: string | undefined;
+  decidedAt?: string | undefined;
+  payload: { businessId: string; subjectId: string; actionBundle: readonly string[]; expiresAt: string };
+};
+
+/** Cross-field rules shared by the four request variants. */
+function checkApprovalRequest(a: ApprovalRequestShape, ctx: z.RefinementCtx): void {
+  // The outer copies must be the fields that are hashed, or the UI could show one subject while the hash covers another.
+  for (const field of ['businessId', 'subjectId', 'expiresAt'] as const) {
+    if (a[field] !== a.payload[field]) ctx.addIssue({ code: 'custom', path: [field], message: `${field} must equal payload.${field}` });
+  }
+  if (a.actionBundle.length !== a.payload.actionBundle.length || a.actionBundle.some((x, i) => x !== a.payload.actionBundle[i])) {
+    ctx.addIssue({ code: 'custom', path: ['actionBundle'], message: 'actionBundle must equal payload.actionBundle' });
+  }
+  // SPEC 2.9: an approval expires 10 minutes after creation.
+  if (msBetween(a.createdAt, a.expiresAt) !== APPROVAL_EXPIRY_MS) {
+    ctx.addIssue({ code: 'custom', path: ['expiresAt'], message: 'expiresAt must be createdAt plus 10 minutes' });
+  }
+  // DATA-MODEL 2.14 checks: decidedAt is absent exactly while PENDING; decidedBy is present exactly when APPROVED or REJECTED.
+  if ((a.state === 'PENDING') !== (a.decidedAt === undefined)) {
+    ctx.addIssue({ code: 'custom', path: ['decidedAt'], message: 'decidedAt must be absent while PENDING and present otherwise' });
+  }
+  if ((a.state === 'APPROVED' || a.state === 'REJECTED') !== (a.decidedBy !== undefined)) {
+    ctx.addIssue({ code: 'custom', path: ['decidedBy'], message: 'decidedBy must be present exactly when APPROVED or REJECTED' });
+  }
+}
+
+export const OrderApprovalRequestSchema = OrderApprovalRequestBaseSchema.superRefine(checkApprovalRequest);
+export const BookingApprovalRequestSchema = BookingApprovalRequestBaseSchema.superRefine(checkApprovalRequest);
+export const FactEditApprovalRequestSchema = FactEditApprovalRequestBaseSchema.superRefine(checkApprovalRequest);
+export const PriceEditApprovalRequestSchema = PriceEditApprovalRequestBaseSchema.superRefine(checkApprovalRequest);
 export type OrderApprovalRequest = z.infer<typeof OrderApprovalRequestSchema>;
 export type BookingApprovalRequest = z.infer<typeof BookingApprovalRequestSchema>;
 export type FactEditApprovalRequest = z.infer<typeof FactEditApprovalRequestSchema>;

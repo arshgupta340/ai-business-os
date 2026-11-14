@@ -22,7 +22,7 @@ export const ServiceOfferingSchema = z.object({
 });
 export type ServiceOffering = z.infer<typeof ServiceOfferingSchema>;
 
-export const BusinessFactSchema = z.object({
+export const BusinessFactBaseSchema = z.object({
   id: FactIdSchema,
   businessId: BusinessIdSchema,
   kind: FactKindSchema,
@@ -39,6 +39,12 @@ export const BusinessFactSchema = z.object({
   createdAt: IsoDateTimeSchema,
   updatedAt: IsoDateTimeSchema,
 });
+
+// DATA-MODEL 2.6 check: verifiedAt is absent exactly while the fact is a draft.
+export const BusinessFactSchema = BusinessFactBaseSchema.refine((f) => (f.status === 'draft') === (f.verifiedAt === undefined), {
+  path: ['verifiedAt'],
+  message: 'verifiedAt must be absent for a draft and present otherwise',
+});
 export type BusinessFact = z.infer<typeof BusinessFactSchema>;
 
 export const FactConflictCandidateSchema = z.object({
@@ -49,7 +55,7 @@ export const FactConflictCandidateSchema = z.object({
 });
 export type FactConflictCandidate = z.infer<typeof FactConflictCandidateSchema>;
 
-export const FactConflictSchema = z.object({
+export const FactConflictBaseSchema = z.object({
   id: FactConflictIdSchema,
   businessId: BusinessIdSchema,
   kind: FactKindSchema,
@@ -62,4 +68,10 @@ export const FactConflictSchema = z.object({
   resolvedAt: IsoDateTimeSchema.optional(),
   createdAt: IsoDateTimeSchema,
 });
+
+// DATA-MODEL 2.8 check: resolvedAt and resolvedBy are present exactly when resolved.
+export const FactConflictSchema = FactConflictBaseSchema.refine(
+  (c) => (c.state === 'resolved') === (c.resolvedAt !== undefined && c.resolvedBy !== undefined),
+  { path: ['state'], message: 'a resolved conflict needs resolvedAt and resolvedBy; an open one has neither' },
+);
 export type FactConflict = z.infer<typeof FactConflictSchema>;

@@ -82,6 +82,37 @@ describe('state machines', () => {
     expect(isServerOnlyTransition('order', 'REJECTED', 'APPROVED')).toBe(false);
   });
 
+  it('every provider-derived move is server only; owner-caused moves are not', () => {
+    const serverOnly: [MachineName, string, string][] = [
+      ['order', 'CREATING_CHECKOUT', 'RECOVERY_REQUIRED'],
+      ['booking', 'RECHECKING_SLOT', 'SLOT_CONFLICT'],
+      ['booking', 'RECHECKING_SLOT', 'RETRY_REQUIRED'],
+      ['execution', 'RUNNING', 'QUEUED'],
+      ['execution', 'RUNNING', 'FAILED'],
+      ['execution', 'RUNNING', 'NEEDS_REVIEW'],
+      ['execution', 'NEEDS_REVIEW', 'QUEUED'],
+      ['syncJob', 'RUNNING', 'DONE'],
+      ['syncJob', 'RUNNING', 'RETRYING'],
+      ['syncJob', 'RUNNING', 'FAILED'],
+      ['call', 'IN_PROGRESS', 'DROPPED'],
+      ['call', 'IN_PROGRESS', 'FAILED'],
+      ['messageDispatch', 'QUEUED', 'FAILED'],
+      ['messageDispatch', 'QUEUED', 'UNKNOWN'],
+      ['messageDispatch', 'UNKNOWN', 'SENT'],
+      ['messageDispatch', 'SENT', 'FAILED'],
+    ];
+    for (const [m, from, to] of serverOnly) expect(isServerOnlyTransition(m, from as never, to as never), `${m} ${from}->${to}`).toBe(true);
+    const ownerCaused: [MachineName, string, string][] = [
+      ['order', 'PAYMENT_PENDING', 'CANCELLED'],
+      ['booking', 'RETRY_REQUIRED', 'RECHECKING_SLOT'],
+      ['execution', 'NEEDS_REVIEW', 'FAILED'],
+      ['messageDispatch', 'UNKNOWN', 'FAILED'],
+      ['call', 'IN_PROGRESS', 'COMPLETED'],
+      ['approval', 'PENDING', 'APPROVED'],
+    ];
+    for (const [m, from, to] of ownerCaused) expect(isServerOnlyTransition(m, from as never, to as never), `${m} ${from}->${to}`).toBe(false);
+  });
+
   it('booking: no APPROVED state, expired branch is EXPIRED', () => {
     expect(statesOf('booking')).not.toContain('APPROVED');
     expect(canTransition('booking', 'AWAITING_OWNER_APPROVAL', 'EXPIRED')).toBe(true);

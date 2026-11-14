@@ -21,6 +21,11 @@ export const CurrencySchema = z.literal('USD');
 export type Currency = z.infer<typeof CurrencySchema>;
 /** Integer minor units, never negative. */
 export const MinorAmountSchema = z.int().min(0);
+/** Milliseconds from `from` to `to` (both ISO UTC strings already validated by `IsoDateTimeSchema`). */
+export function msBetween(from: string, to: string): number {
+  return Date.parse(to) - Date.parse(from);
+}
+
 /** Any JSON value (jsonb columns). */
 export const JsonValueSchema = z.json();
 export type JsonValue = z.infer<typeof JsonValueSchema>;

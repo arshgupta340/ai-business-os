@@ -16,6 +16,8 @@ import type {
 /**
  * One allowed move. `serverOnly` (CONTRACTS 6): the server makes it only after it verified the provider's
  * answer (signed webhook plus API read, or a direct API response). No client and no model output can cause it.
+ * Rule used: every move whose cause is a provider result or a verified webhook is server only. A move that an
+ * owner can also cause (cancel, retry, abandon, mark failed) is not, and says so.
  */
 export type Transition<S extends string> = { from: S; to: S; event: string; serverOnly?: true };
 
@@ -62,7 +64,7 @@ export const ORDER_MACHINE = machine<OrderStatus>({
     { from: 'APPROVED', to: 'CREATING_CHECKOUT', event: 'executor starts square.checkout.create' },
     { from: 'CREATING_CHECKOUT', to: 'PAYMENT_LINK_READY', event: 'Square returns link and order id', serverOnly: true },
     { from: 'CREATING_CHECKOUT', to: 'UNAVAILABLE', event: 'availability re-check finds an item gone; no Square call' },
-    { from: 'CREATING_CHECKOUT', to: 'RECOVERY_REQUIRED', event: 'step FAILED or NEEDS_REVIEW for any other reason' },
+    { from: 'CREATING_CHECKOUT', to: 'RECOVERY_REQUIRED', event: 'step FAILED or NEEDS_REVIEW for any other reason', serverOnly: true },
     { from: 'RECOVERY_REQUIRED', to: 'PAYMENT_LINK_READY', event: 'reconciliation finds the link', serverOnly: true },
     { from: 'PAYMENT_LINK_READY', to: 'MESSAGE_SENT', event: 'dispatch reaches SENT', serverOnly: true },
     { from: 'MESSAGE_SENT', to: 'PAYMENT_PENDING', event: 'local.order.record runs' },
@@ -103,8 +105,8 @@ export const BOOKING_MACHINE = machine<BookingStatus>({
     { from: 'AWAITING_OWNER_APPROVAL', to: 'REJECTED', event: 'approval REJECTED' },
     { from: 'AWAITING_OWNER_APPROVAL', to: 'EXPIRED', event: 'approval EXPIRED' },
     { from: 'RECHECKING_SLOT', to: 'BOOKED_VERIFIED', event: 'event insert returned an id after a clear free/busy read', serverOnly: true },
-    { from: 'RECHECKING_SLOT', to: 'SLOT_CONFLICT', event: 'fresh free/busy shows the slot busy' },
-    { from: 'RECHECKING_SLOT', to: 'RETRY_REQUIRED', event: 'calendar step FAILED or NEEDS_REVIEW' },
+    { from: 'RECHECKING_SLOT', to: 'SLOT_CONFLICT', event: 'fresh free/busy shows the slot busy', serverOnly: true },
+    { from: 'RECHECKING_SLOT', to: 'RETRY_REQUIRED', event: 'calendar step FAILED or NEEDS_REVIEW', serverOnly: true },
     { from: 'RETRY_REQUIRED', to: 'RECHECKING_SLOT', event: 'owner retries, approval still valid, same key' },
     { from: 'RETRY_REQUIRED', to: 'BOOKED_VERIFIED', event: 'reconciliation finds the event by id', serverOnly: true },
   ],
@@ -130,11 +132,11 @@ export const EXECUTION_MACHINE = machine<ExecutionStatus>({
     { from: 'QUEUED', to: 'SKIPPED', event: 'message step claimed while MESSAGE_CHANNEL is qr_only' },
     { from: 'QUEUED', to: 'RUNNING', event: 'worker claims the row' },
     { from: 'RUNNING', to: 'SUCCEEDED', event: 'provider confirms the result', serverOnly: true },
-    { from: 'RUNNING', to: 'QUEUED', event: 'retryable error, attempts below 3' },
-    { from: 'RUNNING', to: 'FAILED', event: 'non-retryable error, or third attempt failed' },
-    { from: 'RUNNING', to: 'NEEDS_REVIEW', event: 'outcome unknown' },
+    { from: 'RUNNING', to: 'QUEUED', event: 'retryable error, attempts below 3', serverOnly: true },
+    { from: 'RUNNING', to: 'FAILED', event: 'non-retryable error, or third attempt failed', serverOnly: true },
+    { from: 'RUNNING', to: 'NEEDS_REVIEW', event: 'outcome unknown', serverOnly: true },
     { from: 'NEEDS_REVIEW', to: 'SUCCEEDED', event: 'reconciliation finds the external object', serverOnly: true },
-    { from: 'NEEDS_REVIEW', to: 'QUEUED', event: 'reconciliation proves nothing happened (same key)' },
+    { from: 'NEEDS_REVIEW', to: 'QUEUED', event: 'reconciliation proves nothing happened (same key)', serverOnly: true },
     { from: 'NEEDS_REVIEW', to: 'FAILED', event: 'owner abandons the step' },
   ],
 });
@@ -145,10 +147,10 @@ export const SYNC_JOB_MACHINE = machine<SyncJobState>({
   terminal: ['DONE', 'FAILED'],
   transitions: [
     { from: 'PENDING', to: 'RUNNING', event: 'runner picks it up' },
-    { from: 'RUNNING', to: 'DONE', event: 'row appended or recordId already present' },
-    { from: 'RUNNING', to: 'RETRYING', event: 'error with attempts below 5' },
+    { from: 'RUNNING', to: 'DONE', event: 'row appended or recordId already present', serverOnly: true },
+    { from: 'RUNNING', to: 'RETRYING', event: 'error with attempts below 5', serverOnly: true },
     { from: 'RETRYING', to: 'RUNNING', event: 'nextRetryAt reached' },
-    { from: 'RUNNING', to: 'FAILED', event: 'fifth attempt failed' },
+    { from: 'RUNNING', to: 'FAILED', event: 'fifth attempt failed', serverOnly: true },
   ],
 });
 
@@ -170,9 +172,10 @@ export const CALL_MACHINE = machine<CallStatus>({
   initial: ['IN_PROGRESS'],
   terminal: ['COMPLETED', 'DROPPED', 'FAILED'],
   transitions: [
+    // Not server only: a simulated call is also completed by the owner's `end: true` (P-18).
     { from: 'IN_PROGRESS', to: 'COMPLETED', event: 'call ends normally' },
-    { from: 'IN_PROGRESS', to: 'DROPPED', event: 'stream closed unexpectedly' },
-    { from: 'IN_PROGRESS', to: 'FAILED', event: 'setup, model or relay error' },
+    { from: 'IN_PROGRESS', to: 'DROPPED', event: 'stream closed unexpectedly', serverOnly: true },
+    { from: 'IN_PROGRESS', to: 'FAILED', event: 'setup, model or relay error', serverOnly: true },
   ],
 });
 
@@ -183,12 +186,13 @@ export const MESSAGE_DISPATCH_MACHINE = machine<MessageDispatchStatus>({
   terminal: ['DELIVERED', 'FAILED'],
   transitions: [
     { from: 'QUEUED', to: 'SENT', event: 'provider accepts and returns a message id', serverOnly: true },
-    { from: 'QUEUED', to: 'FAILED', event: 'provider rejects' },
-    { from: 'QUEUED', to: 'UNKNOWN', event: 'timeout, result unknown' },
+    { from: 'QUEUED', to: 'FAILED', event: 'provider rejects', serverOnly: true },
+    { from: 'QUEUED', to: 'UNKNOWN', event: 'timeout, result unknown', serverOnly: true },
     { from: 'UNKNOWN', to: 'SENT', event: 'provider lookup shows accepted', serverOnly: true },
+    // Not server only: the owner may also mark an UNKNOWN dispatch failed.
     { from: 'UNKNOWN', to: 'FAILED', event: 'lookup shows nothing sent, or owner marks failed' },
     { from: 'SENT', to: 'DELIVERED', event: 'verified delivery callback: delivered', serverOnly: true },
-    { from: 'SENT', to: 'FAILED', event: 'verified delivery callback: failed' },
+    { from: 'SENT', to: 'FAILED', event: 'verified delivery callback: failed', serverOnly: true },
   ],
 });
 

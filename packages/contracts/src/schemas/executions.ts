@@ -3,8 +3,9 @@ import { CapabilityIdSchema, ExecutionActionTypeSchema, ExecutionStatusSchema, M
 import { ErrorCodeSchema } from '../errors';
 import { ApprovalIdSchema, BusinessIdSchema, ExecutionIdSchema, MessageDispatchIdSchema } from '../ids';
 import { E164Schema, IdempotencyKeySchema, IsoDateTimeSchema } from '../primitives';
+import { ACTION_TYPE_CAPABILITY } from '../bundles';
 
-export const ActionExecutionSchema = z.object({
+export const ActionExecutionBaseSchema = z.object({
   id: ExecutionIdSchema,
   businessId: BusinessIdSchema,
   approvalId: ApprovalIdSchema,
@@ -20,9 +21,15 @@ export const ActionExecutionSchema = z.object({
   createdAt: IsoDateTimeSchema,
   updatedAt: IsoDateTimeSchema,
 });
+
+// SPEC 2.3 mapping: capabilityId is the action type's capability, absent for local.* steps.
+export const ActionExecutionSchema = ActionExecutionBaseSchema.refine(
+  (e) => (e.capabilityId ?? null) === ACTION_TYPE_CAPABILITY[e.actionType],
+  { path: ['capabilityId'], message: 'capabilityId must match the action type (SPEC 2.3), absent for local steps' },
+);
 export type ActionExecution = z.infer<typeof ActionExecutionSchema>;
 
-export const MessageDispatchSchema = z.object({
+export const MessageDispatchBaseSchema = z.object({
   id: MessageDispatchIdSchema,
   businessId: BusinessIdSchema,
   executionId: ExecutionIdSchema,
@@ -39,4 +46,10 @@ export const MessageDispatchSchema = z.object({
   createdAt: IsoDateTimeSchema,
   updatedAt: IsoDateTimeSchema,
 });
+
+// DATA-MODEL 2.18 check: nothing is SENT or DELIVERED without the provider's message id (AGENTS rule 5).
+export const MessageDispatchSchema = MessageDispatchBaseSchema.refine(
+  (m) => !(m.status === 'SENT' || m.status === 'DELIVERED') || m.providerMessageId !== undefined,
+  { path: ['providerMessageId'], message: 'SENT and DELIVERED need providerMessageId' },
+);
 export type MessageDispatch = z.infer<typeof MessageDispatchSchema>;
