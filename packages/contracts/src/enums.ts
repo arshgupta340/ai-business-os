@@ -24,6 +24,8 @@ export const CapabilityIdSchema = z.enum([
   'message.booking.confirm',
   'sheets.rows.append',
   'catalog.price.update',
+  // D-13 demo mode only: the server, not the model, decides whether the menu is sent.
+  'menu.message.propose',
 ]);
 export type CapabilityId = z.infer<typeof CapabilityIdSchema>;
 
@@ -251,5 +253,7 @@ export const ToolNameSchema = z.enum([
   'get_order_status',
   'read_calendar_availability',
   'propose_booking',
+  // D-13 demo mode only. Offered to a call only while DEMO_PAY_FIRST is on and the caller is a listed number.
+  'propose_menu_message',
 ]);
 export type ToolName = z.infer<typeof ToolNameSchema>;

@@ -243,6 +243,7 @@ describe('CONTRACTS.md examples', () => {
       get_order_status: { description: 'Read the verified status of an order placed on this call.', required: ['orderId'] },
       read_calendar_availability: { description: 'List free appointment slots for one service on one date.', required: ['serviceId', 'date'] },
       propose_booking: { description: 'Send the confirmed appointment to the owner for approval. Call only after the caller confirmed service, time and contact.', required: ['serviceId', 'startUtc', 'customer'] },
+      propose_menu_message: { description: 'Send the menu to the caller by message. Call only when the caller asks for the menu to be sent.', required: [] },
     };
     expect(TOOL_DEFINITIONS.map((d) => d.name).sort()).toEqual(Object.keys(doc).sort());
     for (const def of TOOL_DEFINITIONS) {

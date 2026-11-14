@@ -190,6 +190,7 @@ export function nextStage(template: AgentTemplate, current: CallStage, tool: Too
     case 'propose_order':
       return isProposal(r) ? 'CUSTOMER_CONFIRMED' : current;
     case 'get_order_status':
+    case 'propose_menu_message':
       return current;
     case 'read_calendar_availability':
       return ok ? 'SLOT_SEARCH' : current;

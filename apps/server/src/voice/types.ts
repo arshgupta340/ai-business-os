@@ -217,6 +217,12 @@ export type VoicePluginOptions = {
   now?: (() => number) | undefined;
   tokenTtlMs?: number | undefined;
   limits?: Partial<RelayLimits> | undefined;
+  /**
+   * D-13 DEMO MODE only (absent when it is off). `listedCaller` returns the caller's E.164 number from the
+   * signed webhook's `From` only when the owner listed it in DEMO_TEXT_NUMBERS; `pin` hands it to demo mode
+   * for that call. The number is never logged and never reaches the model.
+   */
+  demo?: { listedCaller(from: string | undefined): string | undefined; pin(callId: string, number: string): void } | undefined;
   /** Tests only: receives the plugin's stream credential store, so a test can inspect what stays pinned. */
   inspectTokens?: ((store: import('./logic').StreamTokenStore<PinnedCall>) => void) | undefined;
 };

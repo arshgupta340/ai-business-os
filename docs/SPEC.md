@@ -35,6 +35,7 @@ This is the master spec. It amends the PRD (`docs/PRD.md`). Where this file and 
 | D-10 | The server connects to Postgres as a restricted login, `abos_app`, not as the table owner. It can read and write the application tables but cannot disable guards, truncate, or delete approvals, executions, audit events or published versions. Migrations and the operator reset use the owner connection, `DATABASE_ADMIN_URL`. The server uses `DATABASE_URL`. |
 | D-11 | The Twilio account is upgraded (pay as you go), so callers hear no trial announcement. Done by Arsh on 2026-11-13. The number is a local 10DLC number; Twilio SMS from it fails with error 30034, as expected, so D-08 stands. |
 | D-12 | AgentPhone is added alongside Twilio behind one telephony interface (`apps/server/src/telephony/`), chosen by `TELEPHONY_PROVIDER` (`twilio` or `agentphone`). Twilio remains the default and is unchanged. Both are to be tested and compared (`docs/TELEPHONY-COMPARISON.md`). AgentPhone runs in its `webhook` voice mode, so our agent, tools and approvals answer every turn; it can also send texts as `MESSAGE_CHANNEL=agentphone`. Decided by Arsh on 2026-11-14: "Keep Twilio as it is and add AgentPhone alongside it, so I can test both and see which works better." |
+| D-13 | Demo mode, for the hackathon demo only, behind one setting: `DEMO_PAY_FIRST`. It is off by default and must be off for real use. Decided by Arsh on 2026-11-14: "We can just scaffold some real quick stuff just to show that you process the payment, and then it goes for approval. It doesn't have to have a refund way and everything set up right now, so just scaffold for the demo." The flow he wants to show: "I can ask the menu to be sent to me, and I can see that being sent to me as a message. ... a payment link where we press the link and add some details. Then it can show 'Payment processed,' and the thing goes to the system for review approval from the owner after that. Once the owner approves, we send the message that your order has been placed and it will be ready by this time, and then a tracking link ... Domino style: right now it's under bake, and then it will be ready." Demo mode sets never-cut rule 1 (no customer message before approval) and rule 5 (no success state before the provider confirms) aside, only for the test numbers listed in `DEMO_TEXT_NUMBERS` and only while `DEMO_PAY_FIRST` is on. A call from any other number behaves exactly as without demo mode. Messages go over the Twilio WhatsApp sandbox. Every page and message it shows is labelled demo. The approval engine, the state machines, approval hashing and the executor are unchanged and remain the only thing that moves an order's real status; the real paid state still comes from Square's signed webhook and the reconcile poll. The code is in `apps/server/src/demo` and the tables are migration 0009. How to run it: `DEMO_RUNBOOK.md`, "Demo mode". |
 
 Everything the PRD lists under "Confirmed by the founding team" still holds unless a row here changes it.
 
@@ -179,6 +180,7 @@ The names the voice or text model sees. Each maps to one capability.
 | `get_order_status` | `order.status.read` |
 | `read_calendar_availability` | `calendar.availability.read` |
 | `propose_booking` | `booking.propose` |
+| `propose_menu_message` | `menu.message.propose` (D-13 demo mode only: offered to a call only while `DEMO_PAY_FIRST` is on and the caller is a listed number) |
 
 There is no tool for any `write` or `external_message` capability. Every tool returns `{ ok: true, ... }` or `{ ok: false, reason }`. Tools sit behind one `ToolHandler` interface with two implementations: the real toolset and the mock toolset.
 
@@ -376,6 +378,7 @@ Names only. Values live in `.env.local` and in the host's secret store. They are
 | `PUBLIC_SERVER_URL`, `PORT` | server |
 | `WEB_ORIGIN` (the web app address allowed by CORS), `NODE_ENV` (`production` on any deployed server) | server |
 | `BUILDER_DEV_AUTH` (local development only: `1` treats any bearer token as the seeded owner; refused when `NODE_ENV` is `production`) | server |
+| `DEMO_PAY_FIRST` (`1` turns D-13 demo mode on; off by default and for real use), `DEMO_TEXT_NUMBERS` (comma-separated E.164 numbers, the only ones demo mode messages), `DEMO_LINK_SECRET` (at least 32 characters, signs the demo links), `DEMO_READY_AFTER_SECONDS` (default 180), `DEMO_PICKUP_FAR_SECONDS` (default 600); demo mode also needs `PUBLIC_SERVER_URL`, `TWILIO_ACCOUNT_SID` and `TWILIO_AUTH_TOKEN`, and uses `TWILIO_WHATSAPP_FROM` when set | server |
 
 The server refuses to start if `SQUARE_ENVIRONMENT` is not `sandbox` (AC-19).
 

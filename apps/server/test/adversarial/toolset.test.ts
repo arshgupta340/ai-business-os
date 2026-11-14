@@ -32,7 +32,7 @@ async function factsDigest() {
 it('runs as abos_app; the registry has write capabilities, and none of them is a tool', async () => {
   expect(await currentRole(w.t.db)).toBe('abos_app');
   expect(WRITE_CAPABILITIES.length).toBeGreaterThanOrEqual(5);
-  expect(TOOL_NAMES).toHaveLength(7);
+  expect(TOOL_NAMES).toHaveLength(8);
   for (const tool of TOOL_NAMES) expect(['read', 'propose'], tool).toContain(effectOf(tool));
   for (const name of NOT_TOOLS) expect(TOOL_NAMES, name).not.toContain(name);
   // The published specs do list write capabilities (the executor's bundle), so the filter below is not vacuous.

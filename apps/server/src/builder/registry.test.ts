@@ -19,8 +19,8 @@ import {
 } from './registry';
 
 describe('capability registry', () => {
-  it('has the thirteen capabilities of CONTRACTS.md section 2', () => {
-    expect(CAPABILITY_REGISTRY.map((c) => c.id)).toHaveLength(13);
+  it('has the fourteen capabilities of CONTRACTS.md section 2 (thirteen, plus the D-13 demo menu capability)', () => {
+    expect(CAPABILITY_REGISTRY.map((c) => c.id)).toHaveLength(14);
     expect(getCapability('order.checkout.prepare')).toMatchObject({ effect: 'write', approvalMode: 'required' });
     expect(getCapability('order.propose')).toMatchObject({ effect: 'propose', approvalMode: 'creates_approval' });
   });

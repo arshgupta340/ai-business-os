@@ -63,6 +63,9 @@ type Capability = {
 | `message.booking.confirm` | external_message | required | `message:send` | `message.sendBookingConfirm` | 10000 | MUST |
 | `sheets.rows.append` | write | required | `sheets:append` | `sheets.appendRow` | 8000 | MUST |
 | `catalog.price.update` | write | required | `square:catalog.write` | `square.updateVariationPrice` | 8000 | SHOULD |
+| `menu.message.propose` | propose | creates_approval | `demo:menu.message` | `demo.sendMenu` | 8000 | SHOULD |
+
+`menu.message.propose` is for D-13 demo mode only (SPEC section 1.1). It opens no approval: its approval mode is `creates_approval` only because the `capabilities` table pairs every propose with it. It is in no template. The server adds it to a call only while `DEMO_PAY_FIRST` is on and the caller is a listed demo number.
 
 Input and output shapes. Server context (`businessId`, `callId`, `agentVersionId`, `correlationId`) is never part of a model-supplied input. The `write` and `external_message` rows are called by the executor only.
 
@@ -508,7 +511,8 @@ The tools the voice model (`session.tools` in OpenAI Realtime) and the text runn
 
 ```ts
 type ToolName = "read_catalog" | "read_business_facts" | "quote_order" | "propose_order"
-  | "get_order_status" | "read_calendar_availability" | "propose_booking";
+  | "get_order_status" | "read_calendar_availability" | "propose_booking"
+  | "propose_menu_message"; // D-13 demo mode only
 type ToolFailureReason = Extract<ErrorCode, "QUOTE_EXPIRED" | "ITEM_UNAVAILABLE" | "SLOT_CONFLICT"
   | "VALIDATION_FAILED" | "NOT_FOUND" | "CAPABILITY_NOT_ALLOWED" | "INTEGRATION_UNAVAILABLE">;
 type ToolResult<T> = ({ ok: true } & T) | { ok: false; reason: ToolFailureReason; message?: string;
@@ -544,7 +548,10 @@ The real toolset (`apps/server/src/tools/real`) calls the capability handlers of
     "parameters": {"type":"object","properties":{"serviceId":{"type":"string","pattern":"^svc_[A-Za-z0-9_]+$"},"date":{"type":"string","format":"date"},"maxSlots":{"type":"integer","minimum":1,"maximum":5}},"required":["serviceId","date"],"additionalProperties":false} },
   { "type": "function", "name": "propose_booking",
     "description": "Send the confirmed appointment to the owner for approval. Call only after the caller confirmed service, time and contact.",
-    "parameters": {"type":"object","properties":{"serviceId":{"type":"string","pattern":"^svc_[A-Za-z0-9_]+$"},"startUtc":{"type":"string","format":"date-time"},"customer":{"type":"object","properties":{"name":{"type":"string","minLength":1},"messageRecipient":{"type":"string","pattern":"^\\+[1-9][0-9]{6,14}$"},"messageConsent":{"type":"boolean"}},"required":["name","messageConsent"]}},"required":["serviceId","startUtc","customer"],"additionalProperties":false} }
+    "parameters": {"type":"object","properties":{"serviceId":{"type":"string","pattern":"^svc_[A-Za-z0-9_]+$"},"startUtc":{"type":"string","format":"date-time"},"customer":{"type":"object","properties":{"name":{"type":"string","minLength":1},"messageRecipient":{"type":"string","pattern":"^\\+[1-9][0-9]{6,14}$"},"messageConsent":{"type":"boolean"}},"required":["name","messageConsent"]}},"required":["serviceId","startUtc","customer"],"additionalProperties":false} },
+  { "type": "function", "name": "propose_menu_message",
+    "description": "Send the menu to the caller by message. Call only when the caller asks for the menu to be sent.",
+    "parameters": {"type":"object","properties":{},"additionalProperties":false} }
 ]
 ```
 
@@ -559,6 +566,7 @@ This is `TOOL_DEFINITIONS` from `packages/contracts/src/tools.ts`, exactly as ge
 | `get_order_status` | `{ orderId, status, paid, checkoutLinkSent }` |
 | `read_calendar_availability` | `{ slots: AvailabilitySlot[], timezone }` |
 | `propose_booking` | `{ proposalId, approvalId, missingFields, slot }`. `proposalId` is the `bkg_` id; same absent rule; a taken slot gets `reason: "SLOT_CONFLICT"` with up to 3 `alternatives` |
+| `propose_menu_message` | `{ sent, message? }`. D-13 demo mode only. `sent` is true only when the server sent the menu to the listed caller on this call; otherwise `message` says to read the menu out |
 
 ## 9. Fixtures
 

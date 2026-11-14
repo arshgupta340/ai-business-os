@@ -22,6 +22,7 @@ import {
 import { FULL_ATTESTATION, callerNumberFrom, textOfferAllowed } from './consent';
 import { adaptWs, checkSessionCapabilities, runPhoneRelay, withDeadline } from './relay';
 import type { CatalogItem } from '@abos/contracts';
+import { demoCallSpec } from '../demo/index';
 import type { FactsSnapshot, PinnedCall, TwilioRequestValidator, VoicePluginOptions } from './types';
 
 export type * from './types';
@@ -140,7 +141,11 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
       }
       return ok(buildSayTwiml(NOT_TAKING_CALLS_MESSAGE));
     }
-    const capCheck = checkSessionCapabilities(resolution.spec);
+    // D-13 DEMO MODE: a listed demo caller's restaurant call is pinned with the demo menu tool. Off, or for
+    // any other caller, the spec is exactly the published one (demo/index.ts demoCallSpec).
+    const demoNumber = opts.demo?.listedCaller(from);
+    const spec = demoCallSpec(resolution.spec, demoNumber !== undefined);
+    const capCheck = checkSessionCapabilities(spec);
     if (!capCheck.ok) {
       logger.error({ agentVersionId: resolution.agentVersionId, notAllowed: capCheck.notAllowed }, 'voice: live agent has a capability that is not allowed; refused');
       return ok(buildSayTwiml(CALL_SETUP_FAILED_MESSAGE));
@@ -153,7 +158,7 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
       logger.error({ ...errorInfo(err) }, 'voice: could not read the fact snapshot; refused');
       return ok(buildSayTwiml(CANNOT_TAKE_ORDERS_MESSAGE));
     }
-    if (resolution.spec.template !== 'custom' && !hasReadableHours(facts)) {
+    if (spec.template !== 'custom' && !hasReadableHours(facts)) {
       logger.error({ agentVersionId: resolution.agentVersionId }, 'voice: no readable opening hours; refused');
       return ok(buildSayTwiml(CANNOT_TAKE_ORDERS_MESSAGE));
     }
@@ -182,9 +187,10 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
     // and only when this call could get the offer: the server channel sends, the spec has the message
     // capability, Twilio reports full STIR/SHAKEN attestation, and the call was not forwarded. Under
     // qr_only no full number is held at all. The number is never logged: only callerLast4 is.
-    const callerNumber = textNumberFor(resolution.spec, from, params);
+    const callerNumber = textNumberFor(spec, from, params);
+    if (demoNumber !== undefined) opts.demo?.pin(callId, demoNumber);
     const token = tokens.mint(
-      { callId, providerCallId, businessId: resolution.businessId, businessName: resolution.businessName, agentId: resolution.agentId, agentVersionId: resolution.agentVersionId, spec: resolution.spec, facts, ...(menu !== undefined ? { menu } : {}), ...(callerNumber !== undefined ? { callerNumber } : {}) },
+      { callId, providerCallId, businessId: resolution.businessId, businessName: resolution.businessName, agentId: resolution.agentId, agentVersionId: resolution.agentVersionId, spec, facts, ...(menu !== undefined ? { menu } : {}), ...(callerNumber !== undefined ? { callerNumber } : {}) },
       now(),
     );
     if (token === null) {
