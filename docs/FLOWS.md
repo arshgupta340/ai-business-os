@@ -199,7 +199,9 @@ Green appears only for `PAID_VERIFIED`, `FULFILLMENT_READY` and `BOOKED_VERIFIED
 
 ### 3.6 Simulated call (P-18)
 
-`POST /api/agents/:id/sim-call` runs the same flow in text for a published agent. It creates a `calls` row with `channel: test_console`, so `agentVersionId` comes from the call (SPEC 2.9). It uses the real read and propose tools, the same approval and the same executor. Steps B1 to B4 are replaced by the sim-call request, and B5 onward are the same. The UI labels it "simulated call". Automated end-to-end tests drive Flows B and C through `sim-call`, and it is the demo fallback if the phone path fails.
+`POST /api/agents/:id/sim-call` runs the same flow in text for a published agent. It creates a `calls` row with `channel: test_console`, so `agentVersionId` comes from the call (SPEC 2.9). It uses the real read and propose tools, the same approval and the same executor. Steps B1 to B4 are replaced by the sim-call request, and B5 onward follow the same prompt, tools and policy. The UI labels it "simulated call". Automated end-to-end tests drive Flows B and C through `sim-call`, and it is the demo fallback if the phone path fails.
+
+**What a simulated call proves.** It runs the phone's session capability check and the phone prompt for the pinned version (section 8), the real read and propose tools, the approval engine and the executor. A published version the phone would refuse starts no simulated call. **What it does not prove:** the Twilio webhook, the `streamToken` and the Media Stream (B1 to B4, B30); audio and barge-in (section 9); the Realtime voice model, since a simulated call runs the builder's text model; the server lines of section 3.1 that the phone worker injects when the owner decides or the wait ends; and the per-call fact snapshot of B2, since a simulated call reads the facts on its first fact read. A simulated call also checks the caller's text against a fixed list before the model runs and records `guardrail.refused`; the phone worker reads no transcript and has no such check (section 8).
 
 ## 4. Flow B failure branches
 
