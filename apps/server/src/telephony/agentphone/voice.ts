@@ -6,6 +6,12 @@
 // through the shared sim-call runner (same model, same real read and propose toolset, same guardrails and
 // stage logic), and return plain spoken sentences. The toolset has read and propose tools only (rule 6); the
 // transcript is the caller's message, data only (rule 7). No phone number, key or transcript is logged.
+//
+// One turn of a call at a time. Turns of one call are queued, so a barge-in, a late turn or two first turns
+// never run two model turns over the same history, stage and toolset (the toolset holds the guards against
+// a second proposal). One bound covers waiting and running: when it passes, the caller hears a fixed
+// apology, the turn is abandoned (it starts no further tool call and its unheard reply is not kept), and the
+// next turn waits only for a tool call that is still running.
 import { AgentSpecSchema, toolsForCapabilities, type AgentSpec, type CallEndReason, type CapabilityId } from '@abos/contracts';
 import type { AgentModel } from '../../builder/runner/agent-model';
 import type { QueryDb } from '../../db/index';
@@ -35,7 +41,9 @@ export function decisionSpeech(template: AgentSpec['template'], decision: CallDe
 }
 
 type Session = TurnSession & { spec: AgentSpec; businessId: string; businessName: string; agentVersionId: string; callId: string;
-  decision?: CallDecision | undefined; unsubscribe(): void };
+  decision?: CallDecision | undefined; unsubscribe(): void;
+  /** Set when the call ended or the session was evicted: a turn still running stops acting. */
+  closed: boolean };
 
 export interface AgentPhoneVoiceDeps {
   db: QueryDb;
@@ -61,11 +69,14 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
   // Per-process call state, as for sim-call. After a restart a call continues with a fresh history and a
   // fresh toolset (whose facts are read again at that moment); the call row and its pinned version stay.
   const sessions = new Map<string, Session>();
+  // Per call: settles when every turn accepted so far has gone quiet. The next turn waits on it.
+  const queues = new Map<string, Promise<void>>();
 
   function drop(providerCallId: string) {
     const s = sessions.get(providerCallId);
     if (!s) return;
     sessions.delete(providerCallId);
+    s.closed = true;
     s.unsubscribe();
     s.toolset.dispose();
   }
@@ -103,7 +114,7 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
       spec: spec.data, businessId, businessName: String(row.business_name), agentVersionId, callId,
       toolset: deps.toolsetFor({ businessId, agentVersionId, callId, capabilities: spec.data.capabilities }),
       history: [], stage: (typeof row.stage === 'string' ? row.stage : initialTurnStage(spec.data)) as TurnSession['stage'],
-      unsubscribe: () => undefined,
+      unsubscribe: () => undefined, closed: false,
     };
     // An owner decision cannot be pushed into the call (no documented API in webhook mode); it is spoken
     // at the caller's next turn. Only a decision on this call's own proposal arrives here (decisions.ts).
@@ -119,25 +130,58 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
     toolsOf(providerCallId: string) { const s = sessions.get(providerCallId); return s ? toolsForCapabilities(s.spec.capabilities) : undefined; },
 
     async turn(input: { providerCallId: string; to: string; callerLast4?: string | undefined; text: string }): Promise<TurnOutcome> {
-      const s = await session(input.providerCallId, input.to, input.callerLast4);
-      if ('speak' in s) return { reply: s.speak, businessId: s.businessId, callId: undefined };
-      const text = input.text.trim().slice(0, 2000);
-      const update = s.decision ? `${decisionSpeech(s.spec.template, s.decision)} ` : '';
-      s.decision = undefined;
-      if (!text) return { reply: { text: `${update}${SPEECH.didNotHear}` }, businessId: s.businessId, callId: s.callId };
+      const id = input.providerCallId;
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), deps.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS); });
+      const deadline = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), deps.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS); });
+
+      // Take this call's place in line. `release` lets the next turn of the call go.
+      const before = queues.get(id) ?? Promise.resolve();
+      let release!: () => void;
+      const mine = new Promise<void>((resolve) => { release = resolve; });
+      const tail = before.then(() => mine);
+      queues.set(id, tail);
+      void tail.then(() => { if (queues.get(id) === tail) queues.delete(id); });
+
+      let running = false;
       try {
-        const result = await Promise.race([
-          runAgentTurn(deps, { spec: s.spec, businessName: s.businessName, businessId: s.businessId, agentVersionId: s.agentVersionId, callId: s.callId, message: text, session: s }),
-          timeout,
-        ]);
-        // A late model answer is dropped; the caller is asked to repeat rather than hear a stale reply.
-        if (result === 'timeout') return { reply: { text: `${update}${SPEECH.trouble}` }, businessId: s.businessId, callId: s.callId };
-        return { reply: { text: `${update}${result.reply}`.trim() || SPEECH.didNotHear }, businessId: s.businessId, callId: s.callId };
-      } catch {
-        return { reply: { text: `${update}${SPEECH.trouble}` }, businessId: s.businessId, callId: s.callId };
-      } finally { clearTimeout(timer); }
+        // Earlier work on this call is still going: nothing runs, and a pending owner decision is kept for later.
+        if (await Promise.race([before.then(() => 'go' as const), deadline]) === 'timeout') {
+          return { reply: { text: SPEECH.trouble }, businessId: sessions.get(id)?.businessId, callId: undefined };
+        }
+        const s = await session(id, input.to, input.callerLast4);
+        if ('speak' in s) return { reply: s.speak, businessId: s.businessId, callId: undefined };
+        const text = input.text.trim().slice(0, 2000);
+        const update = s.decision ? `${decisionSpeech(s.spec.template, s.decision)} ` : '';
+        s.decision = undefined;
+        if (!text) return { reply: { text: `${update}${SPEECH.didNotHear}` }, businessId: s.businessId, callId: s.callId };
+
+        // The turn is quiet, and the next one may start, when it has finished, or when it was abandoned and
+        // no tool call of its own is still running (an abandoned turn can start no new one).
+        let abandoned = false;
+        let finished = false;
+        let toolsRunning = 0;
+        const quiet = () => { if (finished || ((abandoned || s.closed) && toolsRunning === 0)) release(); };
+        const run = runAgentTurn(deps, { spec: s.spec, businessName: s.businessName, businessId: s.businessId, agentVersionId: s.agentVersionId, callId: s.callId, message: text, session: s,
+          abandoned: () => abandoned || s.closed,
+          onToolCall: (settled) => { toolsRunning += 1; void settled.then(() => { toolsRunning -= 1; quiet(); }); } });
+        running = true;
+        void run.then(() => undefined, () => undefined).then(() => { finished = true; quiet(); });
+        try {
+          const result = await Promise.race([run, deadline]);
+          if (result === 'timeout') {
+            // The late answer is dropped; the caller is asked to repeat rather than hear a stale reply.
+            abandoned = true;
+            quiet();
+            return { reply: { text: `${update}${SPEECH.trouble}` }, businessId: s.businessId, callId: s.callId };
+          }
+          return { reply: { text: `${update}${result.reply}`.trim() || SPEECH.didNotHear }, businessId: s.businessId, callId: s.callId };
+        } catch {
+          return { reply: { text: `${update}${SPEECH.trouble}` }, businessId: s.businessId, callId: s.callId };
+        }
+      } finally {
+        clearTimeout(timer);
+        if (!running) release();
+      }
     },
 
     /** AgentPhone's agent.call_ended: end the call record once and dispose its state. */
@@ -150,7 +194,7 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
       return { businessId: row?.business_id };
     },
 
-    dispose() { for (const key of [...sessions.keys()]) drop(key); },
+    dispose() { for (const key of [...sessions.keys()]) drop(key); queues.clear(); },
   };
 }
 

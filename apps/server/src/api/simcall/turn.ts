@@ -56,6 +56,15 @@ export interface TurnInput {
   callId: string;
   message: string;
   session: TurnSession;
+  /**
+   * Optional, for a caller that stops waiting for a turn (the phone path's turn bound, or a call that ended).
+   * Once it returns true the turn starts no further tool call, and its reply is not added to the history,
+   * because nobody heard it. A tool call already running finishes and its stage change is kept.
+   * Sim-call does not pass it, so its turns run exactly as before.
+   */
+  abandoned?: () => boolean;
+  /** Optional. Called with each tool call the turn starts; the promise settles when that call is over. */
+  onToolCall?: (settled: Promise<void>) => void;
 }
 
 export type TurnResult = { reply: string; toolTrace: ToolTraceEntry[]; refused?: GuardrailRule };
@@ -84,6 +93,7 @@ export async function runAgentTurn(deps: TurnDeps, input: TurnInput): Promise<Tu
   session.toolset.clearTrace();
   let calls = 0;
   const executeTool = async (rawName: string, rawInput: unknown): Promise<unknown> => {
+    if (input.abandoned?.()) return { ok: false, reason: 'INTEGRATION_UNAVAILABLE', message: 'This turn has ended.' };
     calls += 1;
     if (calls > MAX_TOOL_CALLS_PER_TURN) return { ok: false, reason: 'VALIDATION_FAILED', message: 'Too many tool calls in one turn.' };
     const named = ToolNameSchema.safeParse(rawName);
@@ -98,10 +108,14 @@ export async function runAgentTurn(deps: TurnDeps, input: TurnInput): Promise<Tu
       return { ok: false, reason: 'CAPABILITY_NOT_ALLOWED', message: 'This agent does not have that tool.' };
     }
     const tool: ToolName = named.data;
-    const result = await session.toolset.handler.call(tool, (rawInput ?? {}) as never, ctx);
-    const stage = nextStage(spec.template, session.stage, tool, result);
-    if (stage !== session.stage) { session.stage = stage; await deps.calls.updateStage(callId, stage); }
-    return result;
+    const work = (async () => {
+      const result = await session.toolset.handler.call(tool, (rawInput ?? {}) as never, ctx);
+      const stage = nextStage(spec.template, session.stage, tool, result);
+      if (stage !== session.stage) { session.stage = stage; await deps.calls.updateStage(callId, stage); }
+      return result;
+    })();
+    input.onToolCall?.(work.then(() => undefined, () => undefined));
+    return work;
   };
   let reply: string;
   const sentNote = proposalSentNote(spec.template, session.stage);
@@ -115,6 +129,7 @@ export async function runAgentTurn(deps: TurnDeps, input: TurnInput): Promise<Tu
   }
   // The agent's line is what a caller would hear: no Markdown.
   reply = plainSpeech(reply).slice(0, MAX_REPLY_CHARS);
+  if (input.abandoned?.()) return { reply, toolTrace: [] };
   session.history.push({ role: 'caller', text: input.message }, { role: 'agent', text: reply });
   return { reply, toolTrace: session.toolset.trace() };
 }
