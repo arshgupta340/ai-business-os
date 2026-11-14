@@ -36,7 +36,7 @@ describe('core REST with migrated Postgres', () => {
     ports = createInMemoryEngine(h.approvals);
     app = await buildApp(env, { db: h.db, verifier, ports });
   }, 30_000);
-  afterAll(async () => { await app?.close(); await h?.pg.close(); });
+  afterAll(async () => { await app?.close(); await h?.close(); });
 
   function assertError(res: { statusCode: number; json(): unknown; headers: Record<string, unknown> }, code: ErrorCode) {
     expect(res.statusCode).toBe(ERROR_CODE_INFO[code].httpStatus);
@@ -125,8 +125,10 @@ describe('core REST with migrated Postgres', () => {
         expect(new Set(ids).size, name).toBe(expected);
       }
     } finally {
-      await h.pg.query('delete from public.catalog_items where id = $1', ['cat_a_second']);
-      await h.pg.query('delete from public.businesses where id = $1', ['biz_a_second']);
+      await h.admin(async (q) => {
+        await q.query('delete from public.catalog_items where id = $1', ['cat_a_second']);
+        await q.query('delete from public.businesses where id = $1', ['biz_a_second']);
+      });
     }
   });
 
@@ -206,16 +208,16 @@ describe('core REST with migrated Postgres', () => {
   it('passes the exact payload hash and safely replays simultaneous identical decisions', async () => {
     const spy = vi.spyOn(ports, 'decide');
     const inject = () => app.inject({ method: 'POST', url: '/api/approvals/apv_a1/decision?businessId=biz_a',
-      headers: { ...headers, 'idempotency-key': 'decision-one' }, payload: { decision: 'approve', payloadHash: HASH, reason: 'Confirmed' } });
+      headers: { ...headers, 'idempotency-key': 'decision-one' }, payload: { decision: 'approve', payloadHash: h.hashOf('apv_a1'), reason: 'Confirmed' } });
     const [first, repeated] = await Promise.all([inject(), inject()]);
     expect(first.statusCode).toBe(200);
     expect(repeated.json()).toEqual(first.json());
     ENDPOINTS.decideApproval.response.parse(first.json());
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy).toHaveBeenCalledWith({ approvalId: 'apv_a1', businessId: 'biz_a', ownerUserId: 'usr_a', decision: 'approve', payloadHash: HASH, reason: 'Confirmed' });
-    const noKey = await app.inject({ method: 'POST', url: '/api/approvals/apv_a1/decision?businessId=biz_a', headers, payload: { decision: 'approve', payloadHash: HASH } });
+    expect(spy).toHaveBeenCalledWith({ approvalId: 'apv_a1', businessId: 'biz_a', ownerUserId: 'usr_a', decision: 'approve', payloadHash: h.hashOf('apv_a1'), reason: 'Confirmed' });
+    const noKey = await app.inject({ method: 'POST', url: '/api/approvals/apv_a1/decision?businessId=biz_a', headers, payload: { decision: 'approve', payloadHash: h.hashOf('apv_a1') } });
     expect(noKey.json()).toEqual(first.json());
-    assertError(await app.inject({ method: 'POST', url: '/api/approvals/apv_a1/decision?businessId=biz_a', headers: { ...headers, 'idempotency-key': 'decision-one' }, payload: { decision: 'reject', payloadHash: HASH } }), 'VALIDATION_FAILED');
+    assertError(await app.inject({ method: 'POST', url: '/api/approvals/apv_a1/decision?businessId=biz_a', headers: { ...headers, 'idempotency-key': 'decision-one' }, payload: { decision: 'reject', payloadHash: h.hashOf('apv_a1') } }), 'VALIDATION_FAILED');
     spy.mockRestore();
   });
 
@@ -271,7 +273,7 @@ describe('core REST with migrated Postgres', () => {
     const isolated = await buildApp(env, { db: h.db, verifier, ports: broken });
     const log = vi.spyOn(isolated.log, 'error');
     try {
-      const res = await isolated.inject({ method: 'POST', url: '/api/approvals/apv_a3/decision?businessId=biz_a', headers, payload: { decision: 'reject', payloadHash: HASH } });
+      const res = await isolated.inject({ method: 'POST', url: '/api/approvals/apv_a3/decision?businessId=biz_a', headers, payload: { decision: 'reject', payloadHash: h.hashOf('apv_a3') } });
       assertError(res, 'INTERNAL');
       expect(JSON.stringify(res.json())).not.toContain('BROKEN');
       expect(log).toHaveBeenCalled();

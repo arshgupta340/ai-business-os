@@ -1,5 +1,6 @@
+import { rootCertificates } from 'node:tls';
 import { describe, expect, it, vi } from 'vitest';
-import { createDb, createPool, type DbPool } from '../../src/db/index';
+import { createDb, createPool, supabaseRootCa, type DbPool } from '../../src/db/index';
 import { parseEnv } from '../../src/env';
 
 function poolFixture(fail?: string) {
@@ -60,7 +61,12 @@ describe('database session wrapper', () => {
     expect(() => createPool(parseEnv({}))).toThrow('not configured');
     const pool = createPool(parseEnv({ DATABASE_URL: 'postgresql://test:dummy@localhost/db?sslmode=disable' }));
     try {
-      expect(pool.options.ssl).toEqual({ rejectUnauthorized: true });
+      const ssl = pool.options.ssl as { rejectUnauthorized: boolean; ca: string[] };
+      expect(ssl.rejectUnauthorized).toBe(true);
+      // Default public roots plus the pinned Supabase root, never a replacement of the default store.
+      expect(ssl.ca.length).toBe(rootCertificates.length + 1);
+      expect(ssl.ca.at(-1)).toBe(supabaseRootCa());
+      expect(ssl.ca.at(-1)).toContain('BEGIN CERTIFICATE');
       expect(pool.options.connectionString).not.toContain('sslmode');
     } finally { await pool.end(); }
   });

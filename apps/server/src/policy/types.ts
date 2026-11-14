@@ -7,8 +7,11 @@ export interface PolicyDb extends QueryInterface {
   transaction<T>(fn: (tx: QueryInterface) => Promise<T>): Promise<T>;
 }
 export interface PolicyDeps {
+  /** Application clock, used only for the quote expiry check. Approval times come from the database clock. */
   now(): Date;
   newId(prefix: string): string;
+  /** Defaults to process.env.SQUARE_ENVIRONMENT. Anything but "sandbox" refuses payment approvals (AC-19). */
+  squareEnvironment?: string | undefined;
 }
 export type OrderProposalInput = Pick<Order, 'businessId' | 'callId' | 'cart' | 'quote' | 'contact' | 'fulfillment'> & {
   agentVersionId: string;

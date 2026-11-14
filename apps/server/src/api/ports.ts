@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ApprovalRequest, ActionExecution, BusinessFact, FactEditApprovalRequest, FactKind, JsonValue } from '@abos/contracts';
+import type { ApprovalRequest, ActionExecution, FactEditApprovalRequest, FactKind, JsonValue } from '@abos/contracts';
 import { AppError } from '../errors';
 
 export interface DecideInput {
@@ -21,7 +21,7 @@ export interface ProposeFactEditInput {
 }
 export interface EnginePorts {
   decide(input: DecideInput): Promise<{ approval: ApprovalRequest; executions: ActionExecution[] }>;
-  proposeFactEdit(input: ProposeFactEditInput): Promise<{ approval: FactEditApprovalRequest; draftFact: BusinessFact }>;
+  proposeFactEdit(input: ProposeFactEditInput): Promise<{ approval: FactEditApprovalRequest }>;
 }
 export interface CatalogPort {
   sync(input: { businessId: string; ownerUserId: string }): Promise<{ jobId: string }>;
@@ -54,19 +54,16 @@ export function createInMemoryEngine(initial: ApprovalRequest[] = []): EnginePor
     async proposeFactEdit(input) {
       const now = new Date().toISOString();
       const expiresAt = new Date(Date.parse(now) + 600_000).toISOString();
-      const draftFact: BusinessFact = {
-        id: `fact_${randomUUID().replaceAll('-', '')}`, businessId: input.businessId, kind: input.kind, key: input.key, value: input.value,
-        sourceType: 'owner_ui', status: 'draft', confidence: 1, version: 1, createdAt: now, updatedAt: now,
-      };
+      const subjectId = `fact_${randomUUID().replaceAll('-', '')}`;
       const approval: FactEditApprovalRequest = {
         id: `apv_${randomUUID().replaceAll('-', '')}`, businessId: input.businessId, actorType: 'owner', bundleType: 'fact_edit',
-        actionBundle: ['local.fact.update'], subjectId: draftFact.id,
-        payload: { businessId: input.businessId, subjectId: draftFact.id, kind: input.kind, key: input.key,
-          fromVersion: 0, before: null, after: input.value, actionBundle: ['local.fact.update'], expiresAt },
+        actionBundle: ['local.fact.update'], subjectId,
+        payload: { businessId: input.businessId, subjectId, kind: input.kind, key: input.key,
+          fromVersion: 1, before: null, after: input.value, actionBundle: ['local.fact.update'], expiresAt },
         payloadHash: `sha256:${'a'.repeat(64)}`, state: 'PENDING', expiresAt, createdAt: now,
       };
       approvals.set(approval.id, approval);
-      return { approval, draftFact };
+      return { approval };
     },
   };
 }
