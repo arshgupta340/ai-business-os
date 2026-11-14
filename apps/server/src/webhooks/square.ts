@@ -6,38 +6,55 @@ export function makeActivity(deps: Pick<WebhookDependencies, 'clock'>, businessI
   return ActivityEventSchema.parse({ ...event, id: `${ID_PREFIXES.event}${randomUUID().replaceAll('-', '')}`, businessId, correlationId, actorType: 'provider', occurredAt: deps.clock.now().toISOString() });
 }
 
+/** Never throws: a forged request always gets 401, even when the rejection event cannot be attributed or written. */
 export async function rejectWebhook(deps: WebhookDependencies, provider: WebhookProvider, url: string, correlationId: string): Promise<void> {
-  const owner = await deps.integrations.findOwner(provider, url);
-  if (!owner) throw new Error('Webhook integration owner is not configured');
-  await deps.activity.write(makeActivity(deps, owner.businessId, correlationId, { type: 'webhook.rejected', payload: { provider, reason: 'signature_invalid' } }));
+  try {
+    const owner = await deps.integrations.findOwner(provider, url);
+    if (!owner) return;
+    await deps.activity.write(makeActivity(deps, owner.businessId, correlationId, { type: 'webhook.rejected', payload: { provider, reason: 'signature_invalid' } }));
+  } catch { /* The 401 is the guard; the audit event is best effort. */ }
 }
 
+export type PaymentOutcome = 'paid' | 'failed' | 'refused' | 'ignored';
+const FINAL_FAILURES = new Set(['FAILED', 'CANCELED']);
+
 /** Shared by verified webhook jobs and the missed-webhook poller. */
-export async function processPayment(deps: WebhookDependencies, candidate: PaymentOrder, paymentId: string): Promise<void> {
+export async function processPayment(deps: WebhookDependencies, candidate: PaymentOrder, paymentId: string): Promise<PaymentOutcome> {
+  if (!candidate.squareOrderId || !canTransition('order', candidate.status, 'PAID_VERIFIED')) return 'ignored';
+  const expected = { squareOrderId: candidate.squareOrderId, amountMinor: candidate.totalMinor, currency: candidate.currency, locationId: candidate.locationId };
+  // Read Square before taking the row lock, so no provider call runs inside the database transaction.
+  // Square's answer is the only authority for status and amount; the webhook body is never consulted.
+  const result = await deps.square.verifyPayment({ paymentId, expected });
+  if (!result.verified && result.field !== 'status') {
+    await deps.activity.write(makeActivity(deps, candidate.businessId, candidate.callId, { type: 'guardrail.refused', payload: { callId: candidate.callId, rule: 'no_approval_bypass', reasonCode: `payment_${result.field}_mismatch` } }));
+    return 'refused';
+  }
+  if (!result.verified && !FINAL_FAILURES.has(result.status)) return 'ignored';
+  let outcome: PaymentOutcome = 'ignored';
   await deps.orders.withLockedOrder(candidate.id, async (tx) => {
     const order = tx.order;
-    if (!order || !canTransition('order', order.status, 'PAID_VERIFIED') || !order.squareOrderId) return;
-    const result = await deps.square.verifyPayment({ paymentId, expected: { squareOrderId: order.squareOrderId, amountMinor: order.totalMinor, currency: order.currency, locationId: order.locationId } });
-    const write = (event: Pick<ActivityEvent, 'type' | 'payload'>) => tx.activity.write(makeActivity(deps, order.businessId, order.callId, event));
-    const move = async (from: PaymentOrder['status'], to: PaymentOrder['status']) => {
-      assertTransition('order', from, to);
-      await tx.move(to);
-      await write({ type: 'order.status_changed', payload: { orderId: order.id, callId: order.callId, from, to } });
-    };
+    // The locked row must still be the one we verified against.
+    if (!order || order.businessId !== candidate.businessId || order.squareOrderId !== expected.squareOrderId || order.totalMinor !== expected.amountMinor || order.currency !== expected.currency || order.locationId !== expected.locationId) return;
+    const event = (e: Pick<ActivityEvent, 'type' | 'payload'>) => makeActivity(deps, order.businessId, order.callId, e);
+    const changed = (from: PaymentOrder['status'], to: PaymentOrder['status']) => { assertTransition('order', from, to); return event({ type: 'order.status_changed', payload: { orderId: order.id, callId: order.callId, from, to } }); };
     if (result.verified) {
-      await tx.savePaymentId(paymentId);
-      await move(order.status, 'PAID_VERIFIED');
-      await write({ type: 'payment.verified', payload: { orderId: order.id, squarePaymentId: paymentId, amountMinor: order.totalMinor, currency: order.currency, sandbox: true } });
-      await tx.sync.queueOrder({ ...order, status: 'PAID_VERIFIED', squarePaymentId: paymentId });
-      await move('PAID_VERIFIED', 'FULFILLMENT_READY');
-    } else if (result.field === 'status') {
-      if ((result.status !== 'FAILED' && result.status !== 'CANCELED') || order.status !== 'PAYMENT_PENDING') return;
-      await move('PAYMENT_PENDING', 'PAYMENT_FAILED');
-      await write({ type: 'payment.failed', payload: { orderId: order.id, squarePaymentId: paymentId, reason: result.status, sandbox: true } });
+      if (!canTransition('order', order.status, 'PAID_VERIFIED')) return;
+      await tx.markPaid({ paymentId, events: [
+        changed(order.status, 'PAID_VERIFIED'),
+        event({ type: 'payment.verified', payload: { orderId: order.id, squarePaymentId: paymentId, amountMinor: order.totalMinor, currency: order.currency, sandbox: true } }),
+        changed('PAID_VERIFIED', 'FULFILLMENT_READY'),
+      ] });
+      outcome = 'paid';
     } else {
-      await write({ type: 'guardrail.refused', payload: { callId: order.callId, rule: 'no_approval_bypass', reasonCode: `payment_${result.field}_mismatch` } });
+      if (order.status !== 'PAYMENT_PENDING') return;
+      await tx.markFailed({ paymentId, events: [
+        changed('PAYMENT_PENDING', 'PAYMENT_FAILED'),
+        event({ type: 'payment.failed', payload: { orderId: order.id, squarePaymentId: paymentId, reason: result.status, sandbox: true } }),
+      ] });
+      outcome = 'failed';
     }
   });
+  return outcome;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -62,6 +79,6 @@ export function parseSquareEvent(rawBody: Buffer): { providerEventId: string; ev
 export async function processSquareEvent(deps: WebhookDependencies, eventType: string, payload: Record<string, string>, businessId: string): Promise<void> {
   if (eventType !== 'payment.created' && eventType !== 'payment.updated') return;
   if (!payload.squareOrderId || !payload.paymentId) return;
-  const order = await deps.orders.findBySquareOrderId(payload.squareOrderId);
+  const order = await deps.orders.findBySquareOrderId(businessId, payload.squareOrderId);
   if (order && order.businessId === businessId) await processPayment(deps, order, payload.paymentId);
 }

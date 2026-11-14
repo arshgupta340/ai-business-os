@@ -8,10 +8,13 @@ export async function pollPendingPayments(deps: WebhookDependencies): Promise<vo
   const errors: unknown[] = [];
   for (const order of await deps.orders.listWaitingForPayment()) {
     const age = now - Date.parse(order.linkReadyAt);
-    if (order.status !== 'PAYMENT_PENDING' || !order.squareOrderId || !Number.isFinite(age) || age < 0 || age >= PAYMENT_POLL_DURATION_MS) continue;
+    // PAYMENT_FAILED stays eligible: a declined customer can retry on the same link (PAYMENT_FAILED -> PAID_VERIFIED).
+    if ((order.status !== 'PAYMENT_PENDING' && order.status !== 'PAYMENT_FAILED') || !order.squareOrderId || !Number.isFinite(age) || age < 0 || age >= PAYMENT_POLL_DURATION_MS) continue;
     try {
-      const paymentId = await deps.square.findPaymentForOrder(order.squareOrderId);
-      if (paymentId) await processPayment(deps, order, paymentId);
+      // Check every payment Square holds for the order; one completed match is enough.
+      for (const paymentId of await deps.square.findPaymentsForOrder(order.squareOrderId)) {
+        if (await processPayment(deps, order, paymentId) === 'paid') break;
+      }
     } catch (error: unknown) { errors.push(error); }
   }
   // One unavailable order must not prevent reconciliation of the others.

@@ -7,28 +7,35 @@ export type PaymentVerification =
   | { verified: false; field: 'amount' | 'currency' | 'location' | 'order' }
   | { verified: false; field: 'status'; status: string };
 export interface SquarePort {
+  // Constant-time HMAC-SHA256 over notificationUrl followed by the exact raw bytes. Never throws on a bad header.
   verifyWebhookSignature(input: { rawBody: Buffer; signatureHeader: string | undefined; notificationUrl: string; signatureKey: string }): boolean | Promise<boolean>;
+  // A fresh GetPayment read from Square, with a timeout; throw on timeout or transport failure (the caller retries).
+  // verified:true only when status is COMPLETED and order_id, location_id, amount_money.amount and
+  // amount_money.currency all equal `expected`, and nothing has been refunded. Report a mismatch field
+  // in preference to a status. Never read amount or status from a webhook body.
   verifyPayment(input: { paymentId: string; expected: { amountMinor: Order['totalMinor']; currency: Order['currency']; locationId: string; squareOrderId: string } }): Promise<PaymentVerification>;
-  findPaymentForOrder(squareOrderId: string): Promise<string | undefined>;
+  // Every payment ID Square holds for this Square order (a declined attempt can precede the paid one).
+  findPaymentsForOrder(squareOrderId: string): Promise<string[]>;
 }
 export interface ActivityPort { write(event: ActivityEvent): Promise<void> }
-export interface SyncPort {
-  // Create a unique local sync job only. The original order approval authorizes the Sheets step.
-  queueOrder(order: Order): Promise<void>;
-}
 export interface PaymentTransaction {
+  // The order re-read under the row lock.
   order: PaymentOrder | undefined;
-  savePaymentId(paymentId: string): Promise<void>;
-  move(to: Order['status']): Promise<void>;
-  activity: ActivityPort;
-  sync: SyncPort;
+  // ONE checked database routine, all or nothing, in this transaction: refuse unless the row is
+  // PAYMENT_PENDING or PAYMENT_FAILED; save square_payment_id; move to PAID_VERIFIED; insert the unique
+  // google_sheets/order sync_jobs row (on conflict do nothing) and its sync.queued event; move to
+  // FULFILLMENT_READY; append `events` (status changes and payment.verified, built by the caller).
+  markPaid(input: { paymentId: string; events: ActivityEvent[] }): Promise<void>;
+  // ONE checked routine: refuse unless PAYMENT_PENDING; move to PAYMENT_FAILED; append `events`.
+  markFailed(input: { paymentId: string; events: ActivityEvent[] }): Promise<void>;
 }
 export interface OrdersPort {
-  // Also resolve references saved on the checkout execution before local.order.record.
-  findBySquareOrderId(squareOrderId: string): Promise<PaymentOrder | undefined>;
+  // Scoped to the business. Also resolve references saved on the checkout execution before local.order.record.
+  findBySquareOrderId(businessId: Order['businessId'], squareOrderId: string): Promise<PaymentOrder | undefined>;
+  // Orders in PAYMENT_PENDING or PAYMENT_FAILED whose payment link is still inside the poll window.
   listWaitingForPayment(): Promise<PaymentOrder[]>;
-  // Lock and re-read the row. All moves, payment ID, activity and sync writes in the
-  // callback commit or roll back together. This must serialize across server processes.
+  // BEGIN; SELECT ... FOR UPDATE; fn; COMMIT (ROLLBACK on throw). fn makes no network call, so the
+  // transaction stays short. Must serialize across server processes.
   withLockedOrder(orderId: Order['id'], fn: (tx: PaymentTransaction) => Promise<void>): Promise<void>;
 }
 export interface StoredWebhook {
@@ -49,6 +56,7 @@ export interface WebhookDependencies {
   square: SquarePort;
   store: WebhookStore;
   orders: OrdersPort;
+  // Used only to attribute webhook.rejected (SPEC 2.9). Verified events take the business of the row they touch.
   integrations: { findOwner(provider: WebhookProvider, notificationUrl: string): Promise<{ businessId: Order['businessId'] } | undefined> };
   twilio: { validate(input: { notificationUrl: string; signatureHeader: string | undefined; params: Record<string, string> }): boolean | Promise<boolean> };
   calls: {

@@ -7,8 +7,11 @@ import type { StoredWebhook, WebhookDependencies } from './types.js';
 /** Register in an encapsulated scope so unrelated JSON and voice parsers stay intact. */
 export const webhooksPlugin: FastifyPluginAsync<WebhookDependencies> = async (app, deps) => {
   if (!deps.config?.squareNotificationUrl || !deps.config.squareSignatureKey || !deps.config.twilioStatusUrl) throw new Error('Webhook configuration is required');
-  app.setErrorHandler((_error, request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     reply.header('X-Correlation-Id', request.id);
+    // Body too large, bad media type and similar parser refusals stay 4xx, so a provider does not retry them as a 500.
+    const status = (error as { statusCode?: unknown }).statusCode;
+    if (typeof status === 'number' && status >= 400 && status < 500) return reply.code(status).send(makeApiError('VALIDATION_FAILED', 'Webhook request was refused', request.id));
     return reply.code(ERROR_CODE_INFO.INTERNAL.httpStatus).send(makeApiError('INTERNAL', 'Webhook processing requires retry', request.id));
   });
   // Fastify content type parsers are scope-wide, so give each route its own child scope.
@@ -64,13 +67,14 @@ export const webhooksPlugin: FastifyPluginAsync<WebhookDependencies> = async (ap
       }
       const event = parseTwilioStatus(params);
       if (!event) return reply.code(204).send();
-      const owner = await deps.integrations.findOwner('twilio', deps.config.twilioStatusUrl);
-      if (!owner) throw new Error('Twilio webhook integration owner is not configured');
-      if (event.eventType === 'message.status') {
-        const dispatch = await deps.dispatch.findByProviderId(event.payload.providerId!);
-        if (!dispatch || dispatch.channel !== 'whatsapp_sandbox' || dispatch.businessId !== owner.businessId) return reply.code(204).send();
-      }
-      const stored = await deps.store.recordOnce({ ...event, businessId: owner.businessId });
+      // One Twilio account serves both seeded businesses, so the verified event belongs to the business
+      // of the call or dispatch it names (CallSid and MessageSid are unique), not to a single integration owner.
+      const subject = event.eventType === 'message.status'
+        ? await deps.dispatch.findByProviderId(event.payload.providerId!)
+        : await deps.calls.findByProviderId(event.payload.providerId!);
+      if (!subject) return reply.code(204).send();
+      if (event.eventType === 'message.status' && (subject as { channel?: string }).channel !== 'whatsapp_sandbox') return reply.code(204).send();
+      const stored = await deps.store.recordOnce({ ...event, businessId: subject.businessId });
       if (stored) pending.set(req, stored);
       return reply.code(204).send();
     });

@@ -11,6 +11,7 @@ export function fixture() {
   const stored = new Set<string>();
   let verification: PaymentVerification = { verified: true };
   let lock = Promise.resolve();
+  let lockHeld = false;
   const queuedOrders = new Set<string>();
   const sync = { queueOrder: vi.fn(async (value: Order) => { queuedOrders.add(value.id); }) };
   const activity = { write: vi.fn(async (event: ActivityEvent) => { events.push(event); }) };
@@ -24,7 +25,7 @@ export function fixture() {
         return !!signatureHeader && Buffer.byteLength(signatureHeader) === Buffer.byteLength(expected) && timingSafeEqual(Buffer.from(signatureHeader), Buffer.from(expected));
       }),
       verifyPayment: vi.fn(async () => verification),
-      findPaymentForOrder: vi.fn(async () => 'sq_payment'),
+      findPaymentsForOrder: vi.fn(async () => ['sq_payment']),
     },
     store: { recordOnce: vi.fn(async (event) => {
       const key = `${event.source}:${event.providerEventId}`;
@@ -34,7 +35,7 @@ export function fixture() {
     }) },
     integrations: { findOwner: vi.fn(async () => ({ businessId: order.businessId })) },
     orders: {
-      findBySquareOrderId: vi.fn(async (id) => id === order.squareOrderId ? { ...order } : undefined),
+      findBySquareOrderId: vi.fn(async (businessId, id) => businessId === order.businessId && id === order.squareOrderId ? { ...order } : undefined),
       listWaitingForPayment: vi.fn(async () => [{ ...order }]),
       withLockedOrder: async (_id, fn) => {
         const previous = lock;
@@ -44,7 +45,22 @@ export function fixture() {
         const before = structuredClone(order);
         const eventCount = events.length;
         const queuedBefore = new Set(queuedOrders);
-        try { await fn({ order, move, savePaymentId: async (id) => { order.squarePaymentId = id; }, activity, sync }); }
+        lockHeld = true;
+        // Stands in for the checked database routines: each call is all or nothing.
+        const markPaid = async ({ paymentId, events: added }: { paymentId: string; events: ActivityEvent[] }) => {
+          if (order.status !== 'PAYMENT_PENDING' && order.status !== 'PAYMENT_FAILED') throw new Error('routine refused: order not payable');
+          order.squarePaymentId = paymentId;
+          await move('PAID_VERIFIED');
+          await sync.queueOrder({ ...order });
+          await move('FULFILLMENT_READY');
+          for (const event of added) await activity.write(event);
+        };
+        const markFailed = async ({ events: added }: { paymentId: string; events: ActivityEvent[] }) => {
+          if (order.status !== 'PAYMENT_PENDING') throw new Error('routine refused: order not pending');
+          await move('PAYMENT_FAILED');
+          for (const event of added) await activity.write(event);
+        };
+        try { await fn({ order: { ...order }, markPaid, markFailed }); }
         catch (error: unknown) {
           for (const key of Object.keys(order)) Reflect.deleteProperty(order, key);
           Object.assign(order, before);
@@ -52,7 +68,7 @@ export function fixture() {
           queuedOrders.clear();
           for (const id of queuedBefore) queuedOrders.add(id);
           throw error;
-        } finally { unlock(); }
+        } finally { lockHeld = false; unlock(); }
       },
     },
     activity,
@@ -61,7 +77,7 @@ export function fixture() {
     calls: { findByProviderId: vi.fn(async () => undefined), endOnce: vi.fn(async () => false) },
     dispatch: { findByProviderId: vi.fn(async () => undefined), updateStatus: vi.fn(async () => false) },
   };
-  return { deps, order, events, jobs, move, sync, stored, queuedOrders, setVerification: (value: PaymentVerification) => { verification = value; }, drain: async () => { for (const job of jobs.splice(0)) await job(); } };
+  return { lockHeld: () => lockHeld, deps, order, events, jobs, move, sync, stored, queuedOrders, setVerification: (value: PaymentVerification) => { verification = value; }, drain: async () => { for (const job of jobs.splice(0)) await job(); } };
 }
 export function sign(body: Buffer, url = 'https://example.test/webhooks/square', key = 'test-only-key') {
   return createHmac('sha256', key).update(url).update(body).digest('base64');
