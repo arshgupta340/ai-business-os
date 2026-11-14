@@ -87,7 +87,9 @@ The real database has migrations 0001 to 0006. There is nothing to apply before 
 
    The seed needs `DATABASE_ADMIN_URL`, `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. It reads `SEED_OWNER_EMAIL` and `SEED_OWNER_PASSWORD` for the owner login. It writes the live agent row only when `TWILIO_PHONE_NUMBER` is set on the laptop.
 
-2. **Not rehearsed.** This command writes the demo catalog to the Square sandbox and does not go through the approval engine. The catalog is already there: the live run quoted from it. Run the command only when the lead has decided the catalog must be rewritten. It needs `SQUARE_ENVIRONMENT` set to `sandbox`, `SQUARE_ACCESS_TOKEN`, `SQUARE_LOCATION_ID` and `DATABASE_ADMIN_URL`, and it also rewrites the pizza rows of our `catalog_items` cache.
+   The same command then seeds the Square sandbox catalog (step 2). When `SQUARE_ACCESS_TOKEN` and `SQUARE_LOCATION_ID` are both unset it skips that step and prints a line saying so. When either is set it refuses before writing anything unless `SQUARE_ENVIRONMENT` is `sandbox` and both are set.
+
+2. **Not rehearsed.** `npm run seed` runs this step too when the Square keys are set. The command below runs only this step. It writes the demo catalog to the Square sandbox and does not go through the approval engine. It sends no upsert when the catalog already matches the menu. The catalog is already there: the live run quoted from it. Run the seed with the Square keys set only when the lead has decided the catalog may be rewritten. It needs `SQUARE_ENVIRONMENT` set to `sandbox`, `SQUARE_ACCESS_TOKEN`, `SQUARE_LOCATION_ID` and `DATABASE_ADMIN_URL`, and it also rewrites the pizza rows of our `catalog_items` cache.
 
    ```bash
    npm run seed:square

@@ -43,6 +43,37 @@ Builder model: one strict structured-output call on `gpt-6-astra` through the Re
 | Test outbound call | Pass. API call with inline TwiML `<Say>` to a team phone: status Completed, 6 seconds, STIR/SHAKEN attestation B. Proves the account SID, auth token and number work for voice. |
 | Emergency address | Not set. Twilio warns of a 75 dollar charge per emergency call without one. |
 
+### Live results on 2026-11-14
+
+These serve B-03 (#10) and B-02 (#9).
+
+**Phone calls.** Two real calls to the Twilio number reached the voice model on the deployed server.
+
+| | Call 1 | Call 2 |
+|---|---|---|
+| Length | 134 seconds | 123 seconds |
+| First audio | 2.0 seconds | 1.1 seconds |
+| Turns | 7 | 9 |
+| Turn latency, median | 552 ms | 694 ms |
+| Turn latency, maximum | 2051 ms | 1116 ms |
+| Tool calls | 5 | 4 |
+| Barge-ins | 4 handled | 5 |
+
+- Call 1 dropped 27 early audio chunks. It ended cleanly with `call.started` and `call.ended`.
+- In call 2 the caller ordered one large pepperoni. `propose_order` succeeded. The owner approved in the web dashboard. The Square sandbox payment link was created one second after approval. The order reached `PAYMENT_PENDING`.
+
+**Square sandbox.** An order created by a payment link stays in `DRAFT` in the sandbox. A payment through the API fails with "The order must be OPEN to be paid" until the order is updated to `OPEN`. The scripted live run therefore SIMULATED the payment: it updated the order to `OPEN`, then called CreatePayment with the sandbox test nonce. Two signed Square webhook events were received, verified and processed. The order went to `PAID_VERIFIED`, then `FULFILLMENT_READY`. No person has yet paid through the hosted checkout page on a second device.
+
+**Message channel.** The server runs with `MESSAGE_CHANNEL=qr_only`. SMS is not deliverable on Twilio, because the 10DLC number is unregistered, or on AgentPhone, which requires registration. The WhatsApp sandbox has not been joined. No customer message has been sent.
+
+**Not done.**
+- The barbershop agent on a live phone call.
+- A payment through the hosted checkout page by a person.
+- Rehearsals.
+- A live transfer to a person (human fallback).
+
+The go or no-go for B-02 is still to be recorded by Arsh.
+
 ## Found while preparing the spikes
 
 - Square: `CreatePayment` caps the idempotency key at 45 characters, `CreatePaymentLink` at 192 (official reference). Recorded in SPEC 2.9.
@@ -126,3 +157,34 @@ Assumptions made in that work that no test here can check. Each one needs a real
 - **An uploaded draft is never marked `superseded`.** The check `(status = 'draft') = (verified_at is null)` and the index `business_facts_version` refuse it for a fact that was never verified. After "keep the current value" the conflict row is `resolved` and the draft stays `draft`. Deleting it is not possible either: `abos_app` has no delete on `business_facts`.
 - **A draft and its conflict are two statements.** DATA-MODEL section 5 says "in the same transaction". The builder's service calls the fact store and then the conflict store, so a crash between the two leaves a draft with no conflict row.
 - **`StoredFile.failureReason` is not stored.** `files` has no column for it. It is kept in the process and nothing but a builder test reads it.
+
+## AgentPhone (D-12), 2026-11-14: unverified assumptions and fail-closed choices
+
+Vendor facts are in `docs/notes-agentphone.md`, each with its URL. None was tested: no AgentPhone account exists yet.
+
+- **Voice mode.** The build assumes the AgentPhone agent is set to `webhook` voice mode. In `hosted` mode AgentPhone's own model would answer and no turn would reach us.
+- **Proposal memory.** AgentPhone turns use the shared runner, so after a proposal (stage CUSTOMER_CONFIRMED on the call row) every later turn is told it was sent for approval and not to propose again, as sim-call is (7219b86).
+- **Turn timing.** A turn is bounded at 20 seconds (AgentPhone's default webhook timeout is 30); the bound covers waiting for the call's earlier turn and running. If the model is slower, the caller hears a fixed apology and the turn is abandoned: it starts no further tool call and its unheard reply is not kept in the history. A tool call already running when the bound passes cannot be cancelled, so a `propose_order` in flight at that moment can still store its PENDING proposal; the call's stage then records it and the next turn is told it was sent. After 1.5 seconds without an answer the caller hears an interim "One moment."
+- **One turn of a call at a time (review, 2026-11-14).** Turns of one call are queued in the server process. A turn that arrives while an abandoned turn still has a tool call running waits up to its own bound, then answers the fixed apology without running. The queue is per process: two server instances could still run two turns of one call. The demo runs one instance.
+- **No hang-up from our side.** The server never ends an AgentPhone call on its own, matching voice NOTES item 4 (no goodbye is inferred from the transcript). The call ends when the caller hangs up, or by AgentPhone's own silence limit, and `agent.call_ended` closes the call row.
+- **Owner decision mid-call.** No documented API pushes speech into a live webhook-mode call, so the decision is spoken at the caller's next turn, in fixed wording that never says paid or booked.
+- **Restart.** Call history and the per-call toolset live in process memory, as for sim-call. After a restart the call continues on its pinned version with a fresh history and a fresh fact read.
+- **`agent.call_ended` recovery.** AgentPhone sends it once. If processing fails, the stored row is retried every minute by the AgentPhone job. The row keeps the provider call ID and the end reason the provider gave (`completed`, `dropped` or `failed`), and the call is closed with that reason. Only rows older than 30 seconds are recovered, so the job cannot race the inline handler.
+- **Inbound texts.** Verified, deduplicated and stored with the provider message ID only. There is no inbound-text feature, so nothing else happens and the body is never stored.
+- **Delivery status.** There is no receipt webhook. Dispatches on `agentphone` that are SENT within the last 24 hours are matched against up to 300 messages of the number's history every minute. Older messages are not checked. How long AgentPhone keeps history is not documented.
+- **Send outcomes.** Only the documented `sent` (and `delivered`) status counts as SENT. Any other status, a timeout, a 5xx or a 409 is UNKNOWN and is never resent; 4xx is FAILED.
+- **Health entry.** With `TELEPHONY_PROVIDER=agentphone`, AgentPhone is reported on the existing `twilio` health key ("the phone line your agent answers"), with the detail naming AgentPhone. A separate key would be a contract and web change.
+- **Publish binding.** Publish binds `live_agent` to the selected provider's number. The seed still uses `TWILIO_PHONE_NUMBER`, so after switching, publish again.
+- **Replay key (review, 2026-11-14).** AgentPhone signs `{timestamp}.{body}`; `X-Webhook-ID` is not signed. So besides the delivery ID, each accepted delivery stores a second `webhook_events` row (`event_type` `replay_guard`, `provider_event_id` `signature/<sha256 of the verified signature>`, empty payload, already processed). A delivery is acted on only when both keys are new. The row holds no body, number or signature. Assumption: two different events never have the same timestamp second and the same body bytes; if they did, the second would be dropped as a duplicate.
+- **Rejected deliveries are capped (review, 2026-11-14).** A bad signature always answers 401, but this route writes at most 30 `webhook.rejected` events per minute per server process (SPEC 2.9 says every rejected webhook writes one). The Twilio and Square routes have no such cap.
+- **Lenient parsing (review, 2026-11-14).** Only the event name, the provider's call or message ID and the dialed number can make a signed delivery malformed. A caller number that is missing, null or not a short string is treated as withheld; a missing transcript is an empty turn ("I did not catch that"); a transcript is cut at 4000 characters; an unknown call-end status closes the call as `dropped`.
+- **No send function on a telephony provider (review, 2026-11-14).** `TelephonyProvider.sendText` was removed. A text is sent only by the executor's approved message step through `sendOnce`.
+- **Formats taken from examples.** `scripts/check-env.mjs` expects `AGENTPHONE_WEBHOOK_SECRET` to start with `whsec_`, and `docs/SETUP-ACCOUNTS.md` says the API key starts with `sk_live_`. The vendor's example response shows `whsec_abc123...`; neither prefix is stated as a rule. If a real secret has another shape, `check-env` reports "Wrong format" although the server would accept it.
+- **Message channel health (review of #105, 2026-11-14).** `MESSAGE_CHANNEL=agentphone` has a read-only check with either telephony provider: `GET /v1/numbers/{id}`, connected only when `outboundSms` is `enabled`. While it is `activating`, `registration_required` or anything else, the channel is disconnected and publish refuses an agent with a message capability. The other message channels still have no read-only check.
+- **A dropped request (review of #105).** If AgentPhone closes a voice turn's request before the reply (whether it does on barge-in is not documented), the turn is abandoned like one past its bound: no further tool call, and its reply is not kept.
+- **Refusal causes in the log (review of #105).** A refused AgentPhone delivery logs one fixed cause: `mismatch`, `missing`, `stale`, `id_format`, `timestamp_format` or `routing_fields`. The ID patterns (`signature.ts`, `events.ts`), the list field names (`client.ts`) and the call-end status values are untested guesses, marked as such in the code. If the first live delivery answers 401 with `id_format` or 400 with `routing_fields`, widen the pattern.
+- **Web app.** `apps/web` has exhaustive `Record` maps of message channels and webhook providers (`integrations-view.ts`, `HealthSection.tsx`). The backend added the `agentphone` labels there with the owner's authorization while the UI lead was away; that commit changes nothing else in `apps/web`.
+
+## Migration 0007 not applied (2026-11-14)
+
+- Migration 0007 (`0007_agentphone_channel.sql`) is not applied to the live database yet. Keep `TELEPHONY_PROVIDER` and `MESSAGE_CHANNEL` off `agentphone` until it is (docs/DEPLOY.md, "Switching the telephony provider").
