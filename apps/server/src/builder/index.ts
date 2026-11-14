@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { AgentService, CreateAgentBodySchema, noLiveAgent, type LiveAgentReader } from './agents';
 import { NotConfiguredAuth, requireBusiness, UnverifiedSeedOwnerAuth, type BuilderAuth } from './auth';
 import { builderAuthMode, parseBuilderEnv } from './env';
+import { registerExtractionRoutes, withConflicts, type ExtractionOptions } from './extraction/index';
 import { AgentRunRequestSchema, AgentStatusSchema, type ToolHandler } from './pending-contracts';
 import type { AgentModel } from './runner/agent-model';
 import { MockToolset } from './runner/mock-toolset';
@@ -52,6 +53,7 @@ export interface BuilderPluginOptions {
   liveAgent?: LiveAgentReader;
   now?: () => Date;
   realtimeMinter?: RealtimeMinter;
+  extraction?: ExtractionOptions;
 }
 
 const SessionIdParams = z.object({ id: z.string().regex(/^bld_[A-Za-z0-9_]{1,64}$/) });
@@ -102,7 +104,13 @@ export const builderPlugin: FastifyPluginAsync<BuilderPluginOptions> = async (ap
   const sessions = options.sessions ?? new InMemoryBuilderSessionStore();
   const agents = options.agents ?? new InMemoryAgentDraftStore();
   const draftFacts = options.draftFacts ?? new InMemoryDraftFactStore();
-  const knowledge = options.knowledge ?? new FixtureBusinessKnowledge();
+  const baseKnowledge = options.knowledge ?? new FixtureBusinessKnowledge();
+
+  // ---- 3.2 Files and extraction, 3.12 conflict resolve (task B-21)
+  // Registered first so the interview and the test runs below see open
+  // conflicts from uploads as stop conditions.
+  const extraction = registerExtractionRoutes(app, { ...options.extraction, auth, knowledge: baseKnowledge, env, now });
+  const knowledge = withConflicts(baseKnowledge, extraction.conflicts);
   const toolset = options.toolset ?? new MockToolset(now);
 
   const builder = new BuilderSessionService({ sessions, agents, draftFacts, knowledge, model: builderModel, now });
@@ -112,6 +120,7 @@ export const builderPlugin: FastifyPluginAsync<BuilderPluginOptions> = async (ap
   registerVoiceRoutes(app, { auth, sessions, env: source, now, minter: options.realtimeMinter });
 
   app.get('/api/builder/ping', async () => ({ ok: true, lane: 'builder' }));
+
 
   // ---- 3.3 Builder sessions
   app.post('/api/builder/sessions', async (request, reply) => {
