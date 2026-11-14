@@ -2,11 +2,10 @@
 // wired, on the in-process Postgres as abos_app, through the real toolset, engine, routines, REST
 // API and webhook routes, with fake providers. Every test asserts how many external writes ran.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ENDPOINTS, idempotencyKey, type Cart, type ToolResult } from '@abos/contracts';
+import { ENDPOINTS, idempotencyKey, type Cart, type Quote, type ToolResult } from '@abos/contracts';
 import { createSquareAdapterForTest } from '../../src/adapters/square/testing';
 import { createDbExecutor } from '../../src/compose/executor';
 import { notWiredExecutor, type SeamDeps } from '../../src/compose/seams';
-import { READBACK_MIN_MS } from '../../src/tools/real/index';
 import { currentRole } from '../support/db';
 import { LOCATION_ID, OWNER, createWorld, fakeSquareClient, nextLocalDate, zonedIso, type World } from './world';
 
@@ -27,28 +26,38 @@ async function sim(w: World, agentId: string, businessId: string, body: Record<s
   return res.json() as { callId: string; reply: string };
 }
 
-/** Read the catalog, quote, propose (with the recipient read-back when consent is given). */
+/**
+ * Read the catalog and quote through the real toolset. Without consent the toolset proposes (qr_only).
+ * With consent the proposal is stored through the engine on the same live call: since B-15 the deployed
+ * toolset proposes every order as qr_only until server-owned consent evidence exists (voice NOTES 3),
+ * so the message path is reached only this way. It still needs the owner's approval of the exact payload.
+ */
 async function pizzaOrder(w: World, consent = true) {
-  let quoteId = '';
+  let quote: Quote | undefined;
+  const fulfillment = { type: 'pickup' as const, pickupAt: zonedIso(nextLocalDate([0, 1, 2, 3, 4, 5, 6]), '18:00', 'America/Los_Angeles') };
   w.model.push(
     async ({ executeTool }) => { await executeTool('read_catalog', { query: 'pepperoni' }); return 'We have pepperoni.'; },
     async ({ executeTool }) => {
       const r = await executeTool('quote_order', { cart: CART }) as ToolResult<'quote_order'>;
       if (!r.ok) return `quote failed ${r.reason}`;
-      quoteId = r.quote.quoteId;
+      quote = r.quote;
       return 'quoted';
     },
-    async ({ executeTool }) => {
-      const contact = consent ? { name: 'Sam', messageRecipient: '+15555550123', messageConsent: true, consentAt: new Date().toISOString() } : { name: 'Sam', messageConsent: false };
-      const input = { cart: CART, contact, fulfillment: { type: 'pickup', pickupAt: zonedIso(nextLocalDate([0, 1, 2, 3, 4, 5, 6]), '18:00', 'America/Los_Angeles') }, quoteId };
-      let r = await executeTool('propose_order', input);
-      if (consent) { w.clock.advance(READBACK_MIN_MS + 100); r = await executeTool('propose_order', input); }
-      return JSON.stringify(r);
-    },
+    consent ? async () => 'Thanks, the owner will review it.' : async ({ executeTool }) =>
+      JSON.stringify(await executeTool('propose_order', { cart: CART, contact: { name: 'Sam', messageConsent: false }, fulfillment, quoteId: quote!.quoteId })),
   );
   const first = await sim(w, 'agt_pizza_01', PIZZA, { message: 'What pizzas do you have?' });
   await sim(w, 'agt_pizza_01', PIZZA, { callId: first.callId, message: 'Two large pepperoni' });
+  let ids: { orderId: string; approvalId: string } | undefined;
+  if (consent) {
+    const call = (await w.t.db.query('select agent_version_id from calls where id = $1', [first.callId])).rows[0] as { agent_version_id: string };
+    const { order, approval } = await w.app.composed.engine.createOrderProposal({ businessId: PIZZA, callId: first.callId, agentVersionId: call.agent_version_id,
+      cart: CART, quote: quote!, contact: { name: 'Sam', messageRecipient: '+15555550123', messageConsent: true, consentAt: new Date().toISOString() },
+      fulfillment, messageChannel: w.app.composed.providers.messageChannel });
+    ids = { orderId: order.id, approvalId: approval.id };
+  }
   const proposed = await sim(w, 'agt_pizza_01', PIZZA, { callId: first.callId, message: 'Sam, pickup at six', end: true });
+  if (ids) return ids;
   const r = JSON.parse(proposed.reply) as { ok: boolean; proposalId: string; approvalId: string };
   expect(r).toMatchObject({ ok: true });
   return { orderId: r.proposalId, approvalId: r.approvalId };
@@ -289,17 +298,17 @@ describe('barbershop booking bundle with the executor', () => {
         slot = r.slots[0]!.startUtc;
         return 'slots';
       },
-      async ({ executeTool }) => {
-        const input = { serviceId: 'svc_haircut', startUtc: slot, customer: { name: 'Ana', messageRecipient: '+15555550124', messageConsent: true } };
-        await executeTool('propose_booking', input);
-        w.clock.advance(READBACK_MIN_MS + 100);
-        return JSON.stringify(await executeTool('propose_booking', input));
-      },
+      async () => 'Thanks, the owner will confirm.',
     );
     const first = await sim(w, 'agt_barber_01', BARBER, { message: 'Can I get a haircut?' });
-    const proposed = await sim(w, 'agt_barber_01', BARBER, { callId: first.callId, message: 'The first one, I am Ana', end: true });
-    const r = JSON.parse(proposed.reply) as { ok: boolean; proposalId: string; approvalId: string };
-    expect(r.ok).toBe(true);
+    // With consent, through the composed proposal port on the live call (the toolset proposes qr_only since B-15).
+    const call = (await w.t.db.query('select agent_version_id from calls where id = $1', [first.callId])).rows[0] as { agent_version_id: string };
+    const made = await w.app.composed.toolsetPorts.proposals.createBookingProposal({ businessId: BARBER, agentVersionId: call.agent_version_id, callId: first.callId,
+      correlationId: first.callId, operationId: 'op-booking-1', signal: new AbortController().signal, serviceId: 'svc_haircut', startUtc: slot,
+      customer: { name: 'Ana', messageRecipient: '+15555550124', messageConsent: true }, messageChannel: w.app.composed.providers.messageChannel });
+    if (!made.ok) throw new Error(`booking proposal failed: ${made.reason}`);
+    await sim(w, 'agt_barber_01', BARBER, { callId: first.callId, message: 'The first one, I am Ana', end: true });
+    const r = { ok: true, proposalId: made.bookingId, approvalId: made.approvalId };
     await approve(w, BARBER, r.approvalId);
     await w.settle();
 
@@ -328,7 +337,7 @@ describe('an executor that crashes between claim and finish', () => {
     const { orderId, approvalId } = await pizzaOrder(w);
     await approve(w, PIZZA, approvalId);
     const c = w.app.composed;
-    const deps: SeamDeps = { env: c.env, db: c.db, engine: c.engine, providers: c.providers, interim: c.interim, now: c.now, newId: c.newId, log: silentLog };
+    const deps: SeamDeps = { env: c.env, db: c.db, engine: c.engine, providers: c.providers, now: c.now, newId: c.newId, log: silentLog };
 
     // Worker A claims the checkout step, sends CreatePaymentLink, and never returns (the process died).
     const hanging = fakeSquareClient();
@@ -336,19 +345,19 @@ describe('an executor that crashes between claim and finish', () => {
     const sent = new Promise<void>((resolve) => { created = resolve; });
     hanging.client.checkout.paymentLinks.create = async () => { hanging.writes.push('checkout.paymentLinks.create'); created(); return new Promise(() => {}); };
     const crashed = createDbExecutor({ ...deps, providers: { ...c.providers, square: createSquareAdapterForTest(hanging.client, { locationId: LOCATION_ID, environment: 'sandbox', now: () => new Date() }) } },
-      { workerId: 'worker-crashed', interim: c.interim });
+      { workerId: 'worker-crashed' });
     void crashed.tick();
     await sent;
     expect((await steps(w, approvalId)).map((x) => x.status)).toEqual(['RUNNING', 'QUEUED', 'QUEUED']);
     expect((await order(w, orderId)).status).toBe('CREATING_CHECKOUT');
 
     // Worker B starts later. Before the lease is stale it leaves the step alone.
-    const healthy = createDbExecutor(deps, { workerId: 'worker-b', interim: c.interim });
+    const healthy = createDbExecutor(deps, { workerId: 'worker-b' });
     await healthy.drain();
     expect((await steps(w, approvalId))[0]!.status).toBe('RUNNING');
     // Past the stale window the step goes to review, never back to QUEUED, and the order to RECOVERY_REQUIRED.
     // Test-only time travel on the database clock: the lease was claimed 16 minutes ago.
-    await w.t.admin((q) => q.query("update public.action_executions set locked_at = locked_at - interval '16 minutes' where approval_id = $1 and status = 'RUNNING'", [approvalId]));
+    await w.t.admin((q) => q.query("update public.action_executions set locked_at = locked_at - interval '16 minutes', lease_deadline = lease_deadline - interval '16 minutes' where approval_id = $1 and status = 'RUNNING'", [approvalId]));
     await healthy.drain();
     expect((await steps(w, approvalId)).map((x) => x.status)).toEqual(['NEEDS_REVIEW', 'QUEUED', 'QUEUED']);
     expect((await order(w, orderId)).status).toBe('RECOVERY_REQUIRED');
@@ -356,6 +365,7 @@ describe('an executor that crashes between claim and finish', () => {
     expect(hanging.writes).toEqual(['checkout.paymentLinks.create']);
     expect(w.squareWrites).toEqual([]);
     expect(w.messageSends).toBe(0);
-    expect(await countRows(w, "select count(*)::int as n from activity_events where correlation_id = $1 and type = 'execution.failed' and payload->>'nextStatus' = 'NEEDS_REVIEW'", [approvalId])).toBe(1);
+    // recover_stale_executions writes the one execution.failed event (correlated to the call, like every routine event).
+    expect(await countRows(w, "select count(*)::int as n from activity_events where type = 'execution.failed' and payload->>'nextStatus' = 'NEEDS_REVIEW' and payload->>'executionId' = $1", [(await steps(w, approvalId))[0]!.id])).toBe(1);
   });
 });

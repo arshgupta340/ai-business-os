@@ -2,7 +2,6 @@
 // alternatives only on a conflict, and reads service, hours and notice from the call's pinned facts.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ENDPOINTS, type ToolResult } from '@abos/contracts';
-import { READBACK_MIN_MS } from '../../src/tools/real/index';
 import { OWNER, createWorld, nextLocalDate, zonedIso, type World } from './world';
 
 const BARBER = 'biz_barber_01';
@@ -17,12 +16,10 @@ async function sim(body: Record<string, unknown>) {
   const res = await w.app.inject({ method: 'POST', url: `/api/agents/agt_barber_01/sim-call?businessId=${BARBER}`, headers: OWNER, payload: body });
   return res.json() as { callId: string; reply: string };
 }
-/** propose_booking with the recipient read-back (same number again three seconds later). */
+/** propose_booking, once. */
 const proposeTurn = (startUtc: string, out: { r?: Proposal }) => async ({ executeTool }: { executeTool: (name: string, input: unknown) => Promise<unknown> }) => {
   const input = { serviceId: 'svc_haircut', startUtc, customer: { name: 'Ana', messageRecipient: '+15555550124', messageConsent: true } };
-  const first = await executeTool('propose_booking', input) as Proposal & { missingFields?: string[] };
-  if (!first.missingFields) { out.r = first; return 'done'; }
-  w.clock.advance(READBACK_MIN_MS + 100);
+  // B-15: no recipient read-back any more; the toolset proposes once (qr_only until consent evidence exists).
   out.r = await executeTool('propose_booking', input) as Proposal;
   return 'done';
 };

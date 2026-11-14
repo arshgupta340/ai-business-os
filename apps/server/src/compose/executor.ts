@@ -2,9 +2,16 @@
 //
 // The server connects as abos_app, which can only SELECT approval_requests, action_executions,
 // message_dispatches and sync_jobs. Every change to those tables goes through a routine wrapper in
-// @abos/db (claim_next_execution, finish_execution, record_dispatch, update_dispatch,
-// enqueue_sheets_sync, claim_sync_job, finish_sync_job). Orders and bookings are plain tables the
-// role may update; the subject port below moves them only along the contract state machine.
+// @abos/db. Since migration 0005 the protected subject fields go through routines too:
+//   APPROVED -> CREATING_CHECKOUT                  claim_execution (on the checkout claim)
+//   checkout references, PAYMENT_LINK_READY        save_checkout (under the step's lease)
+//   google_event_id, BOOKED_VERIFIED, Sheets job   verify_booking (also finishes the calendar step)
+//   PAID_VERIFIED, FULFILLMENT_READY               mark_order_paid, fulfill_order (webhooks.ts)
+//   stale RUNNING steps and sync jobs              recover_stale_executions, recover_stale_sync_jobs
+// The remaining moves (MESSAGE_SENT, PAYMENT_PENDING, RECOVERY_REQUIRED, UNAVAILABLE, SLOT_CONFLICT,
+// RETRY_REQUIRED) have no routine. 0005's orders_runtime_guard and bookings_runtime_guard triggers
+// check every abos_app update against the contract machine and refuse protected fields, so those
+// moves stay conditional updates under the guard, in `guardedMove` below and nowhere else.
 //
 // Idempotency keys always come from the database row. Nothing here creates or replaces a key.
 import { createHash } from 'node:crypto';
@@ -13,7 +20,8 @@ import {
   type Booking, type BookingApprovalPayload, type ErrorCode, type MessageChannel, type Order,
 } from '@abos/contracts';
 import {
-  claimSyncJob, enqueueSheetsSync, finishExecution, finishSyncJob, recordDispatch, runtimeClaimNextExecution, updateDispatch,
+  claimSyncJob, finishExecution, finishSyncJob, recordDispatch, recoverStaleExecutions, recoverStaleSyncJobs, runtimeClaimNextExecution,
+  saveCheckout, updateDispatch, verifyBooking, type WorkerLease,
 } from '@abos/db';
 import { bookingRow, orderRow } from '../adapters/sheets/index';
 import { renderBookingConfirmation, renderCheckoutMessage, sendOnce, type DispatchRecord, type MessageStore } from '../adapters/message/index';
@@ -24,8 +32,8 @@ import { createExecutor, DEFAULT_STALE_AFTER_MS } from '../executor/index';
 import { runSyncJob } from '../executor/jobs';
 import type { ExecutorDeps, MessageResult, QueuePort, StepOutcome, SubjectsPort, SyncDeps, SyncJob } from '../executor/types';
 import { emitActivity } from '../policy/activity';
-import { executionFromRow } from '../policy/engine';
-import type { InterimDb } from './ports';
+import { approvalFromRow, executionFromRow } from '../policy/engine';
+import { executeCatalogSyncStep, executePriceEditStep } from '../api/prices/index';
 import type { Executor, SeamDeps } from './seams';
 
 type Row = Record<string, unknown>;
@@ -34,6 +42,8 @@ const all = async (q: QueryDb, text: string, params: unknown[]) => (await q.quer
 
 /** The Sheets tabs the reporting rows go to. The tabs must already exist in the demo sheet. */
 export const SHEETS_TABS = { order: 'Orders', booking: 'Bookings' } as const;
+/** 0005 refuses a stale window under one minute. */
+export const MIN_STALE_AFTER_MS = 60_000;
 
 export function orderFromDbRow(row: unknown): Order { return OrderSchema.parse(mapRow(row)); }
 export function bookingFromDbRow(row: unknown): Booking { return BookingSchema.parse(mapRow(row)); }
@@ -49,14 +59,19 @@ export async function loadBooking(q: QueryDb, businessId: string, bookingId: str
   return bookingFromDbRow(row);
 }
 
+/** Order and booking moves only a routine may make. A request for one outside its routine fails closed. */
+const ROUTINE_ORDER_STATES: readonly Order['status'][] = ['CREATING_CHECKOUT', 'PAYMENT_LINK_READY', 'PAID_VERIFIED', 'FULFILLMENT_READY'];
+const ROUTINE_BOOKING_STATES: readonly Booking['status'][] = ['BOOKED_VERIFIED'];
+
 /**
- * Subject moves for one query scope (the pool, or the transaction `finish` opens). Every move is a
- * conditional update from the state that was read under a row lock, checked against the contract
- * state machine, with its status event in the same scope.
+ * Subject moves for one query scope (the pool, or the transaction `finish` opens). `lease` is the
+ * step being finished: the lease-checked routines (save_checkout, verify_booking) need it, and
+ * without it they fail closed. `state.finished` is set when a routine already finished the step.
  */
-export function dbSubjects(q: QueryDb, deps: Pick<SeamDeps, 'newId' | 'now'>): SubjectsPort {
+export function dbSubjects(q: QueryDb, deps: Pick<SeamDeps, 'newId' | 'now'>, lease?: WorkerLease, state: { finished: boolean } = { finished: false }): SubjectsPort {
   const event = (businessId: string, correlationId: string, e: Pick<ActivityEvent, 'type' | 'payload'>) =>
     emitActivity(q, { ...e, id: deps.newId('evt_'), businessId, correlationId, actorType: 'system', occurredAt: deps.now().toISOString() });
+  const needLease = (): WorkerLease => { if (!lease) throw { code: 'INVALID_STATE', requestSent: false }; return lease; };
 
   async function lockOrder(businessId: string, orderId: string): Promise<Order> {
     const row = await one(q, 'select * from public.orders where id = $1 and business_id = $2 for update', [orderId, businessId]);
@@ -68,63 +83,47 @@ export function dbSubjects(q: QueryDb, deps: Pick<SeamDeps, 'newId' | 'now'>): S
     if (!row) throw { code: 'NOT_FOUND', requestSent: false };
     return bookingFromDbRow(row);
   }
-  async function orderMoved(order: Order, to: Order['status'], extraSql = '', extra: unknown[] = []) {
-    if (!canTransition('order', order.status, to)) throw { code: 'INVALID_STATE', requestSent: false };
-    const updated = await q.query(`update public.orders set status = $3${extraSql} where id = $1 and business_id = $2 and status = $4 returning id`,
-      [order.id, order.businessId, to, order.status, ...extra]);
+  /** The one place a subject status is written directly: a move no routine serves, under 0005's guard trigger. */
+  async function guardedMove(table: 'orders' | 'bookings', subject: { id: string; businessId: string; status: string }, to: string) {
+    const updated = await q.query(`update public.${table} set status = $3 where id = $1 and business_id = $2 and status = $4 returning id`,
+      [subject.id, subject.businessId, to, subject.status]);
     if (updated.rows.length !== 1) throw { code: 'INVALID_STATE', requestSent: false };
-    await event(order.businessId, order.approvalId ?? order.callId, { type: 'order.status_changed', payload: { orderId: order.id, callId: order.callId, from: order.status, to } });
-  }
-  async function bookingMoved(booking: Booking, to: Booking['status']) {
-    if (!canTransition('booking', booking.status, to)) throw { code: 'INVALID_STATE', requestSent: false };
-    const updated = await q.query('update public.bookings set status = $3 where id = $1 and business_id = $2 and status = $4 returning id',
-      [booking.id, booking.businessId, to, booking.status]);
-    if (updated.rows.length !== 1) throw { code: 'INVALID_STATE', requestSent: false };
-    await event(booking.businessId, booking.approvalId ?? booking.id, { type: 'booking.status_changed', payload: { bookingId: booking.id, ...(booking.callId ? { callId: booking.callId } : {}), from: booking.status, to } });
   }
 
   return {
     loadOrder: (businessId, id) => loadOrder(q, businessId, id),
     loadBooking: (businessId, id) => loadBooking(q, businessId, id),
-    async saveCheckoutLink(businessId, orderId, _executionId, refs) {
-      // The Square IDs go on the order before the total is verified, so a crash can resume by reading.
-      // abos_app cannot write the execution row, and finish_execution stores the Square order ID as its
-      // external_ref. The URL is not stored until the total is verified (completeCheckout).
-      const updated = await q.query(`update public.orders set square_order_id = $3, square_payment_link_id = $4
-        where id = $1 and business_id = $2 and status = 'CREATING_CHECKOUT'
-          and (square_order_id is null or square_order_id = $3) and (square_payment_link_id is null or square_payment_link_id = $4) returning id`,
-      [orderId, businessId, refs.squareOrderId, refs.paymentLinkId]);
-      if (updated.rows.length !== 1) throw new Error('checkout references were not saved');
+    async saveCheckoutLink() {
+      // Called before Square's total is verified. save_checkout moves the order to PAYMENT_LINK_READY,
+      // which must not happen for a link whose total may not match, so nothing is stored here. If the
+      // process stops before completeCheckout, stale recovery moves the step to NEEDS_REVIEW and the
+      // order to RECOVERY_REQUIRED, and recovery resolves it from Square evidence.
     },
-    async completeCheckout(businessId, orderId, refs) {
-      const order = await lockOrder(businessId, orderId);
-      if (order.squareOrderId && order.squareOrderId !== refs.squareOrderId) throw { code: 'INVALID_STATE', requestSent: false };
-      await orderMoved(order, 'PAYMENT_LINK_READY', ', square_order_id = $5, square_payment_link_id = $6, checkout_url = $7', [refs.squareOrderId, refs.paymentLinkId, refs.url]);
-      await event(businessId, order.approvalId ?? order.callId, { type: 'checkout.created', payload: {
-        orderId, squareOrderId: refs.squareOrderId, squarePaymentLinkId: refs.paymentLinkId, totalMinor: order.totalMinor, currency: order.currency, sandbox: true } });
+    async completeCheckout(_businessId, _orderId, refs) {
+      // save_checkout (0005): under this step's lease it stores the references on the execution row and
+      // the order, sets link_ready_at, moves to PAYMENT_LINK_READY and writes checkout.created.
+      await saveCheckout(q, { ...needLease(), squareOrderId: refs.squareOrderId, paymentLinkId: refs.paymentLinkId, url: refs.url });
     },
-    async saveEvent(businessId, bookingId, eventId) {
-      const updated = await q.query(`update public.bookings set google_event_id = $3 where id = $1 and business_id = $2 and status = 'RECHECKING_SLOT'
-        and (google_event_id is null or google_event_id = $3) returning id`, [bookingId, businessId, eventId]);
-      if (updated.rows.length !== 1) throw { code: 'INVALID_STATE', requestSent: false };
+    async saveEvent(_businessId, _bookingId, eventId) {
+      // verify_booking (0005): stores the event ID, moves to BOOKED_VERIFIED, writes booking.verified and
+      // sync.queued, enqueues the one Sheets job and finishes the calendar step, all under the lease.
+      await verifyBooking(q, { ...needLease(), googleEventId: eventId });
+      state.finished = true;
     },
     async moveOrder(businessId, orderId, status) {
       const order = await lockOrder(businessId, orderId);
       if (order.status === status) return;
-      await orderMoved(order, status);
+      if (ROUTINE_ORDER_STATES.includes(status) || !canTransition('order', order.status, status)) throw { code: 'INVALID_STATE', requestSent: false };
+      await guardedMove('orders', order, status);
+      await event(businessId, order.callId, { type: 'order.status_changed', payload: { subjectId: order.id, orderId: order.id, callId: order.callId, from: order.status, to: status } });
     },
     async moveBooking(businessId, bookingId, status, alternatives?: AvailabilitySlot[]) {
       void alternatives; // carried on the booking.slot_conflict event the handler writes
       const booking = await lockBooking(businessId, bookingId);
       if (booking.status === status) return;
-      await bookingMoved(booking, status);
-      if (status === 'BOOKED_VERIFIED') {
-        // Entering BOOKED_VERIFIED creates the one Sheets job for the booking (SPEC 2.9), in this transaction.
-        await event(businessId, booking.approvalId ?? booking.id, { type: 'booking.verified', payload: {
-          bookingId, googleEventId: booking.googleEventId!, serviceName: booking.serviceName, startUtc: booking.startUtc, timezone: booking.timezone } });
-        const job = await enqueueSheetsSync(q, { businessId, recordType: 'booking', recordId: bookingId });
-        await event(businessId, booking.approvalId ?? booking.id, { type: 'sync.queued', payload: { target: 'google_sheets', syncJobId: job.id, recordType: 'booking', recordId: bookingId } });
-      }
+      if (ROUTINE_BOOKING_STATES.includes(status) || !canTransition('booking', booking.status, status)) throw { code: 'INVALID_STATE', requestSent: false };
+      await guardedMove('bookings', booking, status);
+      await event(businessId, booking.callId ?? booking.id, { type: 'booking.status_changed', payload: { subjectId: booking.id, bookingId: booking.id, ...(booking.callId ? { callId: booking.callId } : {}), from: booking.status, to: status } });
     },
     async updateFact() {
       // local.fact.update runs only through the policy engine's runFactUpdate (one claim, one transaction).
@@ -182,10 +181,10 @@ export type DbExecutor = Executor & {
   drain(): Promise<void>;
 };
 
-export type DbExecutorOptions = { workerId?: string; intervalMs?: number; staleAfterMs?: number; interim: InterimDb };
+export type DbExecutorOptions = { workerId?: string; intervalMs?: number; staleAfterMs?: number };
 
 /** The executor and the Sheets job runner over the database and the configured adapters. */
-export function createDbExecutor(deps: SeamDeps, options: DbExecutorOptions): DbExecutor {
+export function createDbExecutor(deps: SeamDeps, options: DbExecutorOptions = {}): DbExecutor {
   const { db, providers, engine, log } = deps;
   const workerId = options.workerId ?? deps.newId('wrk_');
   const businessNames = new Map<string, string>();
@@ -220,7 +219,11 @@ export function createDbExecutor(deps: SeamDeps, options: DbExecutorOptions): Db
         const row = await one(tx, 'select business_id, attempts from public.action_executions where id = $1', [executionId]);
         if (!row) throw new Error('execution not found');
         const businessId = String(row.business_id);
-        if (outcome.apply) await outcome.apply(dbSubjects(tx, deps));
+        const lease: WorkerLease = { businessId, executionId, workerId: worker, attempt: Number(row.attempts) };
+        const state = { finished: false };
+        if (outcome.apply) await outcome.apply(dbSubjects(tx, deps, lease, state));
+        // verify_booking finishes the calendar step itself, in this transaction.
+        if (state.finished) return;
         await finishExecution(tx, {
           businessId, executionId, workerId: worker, attempt: Number(row.attempts), status: outcome.status,
           externalRef: outcome.externalRef ?? null,
@@ -229,7 +232,17 @@ export function createDbExecutor(deps: SeamDeps, options: DbExecutorOptions): Db
         });
       });
     },
-    recoverStale: (input) => options.interim.recoverStaleExecutions(input),
+    async recoverStale({ olderThan }) {
+      // private.recover_stale_executions, per business, on the database clock. It moves the subject as a
+      // failed step would and writes execution.failed itself, so nothing is returned for the executor to
+      // audit again. The routine wants a window (at least one minute), not a cutoff.
+      const staleAfterMs = Math.max(MIN_STALE_AFTER_MS, deps.now().getTime() - olderThan.getTime());
+      for (const b of await all(db, "select distinct business_id from public.action_executions where status = 'RUNNING' order by business_id", [])) {
+        const moved = await recoverStaleExecutions(db, { businessId: String(b.business_id), staleAfterMs });
+        for (const m of moved) log.warn({ job: 'executor', executionId: m.id }, 'stale step moved to NEEDS_REVIEW');
+      }
+      return [];
+    },
   };
 
   const executorDeps: ExecutorDeps = {
@@ -278,6 +291,20 @@ export function createDbExecutor(deps: SeamDeps, options: DbExecutorOptions): Db
         return { ok: false, reason: r.reason, retryable: r.retryable, ...(r.alternatives ? { alternatives: r.alternatives } : {}) };
       },
     },
+    prices: {
+      async update({ executionId, approvalId, idempotencyKey, attempt }) {
+        if (!providers.prices) throw { code: 'INTEGRATION_UNAVAILABLE', requestSent: false, retryable: true };
+        const row = await one(db, 'select a.* from public.approval_requests a join public.action_executions e on e.approval_id = a.id where e.id = $1 and a.id = $2', [executionId, approvalId]);
+        if (!row) throw { code: 'NOT_FOUND', requestSent: false };
+        const approval = approvalFromRow(row);
+        if (approval.bundleType !== 'price_edit') throw { code: 'INVALID_STATE', requestSent: false };
+        return executePriceEditStep({ approval, idempotencyKey, attempt }, { square: providers.prices });
+      },
+      async sync({ businessId, attempt }) {
+        const square = providers.square;
+        return executeCatalogSyncStep({ businessId, attempt }, { sync: async (id) => { if (!square) throw new Error('Square is not configured'); await square.syncCatalog(db, id); } });
+      },
+    },
     templates: {
       checkout: ({ order, url }) => renderCheckoutMessage({ businessName: nameOf(order.businessId), url }).body,
       booking: ({ booking, approved }: { booking: Booking; approved: BookingApprovalPayload }) => renderBookingConfirmation({
@@ -297,6 +324,11 @@ export function createDbExecutor(deps: SeamDeps, options: DbExecutorOptions): Db
     workerId,
     queue: {
       async claimNext(worker) {
+        // A Sheets job left RUNNING past its lease goes back to RETRYING (or FAILED at the limit); the
+        // runner looks the record ID up before appending, so a retry never writes a second row.
+        for (const b of await all(db, "select distinct business_id from public.sync_jobs where state = 'RUNNING' and lease_deadline <= now() order by business_id", [])) {
+          await recoverStaleSyncJobs(db, { businessId: String(b.business_id) });
+        }
         for (const j of await all(db, `select id, business_id from public.sync_jobs where state in ('PENDING','RETRYING') and attempts < 5
           and next_retry_at <= now() order by next_retry_at, id limit 20`, [])) {
           const row = await claimSyncJob(db, { businessId: String(j.business_id), syncJobId: String(j.id), workerId: worker });

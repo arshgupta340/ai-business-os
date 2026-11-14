@@ -13,7 +13,7 @@ import {ErrorState} from '@/components/ErrorState';
 import {LoadingState} from '@/components/LoadingState';
 import {PageHeader} from '@/components/PageHeader';
 import {SandboxBadge} from '@/components/SandboxBadge';
-import {isApiError, useActivity, useActivityFeed, useApprovals, useCatalog, useFacts, type ApprovalRequest} from '@/lib/api';
+import {isApiError, useActivity, useActivityFeed, useApprovals, useCatalog, useFacts, type ActivityEventType, type ApprovalRequest} from '@/lib/api';
 import {formatDateTime} from '@/lib/format';
 import {ApprovalDecisionDialog} from '../../../approvals/_components/ApprovalDecisionDialog';
 import {approvalByVariation, mergeExecutionEvents, priceConflictFor} from '../_lib/price-row';
@@ -22,7 +22,7 @@ import {PriceRow} from './PriceRow';
 
 export type PricesScreenProps = {businessId: string; businessName: string; timezone: string};
 
-const EXECUTION_EVENT_TYPES = ['execution.started', 'execution.succeeded', 'execution.failed'];
+const EXECUTION_EVENT_TYPES: ActivityEventType[] = ['execution.started', 'execution.succeeded', 'execution.failed'];
 
 /**
  * Price edit (U-13). Mount with key={businessId} so the changes proposed here

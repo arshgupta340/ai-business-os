@@ -7,7 +7,9 @@ import { AppError } from '../../errors';
 import { InMemoryConflictStore } from '../extraction/stores';
 import { multipartBody, pdf, PIZZA_MENU_TEXT } from '../extraction/test-samples';
 import type { BuilderPluginOptions } from '../index';
-import { InMemoryAgentDraftStore } from '../session/stores';
+import { FixtureBusinessKnowledge, type BusinessContext, type BusinessKnowledge } from '../session/knowledge';
+import { InMemoryAgentDraftStore, InMemoryDraftFactStore } from '../session/stores';
+import type { IntegrationHealthReader } from './integrations';
 import { RecordingCatalogSync, type CatalogSync } from './catalog-sync';
 import { InMemoryAgentVersionStore, InMemoryLiveAgentStore, InMemoryPublishEventSink } from './stores';
 
@@ -62,7 +64,24 @@ class SlowVersionStore extends InMemoryAgentVersionStore {
   }
 }
 
-async function harness(overrides: { syncCatalog?: CatalogSync; versions?: InMemoryAgentVersionStore } = {}): Promise<Harness> {
+// The fixture knowledge with one change made to the pizza business.
+function pizzaKnowledge(change: (ctx: BusinessContext) => BusinessContext): BusinessKnowledge {
+  const base = new FixtureBusinessKnowledge();
+  return {
+    async getContext(businessId) {
+      const ctx = await base.getContext(businessId);
+      return ctx && businessId === 'biz_pizza_01' ? change(ctx) : ctx;
+    },
+  };
+}
+
+async function harness(overrides: {
+  syncCatalog?: CatalogSync;
+  versions?: InMemoryAgentVersionStore;
+  knowledge?: BusinessKnowledge;
+  integrations?: IntegrationHealthReader;
+  draftFacts?: InMemoryDraftFactStore;
+} = {}): Promise<Harness> {
   const h = {
     agents: new InMemoryAgentDraftStore(),
     versions: overrides.versions ?? new InMemoryAgentVersionStore(),
@@ -74,7 +93,12 @@ async function harness(overrides: { syncCatalog?: CatalogSync; versions?: InMemo
   const options: Partial<BuilderPluginOptions> = {
     agents: h.agents,
     extraction: { conflicts: h.conflicts },
-    publish: { versions: h.versions, liveAgents: h.liveAgents, events: h.events, syncCatalog: overrides.syncCatalog ?? h.catalog.sync },
+    publish: {
+      versions: h.versions, liveAgents: h.liveAgents, events: h.events, syncCatalog: overrides.syncCatalog ?? h.catalog.sync,
+      ...(overrides.integrations ? { integrations: overrides.integrations } : {}),
+    },
+    ...(overrides.knowledge ? { knowledge: overrides.knowledge } : {}),
+    ...(overrides.draftFacts ? { draftFacts: overrides.draftFacts } : {}),
   };
   holder.options = options as Record<string, unknown>;
   const app = await buildApp(parseEnv({}));
@@ -507,19 +531,40 @@ describe('rollback', () => {
     expect((await get(h.app, `/api/agents/${id}?${PIZZA}`)).json().activeVersionId).toBe(v1.id);
   });
 
-  it('a paused agent goes live again on rollback, and the number follows only if it answers it', async () => {
+  // SPEC 2.9 (proposed row): rollback moves only the active version. This
+  // replaces the earlier test in which a paused agent went live on rollback.
+  it('a paused agent stays paused on rollback: only the active version moves, and the number does not move to it', async () => {
     const h = await harness();
     const id = await createAgent(h);
     const v1 = (await publish(h, id, { confirm: true, makeLive: false })).json().version;
     await editDraft(h, id, 'Second goal.');
-    await publish(h, id, { confirm: true, makeLive: false });
+    const v2 = (await publish(h, id, { confirm: true, makeLive: false })).json().version;
     await post(h.app, `/api/agents/${id}/pause?${PIZZA}`);
     h.events.events.length = 0;
     const res = (await post(h.app, `/api/agents/${id}/rollback?${PIZZA}`, { toVersionId: v1.id, confirm: true })).json();
-    expect(res.agent).toMatchObject({ state: 'live', activeVersionId: v1.id, isLiveAgent: false });
+    expect(res.agent).toMatchObject({ state: 'paused', activeVersionId: v1.id, isLiveAgent: false });
     expect(res.phoneNumber).toBe(NUMBER);
+    expect((await get(h.app, `/api/agents/${id}?${PIZZA}`)).json()).toMatchObject({ state: 'paused', activeVersionId: v1.id });
     expect(h.events.events.map((e) => e.type)).toEqual(['agent.published']);
     expect(await h.liveAgents.get()).toBeUndefined();
+
+    // makeLive would move the number to a paused agent: refused, and nothing changes.
+    const moved = await post(h.app, `/api/agents/${id}/rollback?${PIZZA}`, { toVersionId: v2.id, confirm: true, makeLive: true });
+    expect(moved.json()).toMatchObject({ code: 'INVALID_STATE' });
+    expect(await h.liveAgents.get()).toBeUndefined();
+    expect((await get(h.app, `/api/agents/${id}?${PIZZA}`)).json()).toMatchObject({ state: 'paused', activeVersionId: v1.id });
+  });
+
+  it('a paused agent that answers the number stays paused on rollback, and the number follows its new version', async () => {
+    const h = await harness();
+    const id = await createAgent(h);
+    const v1 = (await publish(h, id, { confirm: true, makeLive: true })).json().version;
+    await editDraft(h, id, 'Second goal.');
+    await publish(h, id, { confirm: true, makeLive: true });
+    await post(h.app, `/api/agents/${id}/pause?${PIZZA}`);
+    const res = (await post(h.app, `/api/agents/${id}/rollback?${PIZZA}`, { toVersionId: v1.id, confirm: true })).json();
+    expect(res.agent).toMatchObject({ state: 'paused', activeVersionId: v1.id, isLiveAgent: true });
+    expect(await h.liveAgents.get()).toMatchObject({ agentId: id, agentVersionId: v1.id });
   });
 
   it('rollback with makeLive true (in the package RollbackBodySchema) moves the number to the agent', async () => {
@@ -555,5 +600,93 @@ describe('calls keep their pinned version', () => {
     expect(JSON.stringify(pinned)).toBe(before);
     expect(JSON.stringify(await h.versions.get('biz_pizza_01', pinnedId))).toBe(before);
     expect((await h.versions.listByAgent('biz_pizza_01', id)).map((v) => v.version)).toEqual([2, 1]);
+  });
+});
+
+describe('publish: stop conditions (FLOWS.md, Builder stop conditions)', () => {
+  it('a missing time zone, consent policy and price are VALIDATION_FAILED with one issue per stop condition code', async () => {
+    const knowledge = pizzaKnowledge((ctx) => ({
+      ...ctx,
+      profile: { id: ctx.profile.id, name: ctx.profile.name, category: ctx.profile.category },
+      catalogItemCount: 0,
+      verifiedFacts: ctx.verifiedFacts.filter((f) => !(f.kind === 'policy' && f.key === 'message_consent')),
+    }));
+    const h = await harness({ knowledge });
+    const id = await createAgent(h);
+    const res = await publish(h, id);
+    expect(res.statusCode).toBe(400);
+    const body = res.json();
+    expect(body.code).toBe('VALIDATION_FAILED');
+    expect(body.details.issues.map((i: { code: string }) => i.code).sort()).toEqual(['missing_message_consent_policy', 'missing_price', 'missing_timezone']);
+    for (const issue of body.details.issues) expect(issue).toMatchObject({ path: issue.code, message: expect.any(String) });
+    expect(await h.versions.listByAgent('biz_pizza_01', id)).toHaveLength(0);
+    expect((await get(h.app, `/api/agents/${id}?${PIZZA}`)).json().state).toBe('draft');
+    expect(h.events.events).toHaveLength(0);
+  });
+
+  it('each missing fact alone is reported with its own code', async () => {
+    const cases: [string, (ctx: BusinessContext) => BusinessContext][] = [
+      ['missing_timezone', (ctx) => ({ ...ctx, profile: { id: ctx.profile.id, name: ctx.profile.name, category: ctx.profile.category } })],
+      ['missing_message_consent_policy', (ctx) => ({ ...ctx, verifiedFacts: ctx.verifiedFacts.filter((f) => f.key !== 'message_consent') })],
+      ['missing_price', (ctx) => ({ ...ctx, catalogItemCount: 0 })],
+    ];
+    for (const [code, change] of cases) {
+      const h = await harness({ knowledge: pizzaKnowledge(change) });
+      const id = await createAgent(h);
+      const res = await publish(h, id);
+      expect(res.json()).toMatchObject({ code: 'VALIDATION_FAILED', details: { issues: [{ code }] } });
+      expect(res.json().details.issues).toHaveLength(1);
+    }
+  });
+
+  it('a consent policy is not needed by an agent that sends no messages', async () => {
+    const h = await harness({ knowledge: pizzaKnowledge((ctx) => ({ ...ctx, verifiedFacts: ctx.verifiedFacts.filter((f) => f.key !== 'message_consent') })) });
+    const id = await createAgent(h, FAQ_SPEC);
+    expect((await publish(h, id)).statusCode).toBe(200);
+  });
+
+  it('a required integration that is down is INTEGRATION_UNAVAILABLE; degraded or unrelated providers do not stop it', async () => {
+    let health: Awaited<ReturnType<IntegrationHealthReader['read']>> = { square: { state: 'disconnected' } };
+    const integrations: IntegrationHealthReader = { read: async () => health };
+    const h = await harness({ integrations });
+    const id = await createAgent(h);
+    const down = await publish(h, id);
+    expect(down.statusCode).toBe(503);
+    expect(down.json()).toMatchObject({ code: 'INTEGRATION_UNAVAILABLE', retryable: true, details: { provider: 'square', providers: ['square'] } });
+    expect(await h.versions.listByAgent('biz_pizza_01', id)).toHaveLength(0);
+
+    // The FAQ agent needs no provider, so a disconnected Square does not stop it.
+    const faq = await createAgent(h, FAQ_SPEC);
+    expect((await publish(h, faq, { confirm: true, makeLive: false })).statusCode).toBe(200);
+
+    health = { square: { state: 'degraded' }, message_channel: { state: 'connected' }, google_calendar: { state: 'disconnected' } };
+    expect((await publish(h, id)).statusCode).toBe(200);
+  });
+
+  it('without an integration reader, publish does not check integrations', async () => {
+    const h = await harness();
+    const id = await createAgent(h);
+    expect((await publish(h, id)).statusCode).toBe(200);
+  });
+
+  it('an open required conflict the knowledge reports stays CONFLICT_UNRESOLVED', async () => {
+    const h = await harness({ knowledge: pizzaKnowledge((ctx) => ({ ...ctx, openRequiredConflictIds: ['cfl_db_01'] })) });
+    const id = await createAgent(h);
+    const res = await publish(h, id);
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'CONFLICT_UNRESOLVED', details: { conflictIds: ['cfl_db_01'] } });
+  });
+
+  it('unconfirmed chat drafts do not stop a publish', async () => {
+    const draftFacts = new InMemoryDraftFactStore();
+    await draftFacts.insertDraft({
+      id: 'fact_chat_draft_01', businessId: 'biz_pizza_01', kind: 'policy', key: 'pickup_window', value: { text: '30 minutes' },
+      sourceType: 'owner_chat', sourceRef: 'bld_test_01', status: 'draft', confidence: 0.8, version: 1,
+      createdAt: '2026-11-13T19:00:00Z', updatedAt: '2026-11-13T19:00:00Z',
+    });
+    const h = await harness({ draftFacts });
+    const id = await createAgent(h);
+    expect((await publish(h, id)).statusCode).toBe(200);
+    expect(await draftFacts.listBySession('biz_pizza_01', 'bld_test_01')).toHaveLength(1);
   });
 });

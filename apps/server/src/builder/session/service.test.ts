@@ -1,11 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
+import type { ProposeFactFromChat as ComposedProposeFactFromChat } from '../../compose/builder';
 import { AgentService, noLiveAgent } from '../agents';
 import { BuilderAgentSpecSchema } from '../spec';
 import { isRegisteredCapability, toolsForCapabilities, validateCapabilitySet } from '../registry';
 import { FixtureBusinessKnowledge, type BusinessKnowledge } from './knowledge';
 import type { BuilderModel } from './model';
 import { RECORDED_SCRIPTS, RecordedBuilderModel } from './recorded-builder-model';
-import { BuilderSessionService } from './service';
+import { BuilderSessionService, type ProposeFactFromChat, type ProposeFactFromChatInput } from './service';
 import { InMemoryAgentDraftStore, InMemoryBuilderSessionStore, InMemoryDraftFactStore } from './stores';
 
 const now = () => new Date('2026-11-13T18:00:00Z');
@@ -270,5 +271,109 @@ describe('custom FAQ-only agent (B-29) on recorded responses', () => {
     expect(turn.reply.text).toContain('Left out of this agent: message.checkout.send runs only inside an approved bundle that order.propose opens.');
     // A registered capability that breaks a rule is not an unsupported request.
     expect(turn.unsupportedRequests).toEqual([]);
+  });
+});
+
+describe('proposeFactFromChat: a chat answer opens a fact_edit approval', () => {
+  function withPropose(propose: ProposeFactFromChat | undefined, model: BuilderModel = new RecordedBuilderModel(), knowledge: BusinessKnowledge = ASKING) {
+    const sessions = new InMemoryBuilderSessionStore();
+    const agents = new InMemoryAgentDraftStore();
+    const draftFacts = new InMemoryDraftFactStore();
+    const service = new BuilderSessionService({ sessions, agents, draftFacts, knowledge, model, now, ...(propose ? { proposeFactFromChat: propose } : {}) });
+    return { service, draftFacts };
+  }
+  function recording(result: () => Promise<{ approvalId: string; bundleType: 'fact_edit' }>) {
+    const calls: ProposeFactFromChatInput[] = [];
+    const propose: ProposeFactFromChat = async (input) => {
+      calls.push(input);
+      return result();
+    };
+    return { calls, propose };
+  }
+  // One turn that classifies the pizza agent and answers the consent policy.
+  const consentAnswer = (value: string): BuilderModel => ({
+    kind: 'recorded',
+    turn: async () => ({
+      reply: 'Got it.', template: 'restaurant_order_taker', capabilityIds: [], unsupportedRequests: [], confidence: 0.9,
+      name: 'Pizza Order Assistant', goal: 'Take pickup orders.', greeting: null, knowledgeScopes: null,
+      answers: [{ field: 'policy.message_consent', value }],
+    }),
+  });
+
+  it('the composition function fits the plugin option', () => {
+    expectTypeOf<ComposedProposeFactFromChat>().toMatchTypeOf<ProposeFactFromChat>();
+  });
+
+  it('present, new key: proposes with fromVersion 0 and before null, and the turn carries proposedChange', async () => {
+    const { calls, propose } = recording(async () => ({ approvalId: 'apv_chat_01', bundleType: 'fact_edit' }));
+    const { service, draftFacts } = withPropose(propose);
+    const s = await service.create({ businessId: 'biz_pizza_01', ownerId: 'usr_owner_01' });
+    const first = await service.message('biz_pizza_01', s.id, { text: RECORDED_SCRIPTS.pizza[0], inputMode: 'text' });
+    expect(first.proposedChange).toBeUndefined();
+    expect(calls).toEqual([]);
+    const second = await service.message('biz_pizza_01', s.id, { text: RECORDED_SCRIPTS.pizza[1], inputMode: 'text' });
+    expect(second.proposedChange).toEqual({ approvalId: 'apv_chat_01', bundleType: 'fact_edit' });
+    const drafts = await draftFacts.listBySession('biz_pizza_01', s.id);
+    expect(drafts).toHaveLength(1);
+    expect(calls).toEqual([{
+      businessId: 'biz_pizza_01', ownerUserId: 'usr_owner_01', kind: 'policy', key: 'message_consent', value: drafts[0]!.value,
+      reason: 'Owner answer in the builder chat.', fromVersion: 0, before: null,
+    }]);
+    expect(second.missingFields).toEqual([]);
+  });
+
+  it('absent: the answer is saved as a draft and no turn carries proposedChange', async () => {
+    const { service, draftFacts } = withPropose(undefined);
+    const s = await service.create({ businessId: 'biz_pizza_01', ownerId: 'usr_owner_01' });
+    await service.message('biz_pizza_01', s.id, { text: RECORDED_SCRIPTS.pizza[0], inputMode: 'text' });
+    const second = await service.message('biz_pizza_01', s.id, { text: RECORDED_SCRIPTS.pizza[1], inputMode: 'text' });
+    expect(second).not.toHaveProperty('proposedChange');
+    expect(await draftFacts.listBySession('biz_pizza_01', s.id)).toHaveLength(1);
+    expect(second.reply.text).not.toContain('still needs your confirmation');
+  });
+
+  it('absent: an answer that differs from a verified fact is still ignored, as before', async () => {
+    const { service, draftFacts } = withPropose(undefined, consentAnswer('Never text anyone.'), new FixtureBusinessKnowledge());
+    const s = await service.create({ businessId: 'biz_pizza_01', ownerId: 'usr_owner_01' });
+    const turn = await service.message('biz_pizza_01', s.id, { text: 'hi', inputMode: 'text' });
+    expect(turn).not.toHaveProperty('proposedChange');
+    expect(await draftFacts.listBySession('biz_pizza_01', s.id)).toEqual([]);
+  });
+
+  it('present, existing key: an answer that changes a verified fact uses that fact version and value', async () => {
+    const { calls, propose } = recording(async () => ({ approvalId: 'apv_chat_02', bundleType: 'fact_edit' }));
+    const knowledge = new FixtureBusinessKnowledge();
+    const verified = (await knowledge.getContext('biz_pizza_01'))!.verifiedFacts.find((f) => f.kind === 'policy' && f.key === 'message_consent')!;
+    const { service, draftFacts } = withPropose(propose, consentAnswer('Never text anyone.'), knowledge);
+    const s = await service.create({ businessId: 'biz_pizza_01', ownerId: 'usr_owner_01' });
+    const turn = await service.message('biz_pizza_01', s.id, { text: 'Do not send texts.', inputMode: 'text' });
+    expect(turn.proposedChange).toEqual({ approvalId: 'apv_chat_02', bundleType: 'fact_edit' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ kind: 'policy', key: 'message_consent', value: { text: 'Never text anyone.' }, fromVersion: verified.version, before: verified.value });
+    expect(await draftFacts.listBySession('biz_pizza_01', s.id)).toEqual([expect.objectContaining({ key: 'message_consent', status: 'draft' })]);
+  });
+
+  it('present, existing key: an answer that repeats the verified fact proposes nothing', async () => {
+    const { calls, propose } = recording(async () => ({ approvalId: 'apv_chat_03', bundleType: 'fact_edit' }));
+    const { service } = withPropose(propose, consentAnswer('May we send you one text message with your payment link at that number?'), new FixtureBusinessKnowledge());
+    const s = await service.create({ businessId: 'biz_pizza_01', ownerId: 'usr_owner_01' });
+    const turn = await service.message('biz_pizza_01', s.id, { text: 'hi', inputMode: 'text' });
+    expect(turn).not.toHaveProperty('proposedChange');
+    expect(calls).toEqual([]);
+  });
+
+  it('failure: the draft is kept, the turn succeeds, and the reply says confirmation is pending', async () => {
+    const { calls, propose } = recording(async () => {
+      throw new Error('approval engine down');
+    });
+    const { service, draftFacts } = withPropose(propose);
+    const s = await service.create({ businessId: 'biz_pizza_01', ownerId: 'usr_owner_01' });
+    await service.message('biz_pizza_01', s.id, { text: RECORDED_SCRIPTS.pizza[0], inputMode: 'text' });
+    const second = await service.message('biz_pizza_01', s.id, { text: RECORDED_SCRIPTS.pizza[1], inputMode: 'text' });
+    expect(calls).toHaveLength(1);
+    expect(second).not.toHaveProperty('proposedChange');
+    expect(second.reply.text).toContain('still needs your confirmation');
+    expect(second.missingFields).toEqual([]);
+    expect(await draftFacts.listBySession('biz_pizza_01', s.id)).toEqual([expect.objectContaining({ kind: 'policy', key: 'message_consent', status: 'draft' })]);
   });
 });

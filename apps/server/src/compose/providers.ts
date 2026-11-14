@@ -11,6 +11,7 @@ import { createCalendarAdapter, type CalendarAdapter } from '../adapters/calenda
 import { createMessageAdapter, type MessageAdapter } from '../adapters/message/index';
 import { createSheetsAdapter, type ReportingAdapter } from '../adapters/sheets/index';
 import { createSandboxSquareClient, createSquareAdapter, type SquareAdapter } from '../adapters/square/index';
+import { createPriceAdapter, type PriceAdapter } from '../adapters/square/price';
 import type { Env } from '../env';
 import type { HealthProbe } from './health';
 import { createTwilioRequestValidator, createWsOpenAISocketFactory, type OpenAISocketFactory, type TwilioRequestValidator } from '../voice/plugin';
@@ -21,6 +22,8 @@ export type ProviderStatus = { configured: boolean; detail: string; noProviderNe
 
 export interface Providers {
   square?: SquareAdapter | undefined;
+  /** P-11: read and write one variation's price at the configured location (sandbox only). */
+  prices?: PriceAdapter | undefined;
   /** The Square location the checkout order is built for (the adapter refuses any other). */
   squareLocationId?: string | undefined;
   /** Reads a payment's Square status (FAILED, CANCELED, ...) for a payment that did not verify. Read only. */
@@ -33,6 +36,8 @@ export interface Providers {
   message?: MessageAdapter | undefined;
   messageChannel: MessageChannelSetting;
   twilioValidator?: TwilioRequestValidator | undefined;
+  /** Twilio Calls update with inline TwiML, used only by human fallback (B-28). Honors the signal before sending. */
+  twilioCalls?: { update(input: { callSid: string; twiml: string; signal: AbortSignal }): Promise<void> } | undefined;
   openaiSocketFactory?: OpenAISocketFactory | undefined;
   /** Why each provider is or is not configured. Never holds a value from the environment. */
   status: Record<ProviderKey, ProviderStatus>;
@@ -66,16 +71,20 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   // Square: sandbox only (AGENTS rule 4). env.ts already refuses any other SQUARE_ENVIRONMENT.
   let square: SquareAdapter | undefined;
   let squarePaymentStatus: Providers['squarePaymentStatus'];
+  let prices: PriceAdapter | undefined;
   if (env.SQUARE_ACCESS_TOKEN && env.SQUARE_LOCATION_ID) {
     const client = createSandboxSquareClient({ accessToken: env.SQUARE_ACCESS_TOKEN });
     square = createSquareAdapter({ client, locationId: env.SQUARE_LOCATION_ID, environment: env.SQUARE_ENVIRONMENT, now });
+    prices = createPriceAdapter({ client, locationId: env.SQUARE_LOCATION_ID, environment: env.SQUARE_ENVIRONMENT });
     squarePaymentStatus = async (paymentId) => (await client.payments.get({ paymentId })).payment?.status ?? undefined;
     const locationId = env.SQUARE_LOCATION_ID;
+    // ListLocations: the cheapest read that proves the token and that the configured location exists.
+    // The sandbox factory's narrow type predates it; the SDK instance it returns provides it.
+    const locations = (client as unknown as { locations: { list(): Promise<{ locations?: { id?: string | null }[] | null }> } }).locations;
     probes.square = async () => {
       try {
-        const page = await client.payments.list({ locationId, beginTime: new Date(now().getTime() - 60_000).toISOString(), sortOrder: 'DESC', limit: 1 });
-        for await (const _ of page) break;
-        return fixed(true, 'sandbox reachable');
+        const r = await locations.list();
+        return (r.locations ?? []).some((l) => l.id === locationId) ? fixed(true, 'sandbox reachable') : fixed(false, 'configured Square location not found');
       } catch { return fixed(false, 'Square sandbox refused the read'); }
     };
     status.square = ok('sandbox');
@@ -135,10 +144,21 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
     status.message_channel = ok(messageChannel);
   }
 
+  let twilioCalls: Providers['twilioCalls'];
   const twilioValidator = env.TWILIO_AUTH_TOKEN ? createTwilioRequestValidator(env.TWILIO_AUTH_TOKEN) : undefined;
   status.twilio = env.TWILIO_AUTH_TOKEN && env.TWILIO_PHONE_NUMBER && env.PUBLIC_SERVER_URL ? ok() : missing('TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER', 'PUBLIC_SERVER_URL');
   if (status.twilio.configured && env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN) {
     const sid = env.TWILIO_ACCOUNT_SID; const token = env.TWILIO_AUTH_TOKEN;
+    twilioCalls = {
+      async update({ callSid, twiml, signal }) {
+        if (signal.aborted) throw new Error('aborted');
+        // The instruction is never logged; only the status decides the outcome.
+        const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Calls/${encodeURIComponent(callSid)}.json`, {
+          method: 'POST', signal, body: new URLSearchParams({ Twiml: twiml }),
+          headers: { Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString('base64')}`, 'Content-Type': 'application/x-www-form-urlencoded' } });
+        if (!res.ok) throw new Error('Twilio refused the call update');
+      },
+    };
     probes.twilio = async () => {
       try {
         const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}.json`, { method: 'GET', headers: { Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString('base64')}` }, signal: AbortSignal.timeout(5000) });
@@ -160,8 +180,8 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   }
 
   return {
-    square, squareLocationId: env.SQUARE_LOCATION_ID, squarePaymentStatus, calendar: calendarAdapter, calendarId: env.GOOGLE_CALENDAR_ID, sheets: sheetsAdapter, sheetId: env.GOOGLE_SHEET_ID,
-    message, messageChannel, twilioValidator, openaiSocketFactory, status, probes,
+    square, prices, squareLocationId: env.SQUARE_LOCATION_ID, squarePaymentStatus, calendar: calendarAdapter, calendarId: env.GOOGLE_CALENDAR_ID, sheets: sheetsAdapter, sheetId: env.GOOGLE_SHEET_ID,
+    message, messageChannel, twilioValidator, twilioCalls, openaiSocketFactory, status, probes,
     ...overrides,
   };
 }

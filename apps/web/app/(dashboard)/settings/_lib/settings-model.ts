@@ -5,7 +5,7 @@
  * Hours values use the shape from docs/CONTRACTS.md and the fixtures:
  * { open: "HH:MM", close: "HH:MM" } or { closed: true }, one fact per weekday.
  */
-import type {ActivityEvent, ActivityPayloads, ApprovalRequest, BusinessFact, FactEditApprovalPayload, FactKind} from '@/lib/api';
+import type {ActivityEvent, ActivityEventPayloads, ApprovalRequest, BusinessFact, FactEditApprovalPayload, FactKind} from '@/lib/api';
 import {
   WEEKDAYS,
   WEEKDAY_NAMES,
@@ -218,7 +218,7 @@ export function changeLogEntries(events: readonly ActivityEvent[], facts: readon
   for (const event of events) {
     if (event.type !== 'fact.changed' || seen.has(event.id)) continue;
     seen.add(event.id);
-    const p = event.payload as unknown as Partial<ActivityPayloads['fact.changed']>;
+    const p = event.payload as unknown as Partial<ActivityEventPayloads['fact.changed']>;
     if (typeof p.kind !== 'string' || typeof p.key !== 'string') continue;
     const kind = p.kind as FactKind;
     const next = typeof p.factId === 'string' ? byId.get(p.factId) : undefined;

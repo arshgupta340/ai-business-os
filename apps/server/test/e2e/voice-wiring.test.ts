@@ -23,7 +23,7 @@ describe('voice on (Twilio, OpenAI and PUBLIC_SERVER_URL set)', () => {
     const voice = w.app.composed.voice;
     if (!voice.ok) throw new Error('voice is off');
     const live = (await w.t.db.query('select agent_version_id from live_agent where business_id = $1', [PIZZA])).rows[0] as { agent_version_id: string };
-    const facts = await w.app.composed.toolsetPorts.facts!.readVerified({ businessId: PIZZA });
+    const facts = await w.app.composed.toolsetPorts.facts!.readVerified({ businessId: PIZZA, signal: new AbortController().signal });
     // Even a spec that lists every capability, write ones included, yields no write tool.
     const all = CAPABILITY_LIST.map((c) => c.id as CapabilityId);
     const toolset = voice.options.toolsetFactory({ businessId: PIZZA, agentVersionId: live.agent_version_id, callId: 'call_voice_test', capabilities: all, facts });

@@ -43,7 +43,7 @@ MSW normally runs as a service worker. Some browsers refuse to register one (emb
 - `POST /api/agents/:id/pause` has no documented body. The client returns nothing and the hook refetches.
 - A `price_edit` approval's `subjectId` is derived in the mock as `cat_<variation id>`. The UI never reads it.
 - `facts/propose` with `resolvesConflictId` on a `menu_item` conflict returns `VALIDATION_FAILED` in the mock. The docs say it is a price change and name no error.
-- A proposed fact with no verified row gets `before: null` and `fromVersion: 0`.
+- A new-key `fact_edit` uses a matching draft fact as its subject, with `before: null` and `fromVersion: 0`. Migration 0005 adds this support; until then the server returns `INVALID_STATE`.
 - Deciding an `EXPIRED` approval returns `APPROVAL_EXPIRED`. The same decision sent twice returns 200.
 - A network failure surfaces as `ApiError` with code `INTERNAL`, `retryable: true`, status 0. No new error code was added.
 - `stopConditions` is always empty in the mock. Its code values are not listed anywhere.
@@ -79,7 +79,7 @@ The builder was built before the contracts package (S-02), the mock toolset (S-0
 
 - Missing-field names follow `kind.key` (the API.md example is `policy.pickup_window`). The others are mine: `policy.special_requests`, `policy.message_consent`, `policy.min_notice` (renamed from `policy.minimum_notice` to match the fixture key `min_notice`, which the shared mock toolset reads), `hours.<day>`, `catalog.items`, `services`, `name`, `goal`.
 - Stop-condition codes: `missing_timezone` comes from API.md. `open_conflict` and `missing_message_consent_policy` are mine.
-- Owner chat answers are saved as draft facts (`sourceType: "owner_chat"`, `value: { text }`, confidence 0.8). They count as answered for the interview and are not verified. B-17 decides whether publish needs them confirmed through a `fact_edit`.
+- Owner chat answers are saved as draft facts (`sourceType: "owner_chat"`, `value: { text }`, confidence 0.8). The builder opens a `fact_edit` for each answer, using the draft subject for a new key, and the owner confirms it in chat.
 - `proposedChange` is never set yet. The builder cannot create an approval until the approval engine (B-07) exposes a function for it.
 - Preview scenarios `happy_path` and `price_injection` come from API.md. `approval_bypass` and the custom template's `happy_path` are mine.
 - Test runs pass `agentVersionId: "agv_draft_<agent suffix>"` to the tools. The package's `ToolContextSchema` requires an `agv_` ID, so the old `draft:<agt_id>` marker was dropped. No published version has this ID: those are `agv_` plus random hex.
@@ -168,12 +168,12 @@ A published version is a deep frozen copy of the spec. No code path updates or d
 
 ### Choices made where the docs were silent
 
-- Publish does not require owner chat answers to be verified. No publish rule asks for it. Open question for Arsh: the deployed agent reads verified facts only, so an answer given in the builder chat is never seen by the agent unless a `fact_edit` confirms it.
+- Publish does not refuse merely because unconfirmed chat drafts exist. It refuses when a fact the agent requires is not verified.
 - Publishing a live agent with an unchanged draft writes a new version. API.md covers only the paused case, where no new version is written.
 - Pause is allowed only from `live` and does not change which agent answers the number (API.md: "The `live_agent` row does not change").
-- Rollback follows API.md 3.4 and DATA-MODEL 2.10: it points the active version back at the earlier one and writes no row. A paused agent goes live on rollback, and the draft spec is not changed. API.md is silent on both.
+- Rollback points the active version at the earlier one and writes no version row. A paused agent stays paused, and the draft spec is not changed.
 - `makeLive` defaults to false. If the agent already answers the number, the number follows its new version even with `makeLive: false`.
-- Publish runs the catalog sync on every call, then the conflict check, then spec validation, in the order API.md lists them. The other stop conditions in FLOWS (missing price, missing time zone, an integration down) are not checked at publish. Open question for Arsh.
+- Publish runs the catalog sync on every call, then the conflict check, then spec validation, in the order API.md lists them. The other stop conditions in FLOWS (missing price, missing time zone, an integration down) are not checked at publish yet. SPEC 2.9 has a proposed ruling that publish checks all of them.
 - The publish and rollback responses always include `phoneNumber` (the package's `PublishResponse` requires it). `agent.isLiveAgent` says whether this agent answers it. Pause returns the agent summary itself (the package's `pauseAgent` response is `Agent`).
 - Rollback honors `makeLive` (it is in the package's `RollbackBodySchema`): true moves the number to the agent, as on publish.
 - Events use the `agt_` ID as `correlationId` and `actorType: "owner"`.

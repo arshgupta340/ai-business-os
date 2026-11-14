@@ -7,6 +7,8 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { healthRoutes } from './api/health';
 import { apiRoutes } from './api/routes';
 import { registerSimCall } from './api/simcall/index';
+import { pricesPlugin } from './api/prices/index';
+import { createRecoveryPlugin } from './api/recovery/index';
 import { createAuthGuard, routeAuthPolicyOf, withAuthPolicy, type RouteAuthPolicy } from './auth/verify';
 import { builderPlugin } from './builder/index';
 import { composeServer, type ComposeOptions, type ComposedServer } from './compose/index';
@@ -100,13 +102,14 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
   // Authenticates every contract route Arsh owns. Builder routes use their own BuilderAuth seam.
   app.addHook('preHandler', createAuthGuard(composed.db, composed.verifier));
 
-  await app.register(healthRoutes, { env });
+  await app.register(healthRoutes, { env, ...(composed.databaseProbe ? { database: composed.databaseProbe } : {}) });
   await app.register(withAuthPolicy('owner', apiRoutes), { db: composed.db, ports: composed.enginePorts, env, catalog: composed.catalogSync, providerStatus: composed.providers.status, health: composed.health });
   await app.register(withAuthPolicy('owner', async (scope) => {
     registerSimCall(scope, { db: composed.db, calls: composed.calls, toolsetFor: composed.toolsetFor, model: composed.agentModel, now: composed.now, newId: composed.newId });
   }));
-  // The builder authenticates its own routes through BuilderAuth (composed.builder.auth).
-  await app.register(withAuthPolicy('builder', builderPlugin), composed.builder);
+  // The builder authenticates its own routes through BuilderAuth (composed.builder.auth). Every builder
+  // route declares config { auth: 'builder' } itself, which the default-deny guard reads.
+  await app.register(builderPlugin, composed.builder);
 
   // Phone calls (B-15). Off, with a log line naming the missing settings, when a key is absent.
   // When it is off, the voice webhook answers 503 (Twilio retries later) and /ws/phone does not exist.
@@ -121,6 +124,12 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
         code: 'INTEGRATION_UNAVAILABLE', message: 'Phone voice is not configured on this server.', correlationId: request.correlationId, retryable: true }));
     });
   }
+
+  // P-11 price change proposals (B-26). The global guard authenticates the owner and the business first.
+  await app.register(withAuthPolicy('owner', pricesPlugin), composed.prices);
+
+  // Order cancel and NEEDS_REVIEW resolution (B-32). The plugin re-checks the owner and the business.
+  await app.register(withAuthPolicy('owner', createRecoveryPlugin(composed.recovery)));
 
   // GET /api/telemetry (B-30). The global guard has already authenticated the owner.
   await app.register(withAuthPolicy('owner', telemetryPlugin), composed.telemetry);

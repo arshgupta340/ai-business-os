@@ -19,9 +19,19 @@ import type {
   ServiceOffering,
   ToolFailureReason,
   ToolHandler,
+  ToolContext,
+  ToolName,
+  ToolInput,
+  ToolResult,
   ToolTraceEntry,
   Toolset,
 } from '@abos/contracts';
+
+/** One deadline owned by the caller and propagated through every port. */
+export type InvocationControl = { signal: AbortSignal; timeoutMs: number };
+export interface CancellableToolHandler extends ToolHandler {
+  call<N extends ToolName>(name: N, input: ToolInput[N], ctx: ToolContext, control?: InvocationControl): Promise<ToolResult<N>>;
+}
 
 /** Server context every port call carries. The model never supplies any of it. */
 export type PortContext = {
@@ -30,11 +40,14 @@ export type PortContext = {
   callId?: string | undefined;
   testSessionId?: string | undefined;
   correlationId: string;
+  /** Stable operation ID checked uniquely by the proposal database routine. */
+  operationId: string;
+  signal: AbortSignal;
 };
 
 /** Searches the cached catalog (`catalog_items`, P-10). Returns at most `limit` items of this business. */
 export interface CatalogPort {
-  search(args: { businessId: string; query?: string | undefined; limit: number }): Promise<CatalogItem[]>;
+  search(args: { businessId: string; query?: string | undefined; limit: number; signal: AbortSignal }): Promise<CatalogItem[]>;
 }
 
 /** The verified facts of a business, without `menu_item` drafts. Immutable once pinned to a call. */
@@ -45,14 +58,14 @@ export type FactsSnapshot = {
 
 /** Reads the verified hours, policies, services, contacts and FAQs of a business. */
 export interface FactsPort {
-  readVerified(args: { businessId: string }): Promise<FactsSnapshot>;
+  readVerified(args: { businessId: string; signal: AbortSignal }): Promise<FactsSnapshot>;
 }
 
 export type QuotePortResult = { ok: true; quote: Quote } | { ok: false; reason: 'ITEM_UNAVAILABLE'; message?: string | undefined };
 
 /** Prices a cart with Square CalculateOrder. Throws only when the provider cannot be reached. */
 export interface QuotePort {
-  quote(args: { businessId: string; cart: Cart }): Promise<QuotePortResult>;
+  quote(args: { businessId: string; cart: Cart; signal: AbortSignal }): Promise<QuotePortResult>;
 }
 
 export type OrderProposalInput = PortContext & {
@@ -87,18 +100,20 @@ export type BookingProposalResult =
  * hours, availability, the slot) and performs no external write.
  */
 export interface ProposalPort {
+  /** Only set by an adapter backed by an active-call checked, operation-ID unique routine. */
+  readonly atomicOperations?: true;
   createOrderProposal(input: OrderProposalInput): Promise<OrderProposalResult>;
   createBookingProposal(input: BookingProposalInput): Promise<BookingProposalResult>;
 }
 
-export type OrderStatusView = { orderId: string; status: OrderStatus; paid: boolean; checkoutLinkSent: boolean };
+export type OrderStatusView = { businessId: string; callId: string; orderId: string; status: OrderStatus; paid: boolean; checkoutLinkSent: boolean };
 
 /**
  * Reads the verified status of one order. Must return null unless the order belongs to `businessId`
  * and, when `callId` is given, to that call (FLOWS 8, swapped proposal ID).
  */
 export interface OrderStatusPort {
-  read(args: { businessId: string; orderId: string; callId?: string | undefined }): Promise<OrderStatusView | null>;
+  read(args: { businessId: string; orderId: string; callId?: string | undefined; signal: AbortSignal }): Promise<OrderStatusView | null>;
 }
 
 /**
@@ -113,6 +128,7 @@ export interface AvailabilityPort {
     hours: { open: string; close: string };
     timezone: string;
     maxSlots: number;
+    signal: AbortSignal;
   }): Promise<AvailabilitySlot[]>;
 }
 
@@ -135,7 +151,7 @@ export type RealToolsetDeps = {
   factsSnapshot?: FactsSnapshot | undefined;
   /** The pinned agent version's capabilities. Only tools for these are callable. Defaults to all seven tools. */
   capabilities?: readonly CapabilityId[] | undefined;
-  /** Clock for quote expiry, read-back and pickup checks. */
+  /** Clock for quote expiry and pickup checks. */
   now?: (() => Date) | undefined;
   /** Overrides the registry `timeoutMs` of every tool (tests). */
   toolTimeoutMs?: number | undefined;
@@ -148,12 +164,12 @@ export type SafeTraceOutput = { ok: boolean; reason?: string; missingFields?: st
 export type RealToolset = {
   readonly businessId: string;
   /** The `ToolHandler` the voice worker and sim-call use. Every call is validated and traced. */
-  readonly handler: ToolHandler;
+  readonly handler: CancellableToolHandler;
   /** The same seven tools as functions, through the same validation and trace. */
   readonly tools: Toolset;
   /** A copy of the most recent calls, oldest first. Metadata only (`SafeTraceInput`, `SafeTraceOutput`). */
   trace(): ToolTraceEntry[];
   clearTrace(): void;
-  /** Ends the toolset: clears quotes, the read-back state and the trace. Later calls fail closed. */
+  /** Ends the toolset: aborts outstanding work and clears quotes, reservations and the trace. Later calls fail closed. */
   dispose(): void;
 };

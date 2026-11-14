@@ -5,14 +5,14 @@
  * so every rule is unit tested on its own.
  */
 import {
-  CAPABILITY_REGISTRY,
+  CAPABILITIES,
   payloadOf,
   type ActivityEvent,
   type Agent,
   type AgentSpec,
   type AgentVersion,
   type ApiError,
-  type CapabilityEffect,
+  type Effect,
   type CapabilityId,
 } from '@/lib/api';
 import type {Tone} from '@/lib/status';
@@ -131,7 +131,7 @@ export type CapabilityChange = 'added' | 'removed' | 'unchanged';
 export type CapabilityDiffRow = {
   id: CapabilityId;
   description: string;
-  effect: CapabilityEffect;
+  effect: Effect;
   change: CapabilityChange;
 };
 
@@ -178,7 +178,7 @@ export function diffCapabilities(before: readonly string[] | undefined, after: r
 }
 
 export function capabilityDescription(id: CapabilityId): string {
-  return CAPABILITY_REGISTRY[id].description;
+  return CAPABILITIES[id].description;
 }
 
 // ------------------------------------------------------------ knowledge snapshot

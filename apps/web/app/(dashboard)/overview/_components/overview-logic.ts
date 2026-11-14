@@ -351,7 +351,7 @@ export function describeEvent(
       return {title: `${provider} webhook rejected, nothing changed`, payment: p.provider === 'square'};
     }
     default:
-      return {title: humanize(String(event.type)), payment: false};
+      return {title: humanize(String((event as ActivityEvent).type)), payment: false};
   }
 }
 

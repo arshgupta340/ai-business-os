@@ -237,3 +237,27 @@ describe('voice plugin: /ws/phone', () => {
     first.terminate();
   });
 });
+
+
+it('never reflects private URLs or malformed bodies through HTTP errors on voice paths', async () => {
+  const logs: string[] = [];
+  app = Fastify({ logger: { stream: { write: (line: string) => { logs.push(line); } } } });
+  await app.register(voicePlugin, { publicServerUrl: PUBLIC_URL, liveAgent: { resolve: async () => live }, facts: { snapshot: async () => PIZZA_SNAPSHOT }, calls: fakeCalls(), events: fakeEvents(), toolsetFactory: () => fakeToolset().toolset, twilioValidator: { validate: () => false }, openaiSocketFactory: () => new FakeSocket(), messageChannel: 'qr_only' });
+  await app.ready();
+  const secret = 'OpaqueStreamCredentialAbcdef12345';
+  const privateQuery = `?token=${secret}&phone=+15555550123&bill=https://bill.example/private`;
+  for (const method of ['GET', 'PUT', 'DELETE', 'OPTIONS'] as const) {
+    const response = await app.inject({ method, url: '/webhooks/twilio/voice' + privateQuery, headers: { authorization: 'Bearer private-bearer-value' } });
+    expect(response.statusCode).toBeGreaterThanOrEqual(400);
+    expect(response.body).not.toMatch(/OpaqueStream|15555550123|bill.example|private-bearer/);
+  }
+  for (const method of ['GET', 'POST', 'PUT', 'DELETE'] as const) {
+    const response = await app.inject({ method, url: '/ws/phone' + privateQuery });
+    expect(response.statusCode).toBeGreaterThanOrEqual(400);
+    expect(response.body).not.toMatch(/OpaqueStream|15555550123|bill.example/);
+  }
+  const malformed = await app.inject({ method: 'POST', url: '/webhooks/twilio/voice' + privateQuery, headers: { 'content-type': 'application/json' }, payload: `{"private":"${secret}"` });
+  expect(malformed.statusCode).toBeGreaterThanOrEqual(400);
+  expect(malformed.body).not.toContain(secret);
+  expect(logs.join('')).not.toMatch(/OpaqueStream|15555550123|bill.example|private-bearer/);
+});

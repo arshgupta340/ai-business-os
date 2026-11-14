@@ -5,6 +5,7 @@ import {
   type BuilderTurnResponse as ContractBuilderTurnResponse,
   type BusinessFact,
   type DraftAgentSpec,
+  type JsonValue,
 } from '@abos/contracts';
 import { BuilderAgentSpecSchema } from '../spec';
 import { toPlainSpokenText } from '../runner/plain-text';
@@ -31,9 +32,27 @@ const AI_DISCLOSURE = /\b(AI|artificial intelligence)\b/i;
 export type BuilderSessionView = BuilderSession;
 
 // The package's BuilderTurnResponse. `proposedChange` is present only when a
-// turn created a fact_edit or price_edit approval. This builder does not create
-// approvals yet (the approval engine is Arsh's), so it is never set today.
+// turn created a fact_edit approval through `proposeFactFromChat`.
 export type BuilderTurnResponse = ContractBuilderTurnResponse & { stopConditions: BuilderStopCondition[] };
+
+// Creates a fact_edit approval for an owner's chat answer (P-09). The server
+// composition passes the approval engine's version. The input is the shape of
+// compose/builder.ts ProposeFactFromChat plus `fromVersion` and `before`, which
+// the builder knows: 0 and null for a new key, else the verified fact's
+// version and value. A function that ignores those two still fits.
+export interface ProposeFactFromChatInput {
+  businessId: string;
+  ownerUserId: string;
+  kind: BusinessFact['kind'];
+  key: string;
+  value: JsonValue;
+  reason?: string;
+  fromVersion: number;
+  before: JsonValue | null;
+}
+export type ProposeFactFromChat = (input: ProposeFactFromChatInput) => Promise<{ approvalId: string; bundleType: 'fact_edit' }>;
+
+const CONFIRM_PENDING = 'I saved your answer as a draft, but I could not open the confirmation for it just now, so it still needs your confirmation.';
 
 export interface BuilderSessionDeps {
   sessions: BuilderSessionStore;
@@ -42,6 +61,8 @@ export interface BuilderSessionDeps {
   knowledge: BusinessKnowledge;
   model: BuilderModel;
   now: () => Date;
+  // Optional. Without it, chat answers stay drafts and no approval is created.
+  proposeFactFromChat?: ProposeFactFromChat;
 }
 
 export class BuilderSessionService {
@@ -126,18 +147,56 @@ export class BuilderSessionService {
     const { spec: nextSpec, patch, dropped } = mergeSpec(session.draftSpec, out, split.allowed, context);
 
     // Answers count only for fields that were missing and can be answered in chat.
+    // With proposeFactFromChat, an answer that changes a verified fact is
+    // also kept, so the owner can confirm the change (API.md facts/propose).
+    const propose = this.deps.proposeFactFromChat;
     const newDrafts: BusinessFact[] = [];
+    const replaces = new Map<string, BusinessFact>();
     for (const answer of out.answers) {
       const rule = fieldRule(answer.field);
       const value = answer.value.trim().slice(0, LIMITS.answer);
-      if (!rule?.answerableInChat || !before.missing.includes(answer.field) || !value) continue;
+      if (!rule?.answerableInChat || !value) continue;
       if (newDrafts.some((f) => `${f.kind}.${f.key}` === answer.field)) continue;
-      newDrafts.push(this.draftFact(businessId, sessionId, answer.field, value));
+      if (before.missing.includes(answer.field)) {
+        newDrafts.push(this.draftFact(businessId, sessionId, answer.field, value));
+        continue;
+      }
+      const verified = propose ? verifiedFact(context, answer.field) : undefined;
+      if (!verified || sameValue(verified.value, value) || priorDrafts.some((f) => `${f.kind}.${f.key}` === answer.field)) continue;
+      const draft = this.draftFact(businessId, sessionId, answer.field, value);
+      replaces.set(draft.id, verified);
+      newDrafts.push(draft);
     }
     for (const fact of newDrafts) await this.deps.draftFacts.insertDraft(fact);
 
+    // Each saved draft opens a fact_edit approval. The turn reports the first
+    // one. A failed call keeps the draft and says confirmation is pending.
+    let proposedChange: BuilderTurnResponse['proposedChange'];
+    let confirmPending = false;
+    if (propose) {
+      for (const fact of newDrafts) {
+        const current = replaces.get(fact.id);
+        try {
+          const created = await propose({
+            businessId,
+            ownerUserId: session.ownerId,
+            kind: fact.kind,
+            key: fact.key,
+            value: fact.value,
+            reason: 'Owner answer in the builder chat.',
+            fromVersion: current ? current.version : 0,
+            before: current ? current.value : null,
+          });
+          proposedChange ??= { approvalId: created.approvalId, bundleType: created.bundleType };
+        } catch {
+          confirmPending = true;
+        }
+      }
+    }
+
     const after = computeFieldStatus(nextSpec, context, [...priorDrafts, ...newDrafts]);
-    const replyText = composeReply(out.reply, unsupportedRequests, after, dropped);
+    const composed = composeReply(out.reply, unsupportedRequests, after, dropped);
+    const replyText = confirmPending ? `${composed} ${CONFIRM_PENDING}` : composed;
 
     const reply: BuilderMessage = {
       id: newId('bmsg_'),
@@ -165,6 +224,7 @@ export class BuilderSessionService {
       stopConditions: stopConditions(nextSpec, context, after),
       progress: progress(after),
       unsupportedRequests,
+      ...(proposedChange ? { proposedChange } : {}),
     };
   }
 
@@ -308,6 +368,24 @@ export function composeReply(
     if (question) parts.push(question);
   }
   return parts.filter(Boolean).join(' ');
+}
+
+function verifiedFact(context: BusinessContext, field: string): BusinessFact | undefined {
+  const dot = field.indexOf('.');
+  if (dot < 0) return undefined;
+  const kind = field.slice(0, dot);
+  const key = field.slice(dot + 1);
+  return context.verifiedFacts.find((f) => f.kind === kind && f.key === key && f.status === 'verified');
+}
+
+// An answer repeats a verified fact when its text equals the fact's text, or
+// any text field of the fact's value (for example a consent policy's wording).
+function sameValue(current: BusinessFact['value'], text: string): boolean {
+  if (typeof current === 'string') return current.trim() === text;
+  if (current && typeof current === 'object' && !Array.isArray(current)) {
+    return Object.values(current).some((v) => typeof v === 'string' && v.trim() === text);
+  }
+  return false;
 }
 
 function view(session: BuilderSessionRecord, status: FieldStatus): BuilderSessionView {

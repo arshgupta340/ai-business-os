@@ -274,3 +274,31 @@ These are application code changes, not part of B-09. They are listed so the own
 - **Graceful shutdown.** `apps/server/src/index.ts` has no `SIGTERM` handler. Hosts send `SIGTERM` before replacing an instance (Render allows 30 seconds). The server should call `app.close()` so in-flight webhooks finish.
 - **CORS** for the Vercel address, if the web app calls the server from the browser.
 - **`/api/integrations/health`** is not built yet.
+
+## Registering the webhooks with one command
+
+Once `PUBLIC_SERVER_URL` in `.env.local` holds the public address (tunnel or host), one command does the Square and Twilio steps of Part 3 for you. First look at what it would change. This is a dry run: it reads both accounts and changes nothing.
+
+```bash
+npm run register-webhooks
+```
+
+Then make the changes:
+
+```bash
+npm run register-webhooks -- --apply
+```
+
+What `--apply` changes:
+
+- **Twilio.** On the number in `TWILIO_PHONE_NUMBER`, the voice URL becomes `<PUBLIC_SERVER_URL>/webhooks/twilio/voice` (POST) and the status callback becomes `<PUBLIC_SERVER_URL>/webhooks/twilio/status` (POST). Nothing else on the number changes.
+- **Square sandbox.** If a subscription already points at `<PUBLIC_SERVER_URL>/webhooks/square`, its events are set to `payment.created` and `payment.updated` and it is enabled. Otherwise it creates one named "AI Business OS sandbox" with those events. It refuses to run unless `SQUARE_ENVIRONMENT` is `sandbox`.
+- **`.env.local`.** It writes `SQUARE_WEBHOOK_SIGNATURE_KEY` and `SQUARE_WEBHOOK_URL`, replacing those two lines and leaving every other line as it was. The signature key is never printed.
+
+Other options: `--twilio-only`, `--square-only`, and `--base <url>` to use an address other than `PUBLIC_SERVER_URL`. The address must be `https`, must not be localhost and must have no path.
+
+**Undo the Twilio change.** The output shows each value before and after, and after `--apply` it prints the previous voice URL and status callback. To go back, enter those values on the number in the Twilio Console (Phone Numbers, Manage, Active numbers).
+
+**Then add the two Square values on the host.** Copy `SQUARE_WEBHOOK_SIGNATURE_KEY` and `SQUARE_WEBHOOK_URL` from `.env.local` into the host's environment settings and redeploy. The command cannot set them on the host for you.
+
+The Square subscription calls follow the installed SDK and were not run against a real account when this was written. If the command says Square did not return the signature key, copy it from the Developer Console (Sandbox, Webhooks, Subscriptions) as in Part 3.
