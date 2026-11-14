@@ -37,6 +37,8 @@ export interface SimCallDeps {
   model: AgentModel;
   now(): Date;
   newId(prefix: string): string;
+  /** Structured logger. A refused tool is logged by name length only, never its name or arguments. */
+  log?: { warn(data: Record<string, unknown>, msg: string): void };
 }
 
 type Session = { toolset: RealToolset; history: { role: 'caller' | 'agent'; text: string }[]; stage: CallStage };
@@ -114,7 +116,15 @@ export function registerSimCall(app: FastifyInstance, deps: SimCallDeps): void {
         if (calls > MAX_TOOL_CALLS_PER_TURN) return { ok: false, reason: 'VALIDATION_FAILED', message: 'Too many tool calls in one turn.' };
         const named = ToolNameSchema.safeParse(rawName);
         // There is no tool for any write or external_message capability (AGENTS rule 6).
-        if (!named.success || !tools.includes(named.data)) return { ok: false, reason: 'CAPABILITY_NOT_ALLOWED', message: 'This agent does not have that tool.' };
+        if (!named.success || !tools.includes(named.data)) {
+          // Recorded as the phone relay records it: guardrail.refused with a fixed code, and a log line with
+          // the name's length only. The name and the arguments came from the model and are never stored.
+          const known = named.success ? named.data : undefined;
+          deps.log?.warn({ callId, tool: known ?? 'unknown_tool', nameLength: rawName.length }, known ? 'sim-call: model asked for a tool this agent does not have' : 'sim-call: model asked for an unknown tool');
+          await emitActivity(deps.db, { id: deps.newId('evt_'), businessId, correlationId: callId, type: 'guardrail.refused', actorType: 'deployed_agent',
+            occurredAt: deps.now().toISOString(), payload: { callId, rule: 'unsupported_request', reasonCode: known ? 'tool_not_allowed' : 'unknown_tool', ...(known ? { toolName: known } : {}) } });
+          return { ok: false, reason: 'CAPABILITY_NOT_ALLOWED', message: 'This agent does not have that tool.' };
+        }
         const tool: ToolName = named.data;
         const result = await s.toolset.handler.call(tool, (rawInput ?? {}) as never, ctx);
         const stage = nextStage(spec.template, s.stage, tool, result);
