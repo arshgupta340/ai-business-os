@@ -29,11 +29,11 @@ Real mode without `NEXT_PUBLIC_SUPABASE_URL` or `NEXT_PUBLIC_SUPABASE_ANON_KEY`:
 | `app/sign-in/page.tsx` | Sign-in. Outside the dashboard group. |
 | `components/` | Shared building blocks (below). |
 | `components/shell/` | Shell parts. `useShellBadges()` sets the Approvals count. |
-| `components/providers/AppProviders.tsx` | Theme, links, auth, business. The lead adds `ApiProvider` here. |
+| `components/providers/AppProviders.tsx` | Theme, links, auth, business and `ApiProvider` (React Query, plus the mock API in mock mode). |
 | `lib/session/` | `useBusiness()`, `BusinessProvider`, seeded businesses. |
 | `lib/session/auth/` | `useAuth()`, `getAccessToken()`. |
 | `lib/supabase/client.ts` | `getSupabaseBrowserClient()`, null when not configured. |
-| `lib/api/`, `mocks/` | API client and MSW mocks (another task). |
+| `lib/api/`, `mocks/` | Typed API client, React Query hooks and the MSW mock layer. Read `lib/api/README.md`. |
 
 ## Shared components
 
@@ -45,6 +45,11 @@ Import from `@/components` (or the single file).
 - `ErrorState` `{message, title?, onRetry?, retryLabel?}`. Shows a retry button when `onRetry` is set.
 - `StatusBadge` `{label, tone}`, tone `neutral | info | warning | danger | success`. `success` (green) is only for states the server or provider confirmed. Never green before the provider confirms.
 - `SandboxBadge`. Put it next to any payment data: totals, payment links, payment status.
+
+## Shared helpers
+
+- `statusView(machine, state)` and `conflictView(status, required)` from `@/lib/status`. They map every server state to `{label, tone}`. Use them with `StatusBadge` so a state looks the same on every screen. Do not write your own state to color mapping.
+- `formatMoney(amountMinor, currency)`, `formatDateTime(iso, timeZone)`, `formatTime`, `formatDate`, `formatRelative`, `secondsUntil`, `formatCountdown`, `lastFour` from `@/lib/format`. Money is in minor units on the wire. Show times in `business.timezone`.
 
 ## Hooks
 

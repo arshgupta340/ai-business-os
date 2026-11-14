@@ -7,6 +7,7 @@ import {Theme} from '@astryxdesign/core/theme';
 import {themes, defaultThemeSlug} from '../../astryx-themes';
 import {AuthProvider} from '@/lib/session/auth';
 import {BusinessProvider} from '@/lib/session';
+import {ApiProvider} from '@/lib/api/provider';
 
 /** Every app-wide provider, in one place. Wraps the whole app in app/layout.tsx. */
 export function AppProviders({children}: {children: ReactNode}) {
@@ -15,8 +16,8 @@ export function AppProviders({children}: {children: ReactNode}) {
       <LinkProvider component={NextLink}>
         <AuthProvider>
           <BusinessProvider>
-            {/* ApiProvider (from @/lib/api/provider) goes here, wrapping children. */}
-            {children}
+            {/* Data layer: React Query, plus the MSW worker in mock mode. */}
+            <ApiProvider>{children}</ApiProvider>
           </BusinessProvider>
         </AuthProvider>
       </LinkProvider>
