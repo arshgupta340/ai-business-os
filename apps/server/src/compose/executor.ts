@@ -20,7 +20,7 @@ import {
   type Booking, type BookingApprovalPayload, type ErrorCode, type MessageChannel, type Order,
 } from '@abos/contracts';
 import {
-  claimSyncJob, finishExecution, finishSyncJob, recordDispatch, recoverStaleExecutions, recoverStaleSyncJobs, runtimeClaimNextExecution,
+  claimSyncJob, finishExecution, finishSyncJob, markStaleDispatchesUnknown, recordDispatch, recoverStaleExecutions, recoverStaleSyncJobs, runtimeClaimNextExecution,
   saveCheckout, updateDispatch, verifyBooking, type WorkerLease,
 } from '@abos/db';
 import { bookingRow, orderRow } from '../adapters/sheets/index';
@@ -250,6 +250,13 @@ export function createDbExecutor(deps: SeamDeps, options: DbExecutorOptions = {}
       for (const b of await all(db, "select distinct business_id from public.action_executions where status = 'RUNNING' order by business_id", [])) {
         const moved = await recoverStaleExecutions(db, { businessId: String(b.business_id), staleAfterMs });
         for (const m of moved) log.warn({ job: 'executor', executionId: m.id }, 'stale step moved to NEEDS_REVIEW');
+      }
+      // Issue #93 (0008): a message step recovered above may have reached the provider, so its dispatch,
+      // still QUEUED, becomes UNKNOWN (CONTRACTS: timeout, result unknown). The sweep also settles rows
+      // recovered before 0008. It never resends: nothing sends from QUEUED or UNKNOWN once the step left RUNNING.
+      for (const b of await all(db, `select distinct d.business_id from public.message_dispatches d join public.action_executions e on e.id = d.execution_id
+        where d.status = 'QUEUED' and d.provider_message_id is null and e.status = 'NEEDS_REVIEW' order by d.business_id`, [])) {
+        for (const d of await markStaleDispatchesUnknown(db, { businessId: String(b.business_id) })) log.warn({ job: 'executor', dispatchId: d.id }, 'dispatch of a recovered step marked UNKNOWN');
       }
       return [];
     },

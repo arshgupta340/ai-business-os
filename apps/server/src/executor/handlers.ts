@@ -41,7 +41,12 @@ const validRefs = (refs: unknown): refs is CheckoutResult => typeof refs === 'ob
 
 export async function createCheckout(c: HandlerContext): Promise<StepOutcome> {
   const { order, approved } = await orderFor(c);
-  if (order.status !== 'APPROVED' && order.status !== 'CREATING_CHECKOUT') return failed('Order is not ready for checkout');
+  // RECOVERY_REQUIRED with a claimable checkout step means the owner retried it after a lookup proved no
+  // link exists (owner_resolve_execution, 0008): the step was requeued with its key, so this is attempt 2 or
+  // later. The order stays RECOVERY_REQUIRED (no contract move back to CREATING_CHECKOUT) and save_checkout
+  // moves it to PAYMENT_LINK_READY.
+  const ownerRetry = order.status === 'RECOVERY_REQUIRED' && c.execution.attempts > 1;
+  if (order.status !== 'APPROVED' && order.status !== 'CREATING_CHECKOUT' && !ownerRetry) return failed('Order is not ready for checkout');
   if (order.status === 'APPROVED') await c.deps.subjects.moveOrder(order.businessId, order.id, 'CREATING_CHECKOUT');
   const key = c.execution.idempotencyKey;
   // A saved Square order ID means a link already exists for this step: read it back, never create again.

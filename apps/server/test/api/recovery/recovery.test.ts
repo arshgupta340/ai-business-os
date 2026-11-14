@@ -9,7 +9,7 @@ import {
   approvalBookingVerified, approvalOrderPaymentPending, bookingVerified, executionsBookingVerified,
   executionsOrderPaymentPending, messageDispatches, orderPaymentPending,
 } from '@abos/contracts/fixtures';
-import { createRecoveryPlugin, type RecoveryLookup, type RecoveryPorts, type RecoveryRecord,
+import { RECOVERY_MESSAGES, createRecoveryPlugin, type RecoveryLookup, type RecoveryPorts, type RecoveryRecord,
   type RecoveryDecision, type RecoveryScope, type RecoveryTransaction } from '../../../src/api/recovery/index';
 
 type Harness = Awaited<ReturnType<typeof buildHarness>>;
@@ -177,12 +177,44 @@ describe('POST order cancel', () => {
 });
 
 describe('POST execution resolve', () => {
-  // Integration: retry after proven absence requeues only the calendar step (resolve_execution moves the
-  // booking back to RECHECKING_SLOT). Checkout and message retries stay refused: no routine serves them.
-  it.each(['checkout', 'message'] as const)('refuses a %s retry after proven absence, with no resolution', async kind => {
-    const h = await harness(kind);
-    error(await h.request(), 409, 'INVALID_STATE');
+  // Issue #54 (0008): retry after proven absence requeues the checkout and the calendar step with the same
+  // key. A message whose delivery is unknown is never resent (CONTRACTS: no resend from UNKNOWN), so its
+  // retry is refused with a plain sentence even when a lookup claims absence.
+  it('refuses a message retry after proven absence, saying it is never resent, with no resolution', async () => {
+    const h = await harness('message');
+    const response = await h.request();
+    error(response, 409, 'INVALID_STATE');
+    expect((response.json() as { message: string }).message).toBe(RECOVERY_MESSAGES.messageNotResent);
     expect(h.state.lookups).toBe(1); expect(h.state.resolverCalls).toBe(0); expect(h.state.events).toHaveLength(0);
+  });
+  it('requeues a checkout retry after proven absence, keeping the key and the attempt count', async () => {
+    const h = await harness('checkout');
+    const response = await h.request('retry');
+    expect(response.statusCode).toBe(200); expect(response.json().execution).toMatchObject({ status: 'QUEUED', attempts: 1, idempotencyKey: h.originalKey });
+    expect(h.state.resolution).toMatchObject({ action: 'retry', status: 'QUEUED', lookup: { outcome: 'absent' } });
+    expect(h.state.resolution?.record.execution.idempotencyKey).toBe(h.originalKey);
+    expect(h.state.events.map(e => e.type)).toEqual(['execution.failed']);
+  });
+  it('abandons a message in UNKNOWN without provider proof: the owner marks it failed', async () => {
+    const h = await harness('message'); h.state.lookup = { outcome: 'unknown' };
+    const response = await h.request('abandon');
+    expect(response.statusCode).toBe(200); expect(response.json().execution.status).toBe('FAILED');
+    expect(h.state.resolution).toMatchObject({ action: 'abandon', status: 'FAILED' });
+  });
+  it.each([
+    ['an expired approval', (h: Harness) => { h.state.record.approval.state = 'EXPIRED'; delete h.state.record.approval.decidedBy; }, 'INVALID_STATE'],
+    ['a pending approval', (h: Harness) => { h.state.record.approval.state = 'PENDING'; delete h.state.record.approval.decidedAt; delete h.state.record.approval.decidedBy; }, 'INVALID_STATE'],
+    ['an altered approval hash', (h: Harness) => { h.state.record.approval.payloadHash = `sha256:${'f'.repeat(64)}`; }, 'PAYLOAD_HASH_MISMATCH'],
+    ['exhausted attempts', (h: Harness) => { h.state.record.execution.attempts = 3; }, 'INVALID_STATE'],
+  ] as const)('refuses a checkout requeue with %s, before the routine', async (_name, mutate, code) => {
+    const h = await harness('checkout'); mutate(h);
+    error(await h.request('retry'), 409, code); expect(h.state.resolverCalls).toBe(0); expect(h.state.events).toHaveLength(0);
+  });
+  it('says why an unknown checkout outcome cannot be resolved', async () => {
+    const h = await harness('checkout'); h.state.lookup = { outcome: 'unknown' };
+    const response = await h.request('retry');
+    error(response, 409, 'INVALID_STATE');
+    expect((response.json() as { message: string }).message).toBe(RECOVERY_MESSAGES.outcomeUnknown);
   });
   it('requeues a booking retry after proven absence, keeping the key', async () => {
     const h = await harness('booking');
@@ -274,25 +306,25 @@ describe('POST execution resolve', () => {
     error(await h.request(), 404, 'NOT_FOUND'); expect(h.state.lookups).toBe(0);
   });
   it('refuses unsupported retry before inspecting an expired approval', async () => {
-    const h = await harness(); h.state.record.approval.state = 'EXPIRED'; delete h.state.record.approval.decidedBy;
+    const h = await harness('message'); h.state.record.approval.state = 'EXPIRED'; delete h.state.record.approval.decidedBy;
     error(await h.request(), 409, 'INVALID_STATE'); expect(h.state.resolverCalls).toBe(0); expect(h.state.events).toHaveLength(0);
   });
   it('refuses unsupported retry before inspecting approval time', async () => {
-    const h = await harness();
+    const h = await harness('message');
     h.state.now = new Date(h.state.record.approval.expiresAt);
     error(await h.request(), 409, 'INVALID_STATE'); expect(h.state.resolverCalls).toBe(0);
   });
   it('refuses unsupported retry before inspecting a pending approval', async () => {
-    const h = await harness(); h.state.record.approval.state = 'PENDING';
+    const h = await harness('message'); h.state.record.approval.state = 'PENDING';
     delete h.state.record.approval.decidedAt; delete h.state.record.approval.decidedBy;
     error(await h.request(), 409, 'INVALID_STATE'); expect(h.state.resolverCalls).toBe(0);
   });
   it('refuses unsupported retry before inspecting an altered approval hash', async () => {
-    const h = await harness(); h.state.record.approval.payloadHash = `sha256:${'f'.repeat(64)}`;
+    const h = await harness('message'); h.state.record.approval.payloadHash = `sha256:${'f'.repeat(64)}`;
     error(await h.request(), 409, 'INVALID_STATE'); expect(h.state.resolverCalls).toBe(0);
   });
   it('does not call a removed retry-authorization seam for unsupported recovery', async () => {
-    const h = await harness();
+    const h = await harness('message');
     error(await h.request(), 409, 'INVALID_STATE'); expect(h.state.resolverCalls).toBe(0);
   });
   it('cannot reset exhausted attempts', async () => {

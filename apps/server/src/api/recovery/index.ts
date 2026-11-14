@@ -1,8 +1,8 @@
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import {
   ActionExecutionSchema, ActivityEventSchema, ApprovalRequestSchema, BusinessScopeQuerySchema,
-  CancelOrderResponseSchema, ENDPOINTS, ERROR_CODE_INFO, ErrorCodeSchema,
-  OrderSchema,
+  CancelOrderResponseSchema, ENDPOINTS, ERROR_CODE_INFO, EXECUTION_MAX_ATTEMPTS, ErrorCodeSchema,
+  OrderSchema, verifyPayloadHash,
   ResolveExecutionBodySchema, ResolveExecutionResponseSchema, canTransition, makeApiError,
   type ActionExecution, type ActivityEvent, type ErrorCode, type ResolveExecutionBody,
 } from '@abos/contracts';
@@ -11,9 +11,19 @@ import type { RecoveryDecision, RecoveryLookup, RecoveryPorts, RecoveryRecord, R
 export type { RecoveryDecision, RecoveryLookup, RecoveryPorts, RecoveryRecord, RecoveryScope, RecoveryTransaction } from './types';
 
 class RecoveryError extends Error {
-  constructor(readonly code: ErrorCode) { super('Recovery request was refused.'); }
+  /** `detail` is a fixed sentence written here, shown to the owner. It never carries request or provider text. */
+  constructor(readonly code: ErrorCode, readonly detail?: string) { super('Recovery request was refused.'); }
 }
-const refuse = (code: ErrorCode): never => { throw new RecoveryError(code); };
+const refuse = (code: ErrorCode, detail?: string): never => { throw new RecoveryError(code, detail); };
+
+/** The fixed sentences the resolve route answers with (issue #54). */
+export const RECOVERY_MESSAGES = {
+  messageNotResent: 'A message whose delivery is unknown is never sent again. Abandon it to mark it failed; the order or booking goes on without it.',
+  messageWasSent: 'This message was sent. Retry records it as sent; it cannot be abandoned.',
+  outcomeUnknown: 'The provider could not confirm whether this step happened, so it cannot be retried or abandoned yet. For an order, cancel it instead.',
+  attemptsUsed: 'This step has used all of its attempts, so it cannot be retried. Abandon it instead.',
+  approvalNotApproved: 'This step does not belong to an approved request, so it cannot be retried.',
+} as const;
 
 async function scopeFor(ports: RecoveryPorts, request: FastifyRequest, id: string, businessId: string): Promise<RecoveryScope> {
   // Authentication is installed by the composition root. A missing guard fails closed.
@@ -68,7 +78,7 @@ export function createRecoveryPlugin(ports: RecoveryPorts): FastifyPluginAsync {
       const code = parsed.success ? parsed.data :
         typeof candidate.statusCode === 'number' && candidate.statusCode >= 400 && candidate.statusCode < 500 ? 'VALIDATION_FAILED' : 'INTERNAL';
       return reply.header('X-Correlation-Id', request.id).code(ERROR_CODE_INFO[code].httpStatus)
-        .send(makeApiError(code, 'Recovery request could not be completed.', request.id));
+        .send(makeApiError(code, error instanceof RecoveryError && error.detail ? error.detail : 'Recovery request could not be completed.', request.id));
     });
     // Fastify's default 404 includes the request URL, which may contain a bearer token or phone
     // number. This encapsulated handler keeps malformed recovery-path requests redacted too.
@@ -135,30 +145,43 @@ export function createRecoveryPlugin(ports: RecoveryPorts): FastifyPluginAsync {
         if (record.order && ['CANCELLED', 'REJECTED', 'APPROVAL_EXPIRED', 'UNAVAILABLE'].includes(record.order.status)) return refuse('INVALID_STATE');
         if (record.booking && ['REJECTED', 'EXPIRED', 'SLOT_CONFLICT'].includes(record.booking.status)) return refuse('INVALID_STATE');
         const lookup: RecoveryLookup = await ports.lookup(record);
-        if (lookup.outcome === 'unknown') return refuse('INVALID_STATE');
-        if ((record.dispatch?.status === 'SENT' || record.dispatch?.status === 'DELIVERED') && lookup.outcome !== 'exists') return refuse('INVALID_STATE');
-        if (body.data.action === 'retry') {
-          // Integration (0005 resolve_execution): "retry" continues the bundle. A provider effect proven to
-          // match the approved material completes the step from that evidence (checkout references and
-          // PAYMENT_LINK_READY, the verified booking and its Sheets job, a sent dispatch). Proven absence
-          // requeues only the calendar step, which the routine moves back to RECHECKING_SLOT. A checkout
-          // in RECOVERY_REQUIRED has no move back to creation, and the message worker never resends an
-          // existing dispatch, so those retries stay refused.
-          const status = lookup.outcome === 'exists' ? 'SUCCEEDED' as const
-            : e.actionType === 'calendar.event.create' ? 'QUEUED' as const : refuse('INVALID_STATE');
-          const audit = status === 'SUCCEEDED'
-            ? event(ports, scope, request.id, { type: 'execution.succeeded', payload: { executionId: e.id, actionType: e.actionType, externalRef: lookup.outcome === 'exists' ? lookup.externalRef : '' } })
-            : event(ports, scope, request.id, { type: 'execution.failed', payload: { executionId: e.id, actionType: e.actionType, errorCode: e.errorCode ?? 'INVALID_STATE', retryable: true, nextStatus: 'QUEUED' } });
-          const decision = await tx.resolveNeedsReview({ record, action: 'retry', status, lookup, event: audit });
-          return checkResult(e, checkDecision(e, decision, 'retry'), status);
+        const message = e.actionType === 'message.checkout.send' || e.actionType === 'message.booking.confirm';
+        const sent = record.dispatch?.status === 'SENT' || record.dispatch?.status === 'DELIVERED';
+        const finish = async (action: ResolveExecutionBody['action'], status: 'SUCCEEDED' | 'QUEUED' | 'FAILED', audit: ActivityEvent) => {
+          const decision = await tx.resolveNeedsReview({ record, action, status, lookup, event: audit });
+          return checkResult(e, checkDecision(e, decision, action), status);
+        };
+        const succeeded = (externalRef: string) => event(ports, scope, request.id, { type: 'execution.succeeded', payload: { executionId: e.id, actionType: e.actionType, externalRef } });
+        const failed = (nextStatus: 'QUEUED' | 'FAILED') => event(ports, scope, request.id, { type: 'execution.failed', payload: {
+          executionId: e.id, actionType: e.actionType, errorCode: e.errorCode ?? 'INVALID_STATE', retryable: nextStatus === 'QUEUED', nextStatus } });
+        if (message) {
+          // CONTRACTS "Message dispatch": no resend from UNKNOWN, and SPEC 4 says an unknown AgentPhone send
+          // must not be resent. So "retry" only records a send the stored dispatch proves; there is no
+          // move back to QUEUED. "Abandon" is the owner marking the message failed (UNKNOWN -> FAILED),
+          // which writes nothing external and needs no provider proof.
+          if (body.data.action === 'retry') {
+            if (lookup.outcome !== 'exists') return refuse('INVALID_STATE', RECOVERY_MESSAGES.messageNotResent);
+            return finish('retry', 'SUCCEEDED', succeeded(lookup.externalRef));
+          }
+          if (sent || lookup.outcome === 'exists') return refuse('INVALID_STATE', RECOVERY_MESSAGES.messageWasSent);
+          return finish('abandon', 'FAILED', failed('FAILED'));
         }
-        // Abandon: only after a lookup proves nothing was written.
+        if (lookup.outcome === 'unknown') return refuse('INVALID_STATE', RECOVERY_MESSAGES.outcomeUnknown);
+        if (body.data.action === 'retry') {
+          // A provider effect proven to match the approved material completes the step from that evidence
+          // (checkout references and PAYMENT_LINK_READY, the verified booking and its Sheets job). Proven
+          // absence requeues the same step row, so the same idempotency key (owner_resolve_execution, 0008).
+          // A checkout keeps its order in RECOVERY_REQUIRED and the retried step moves it to
+          // PAYMENT_LINK_READY; a calendar step moves its booking back to RECHECKING_SLOT.
+          if (lookup.outcome === 'exists') return finish('retry', 'SUCCEEDED', succeeded(lookup.externalRef));
+          if (record.approval.state !== 'APPROVED') return refuse('INVALID_STATE', RECOVERY_MESSAGES.approvalNotApproved);
+          if (!await verifyPayloadHash(record.approval.bundleType, record.approval.payload as unknown as Record<string, unknown>, record.approval.payloadHash)) return refuse('PAYLOAD_HASH_MISMATCH');
+          if (e.attempts >= EXECUTION_MAX_ATTEMPTS) return refuse('INVALID_STATE', RECOVERY_MESSAGES.attemptsUsed);
+          return finish('retry', 'QUEUED', failed('QUEUED'));
+        }
+        // Abandon of a provider step: only after a lookup proves nothing was written.
         if (lookup.outcome !== 'absent') return refuse('INVALID_STATE');
-        const audit = event(ports, scope, request.id, { type: 'execution.failed', payload: {
-          executionId: e.id, actionType: e.actionType, errorCode: e.errorCode ?? 'INVALID_STATE', retryable: false, nextStatus: 'FAILED',
-        } });
-        const decision = await tx.resolveNeedsReview({ record, action: 'abandon', status: 'FAILED', lookup, event: audit });
-        return checkResult(e, checkDecision(e, decision, 'abandon'), 'FAILED');
+        return finish('abandon', 'FAILED', failed('FAILED'));
       });
       return ResolveExecutionResponseSchema.parse({ execution });
     });
