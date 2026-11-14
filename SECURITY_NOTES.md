@@ -1,6 +1,6 @@
 # Security notes
 
-**Task:** S-06. **Updated:** 2026-11-14. **Describes:** the code on `main` at commit `4f1bed8`, merged into branch `arsh/S-06-docs`.
+**Task:** S-06. **Updated:** 2026-11-14. **Describes:** the code on `main` at commit `0dfb1a4`.
 
 This file lists the eight rules from `AGENTS.md` that are never broken. For each rule it says where the code enforces it, which tests cover it, what has been verified against a real service, and what is not yet enforced or not yet tested. It then describes the restricted database role, webhook handling, idempotency keys, secrets, and the known limits.
 
@@ -75,22 +75,22 @@ This is the complete list as of 2026-11-14 10:00 Pacific. I did not rerun any of
 **Three things to keep in mind when reading the list**
 
 - The list names `scripts/live/run-demo.ts` for the pizza run. That script drives the server over HTTP as the seeded owner, with a simulated call in text. The checks on a local server match the script's other flows (`negative`, `booking`, `hours`), and I have assumed the same script made them. Where this file or the other three say "by script" for a local check, it rests on that assumption. The list records no run of these flows by a person at the web screens, and no rehearsal.
-- The list does not name the commit the deployed server was running. Pull requests #104 and #110 were merged into `main` at about 10:10 Pacific, after the time of the list. What they changed (the AgentPhone contract values, and keeping the current value on a database conflict) is tested with fakes only.
+- The list does not name the commit the deployed server was running. Pull requests #104, #110 and #112 were merged into `main` between 10:09 and 10:39 Pacific, after the time of the list. What they changed (the AgentPhone contract values, keeping the current value on a database conflict, and display names on approvals) is tested with fakes only. Later merges up to `0dfb1a4` changed the web app and the shared fixtures, not the server.
 - The smoke script the list cites is not in the repository on `main`. I found no `smoke` script in any `package.json` or under `scripts/`.
 
 ## 3. Test results from this checkout
 
-I ran these on 2026-11-14 in a cloud container with 4 cores and Node 22.23.4, on `main` at `4f1bed8` merged with the four documents. I also ran them one commit earlier, at `50d4c80`, with the same totals: the commit between changed only Markdown files. The spec and CI name Node 24.
+I ran these on 2026-11-14 in a cloud container with 4 cores and Node 22.23.4, on `main` at `0dfb1a4` with this update applied. The spec and CI name Node 24.
 
 | Command | Result |
 |---|---|
 | `npm run typecheck` | Passed for all four workspaces (`@abos/server`, `@abos/web`, `@abos/contracts`, `@abos/db`). |
-| `npm test` | 121 test files, 2172 tests. 2170 passed. 2 are marked as expected failures. |
-| `npm test -w @abos/web` | 52 test files, 600 tests. All 600 passed. |
+| `npm test` | 125 test files, 2241 tests. 2236 passed. 5 are marked as expected failures. |
+| `npm test -w @abos/web` | 54 test files, 1054 tests. All 1054 passed. |
 
-**The 2 expected failures.** The adversarial suite marks two known open defects with `it.fails`, so the run passes while they stay open. One: `GET /api/builder/ping` answers without a token (`apps/server/test/adversarial/access.test.ts`, issue #96). Two: after crash recovery a message dispatch stays `QUEUED` where `docs/FLOWS.md` says `UNKNOWN` (`apps/server/test/adversarial/idempotency.test.ts`). The second fails closed: nothing resends a queued dispatch, and the checkout view shows it as unknown.
+**The 5 expected failures.** Three are in `packages/contracts/fixtures/issue103.test.ts` and record known flaws in the shared demo fixtures, not in the server. The other two are in the adversarial suite, which marks two known open defects with `it.fails`, so the run passes while they stay open. One: `GET /api/builder/ping` answers without a token (`apps/server/test/adversarial/access.test.ts`, issue #96). Two: after crash recovery a message dispatch stays `QUEUED` where `docs/FLOWS.md` says `UNKNOWN` (`apps/server/test/adversarial/idempotency.test.ts`). The second fails closed: nothing resends a queued dispatch, and the checkout view shows it as unknown.
 
-**CI.** The CI workflow (typecheck, `npm test`, the web tests, on Node 24) finished with success on `main` at `50d4c80` (run 130), the last commit on `main` that changed code before this document. I read that result from GitHub. The result for this branch is in the pull request, not in this file.
+**CI.** The CI workflow runs typecheck, `npm test` and the web tests on Node 24. Its result for this branch is in the pull request, not in this file.
 
 ## 4. The eight rules
 
