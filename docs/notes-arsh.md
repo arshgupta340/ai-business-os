@@ -139,3 +139,7 @@ Vendor facts are in `docs/notes-agentphone.md`, each with its URL. None was test
 - **No send function on a telephony provider (review, 2026-11-14).** `TelephonyProvider.sendText` was removed. A text is sent only by the executor's approved message step through `sendOnce`.
 - **Formats taken from examples.** `scripts/check-env.mjs` expects `AGENTPHONE_WEBHOOK_SECRET` to start with `whsec_`, and `docs/SETUP-ACCOUNTS.md` says the API key starts with `sk_live_`. The vendor's example response shows `whsec_abc123...`; neither prefix is stated as a rule. If a real secret has another shape, `check-env` reports "Wrong format" although the server would accept it.
 - **Web app.** `apps/web` has exhaustive `Record` maps of message channels and webhook providers (`integrations-view.ts`, `HealthSection.tsx`). The backend added the `agentphone` labels there with the owner's authorization while the UI lead was away; that commit changes nothing else in `apps/web`.
+
+## Migration 0007 not applied (2026-11-14)
+
+- Migration 0007 (`0007_agentphone_channel.sql`) is not applied to the live database yet. Keep `TELEPHONY_PROVIDER` and `MESSAGE_CHANNEL` off `agentphone` until it is (docs/DEPLOY.md, "Switching the telephony provider").
