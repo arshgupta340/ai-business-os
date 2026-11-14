@@ -4,7 +4,7 @@
 //   X-Webhook-Timestamp: Unix seconds; reject a delivery more than 5 minutes from now
 //   X-Webhook-ID: unique delivery ID, kept across retries (the dedupe key)
 // The raw bytes are verified before any JSON parsing, and the compare is constant time.
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 export const AGENTPHONE_HEADERS = {
   signature: 'x-webhook-signature',
@@ -18,8 +18,14 @@ export const AGENTPHONE_MAX_SKEW_SECONDS = 300;
 /** X-Webhook-ID is stored as webhook_events.provider_event_id; anything else is refused. */
 const DELIVERY_ID = /^[A-Za-z0-9._:-]{1,200}$/;
 
+/**
+ * The signature covers the timestamp and the body, not X-Webhook-ID. So the ID alone cannot be the dedupe
+ * key: the same signed bytes sent again with another ID would verify and look new. `replayKey` names the
+ * signed content itself. It is a digest of the verified signature (keyed by the webhook secret), so it
+ * reveals nothing about the body, and its `signature/` prefix cannot collide with a delivery ID (no `/`).
+ */
 export type SignatureCheck =
-  | { ok: true; deliveryId: string }
+  | { ok: true; deliveryId: string; replayKey: string }
   | { ok: false; reason: 'missing' | 'stale' | 'mismatch' };
 
 export function agentPhoneSignature(secret: string, timestamp: string, rawBody: Buffer): string {
@@ -44,5 +50,6 @@ export function verifyAgentPhoneSignature(input: {
   const given = Buffer.from(signature.trim(), 'utf8');
   // timingSafeEqual needs equal lengths; comparing against itself keeps the work the same either way.
   const same = given.length === expected.length ? timingSafeEqual(given, expected) : (timingSafeEqual(expected, expected), false);
-  return same ? { ok: true, deliveryId } : { ok: false, reason: 'mismatch' };
+  if (!same) return { ok: false, reason: 'mismatch' };
+  return { ok: true, deliveryId, replayKey: `signature/${createHash('sha256').update(expected).digest('hex')}` };
 }

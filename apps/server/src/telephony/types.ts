@@ -26,7 +26,8 @@ export type TelephonyEvent =
   | { kind: 'ignored'; eventType: string };
 
 export type VerifiedWebhook =
-  | { ok: true; deliveryId: string; eventType: string; test: boolean; event: TelephonyEvent }
+  /** `replayKey`, when the provider's signature does not cover the delivery ID, is a second dedupe key for the signed content. */
+  | { ok: true; deliveryId: string; replayKey?: string | undefined; eventType: string; test: boolean; event: TelephonyEvent }
   | { ok: false; reason: 'signature_invalid' | 'malformed' };
 
 export interface WebhookRequest {

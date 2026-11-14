@@ -76,7 +76,7 @@ export function createAgentPhoneWiring(deps: {
 
   const plugin: FastifyPluginAsync = enabled && ap && voice ? async (app) => {
     await app.register(agentPhoneWebhookPlugin, {
-      provider: ap, db: deps.db, voice, ownerOf, log: deps.log,
+      provider: ap, db: deps.db, voice, ownerOf, log: deps.log, nowMs: () => deps.now().getTime(),
       ...(deps.interimAfterMs !== undefined ? { interimAfterMs: deps.interimAfterMs } : {}),
       async rejected(businessId, reason) {
         if (!businessId) return;

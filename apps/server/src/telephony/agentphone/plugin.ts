@@ -2,7 +2,12 @@
 // Order of work (AGENTS rule 2): capture the raw bytes in an own parser scope, verify the signature over
 // them (signature.ts), parse only routing fields, insert webhook_events (source 'agentphone',
 // provider_event_id = X-Webhook-ID) with "on conflict do nothing", and act only when the row is new.
+// The signature does not cover X-Webhook-ID, so the same statement also stores a second row keyed by the
+// signed content (signature.ts replayKey); a delivery is new only when BOTH keys are new. The provider's own
+// retry keeps the ID; a captured delivery replayed under another ID keeps the signed content.
 // A bad or missing signature answers 401 and writes webhook.rejected; nothing from the body is stored.
+// Rejected deliveries cost one bounded body read and at most one HMAC; their activity rows are capped per
+// minute (REJECTED_EVENTS_PER_MINUTE), so a flood without the secret cannot fill the owner's feed.
 //
 // A voice turn is answered in the response itself (the vendor has no retry for it): NDJSON, with one
 // interim "One moment." chunk if the turn is slow, then the final chunk. Other events answer 200.
@@ -16,6 +21,10 @@ import { SPEECH, type AgentPhoneVoice } from './voice';
 
 export const AGENTPHONE_NDJSON = 'application/x-ndjson';
 export const DEFAULT_INTERIM_AFTER_MS = 1500;
+/** The most webhook.rejected events one server process writes for this route in any 60 seconds. Every rejected request still answers 401 or 400. */
+export const REJECTED_EVENTS_PER_MINUTE = 30;
+/** event_type of the row that remembers a delivery's signed content. It carries no payload and is never acted on. */
+export const REPLAY_GUARD_EVENT = 'replay_guard';
 
 /** The documented voice reply fields: text, hangup, interim (docs/notes-agentphone.md). */
 export function formatTurnChunks(chunks: { text: string; interim?: boolean; hangup?: boolean }[]): string {
@@ -31,15 +40,32 @@ export interface AgentPhoneWebhookDeps {
   rejected(businessId: string | undefined, reason: 'signature_invalid' | 'malformed'): Promise<void>;
   log: { info(data: Record<string, unknown>, msg: string): void; warn(data: Record<string, unknown>, msg: string): void };
   interimAfterMs?: number;
+  /** The server clock, for the rejected-event cap. */
+  nowMs?(): number;
 }
 
 type Row = { id: string };
 
-async function recordOnce(db: QueryDb, input: { deliveryId: string; eventType: string; businessId: string | undefined; providerId: string | undefined }): Promise<Row | undefined> {
+async function recordOnce(db: QueryDb, input: { deliveryId: string; replayKey: string | undefined; eventType: string; businessId: string | undefined; providerId: string | undefined }): Promise<Row | undefined> {
   // Sanitized: the provider's object ID only. No phone number, transcript or message body is stored.
-  const r = await db.query(`insert into public.webhook_events (source, provider_event_id, event_type, business_id, payload)
-    values ('agentphone', $1, $2, $3, $4::jsonb) on conflict (source, provider_event_id) do nothing returning id`,
-  [input.deliveryId, input.eventType.slice(0, 100), input.businessId ?? null, JSON.stringify(input.providerId ? { providerId: input.providerId } : {})]);
+  const params = [input.deliveryId, input.eventType.slice(0, 100), input.businessId ?? null, JSON.stringify(input.providerId ? { providerId: input.providerId } : {})];
+  if (!input.replayKey) {
+    const r = await db.query(`insert into public.webhook_events (source, provider_event_id, event_type, business_id, payload)
+      values ('agentphone', $1, $2, $3, $4::jsonb) on conflict (source, provider_event_id) do nothing returning id`, params);
+    return r.rows[0] as Row | undefined;
+  }
+  // One statement, two unique keys: the event row is inserted only if the signed content was not seen
+  // before, and only if the delivery ID was not seen before. Either conflict means "already delivered".
+  const r = await db.query(`with guard as (
+      insert into public.webhook_events (source, provider_event_id, event_type, business_id, payload, processed_at)
+      values ('agentphone', $5, '${REPLAY_GUARD_EVENT}', $3, '{}'::jsonb, now())
+      on conflict (source, provider_event_id) do nothing returning id
+    ), event as (
+      insert into public.webhook_events (source, provider_event_id, event_type, business_id, payload)
+      select 'agentphone', $1, $2, $3, $4::jsonb where exists (select 1 from guard)
+      on conflict (source, provider_event_id) do nothing returning id
+    )
+    select id from event`, [...params, input.replayKey]);
   return r.rows[0] as Row | undefined;
 }
 
@@ -62,18 +88,35 @@ export const agentPhoneWebhookPlugin: FastifyPluginAsync<AgentPhoneWebhookDeps> 
       .catch(() => deps.log.warn({ job: 'agentphone-webhook', webhookId: id }, 'webhook processed mark failed'));
   };
 
+  // Sliding one-minute window of recorded rejections (per process; the answer to the sender never changes).
+  const nowMs = deps.nowMs ?? (() => Date.now());
+  const recorded: number[] = [];
+  let capLogged = false;
+  const mayRecordRejection = (): boolean => {
+    const now = nowMs();
+    while (recorded.length > 0 && (recorded[0]! <= now - 60_000 || recorded[0]! > now)) recorded.shift();
+    if (recorded.length >= REJECTED_EVENTS_PER_MINUTE) {
+      if (!capLogged) deps.log.warn({ job: 'agentphone-webhook', perMinute: REJECTED_EVENTS_PER_MINUTE }, 'rejected webhook deliveries exceed the cap; further ones this minute are refused without an activity event');
+      capLogged = true;
+      return false;
+    }
+    capLogged = false;
+    recorded.push(now);
+    return true;
+  };
+
   app.post(WEBHOOK_ENDPOINTS.agentphone.path, async (req, reply) => {
     reply.header('X-Correlation-Id', req.id);
     const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     const verified = await deps.provider.verifyWebhook({ rawBody, headers: req.headers });
     if (!verified.ok) {
-      await deps.rejected(await deps.ownerOf(deps.provider.phoneNumber).catch(() => undefined), verified.reason).catch(() => undefined);
+      if (mayRecordRejection()) await deps.rejected(await deps.ownerOf(deps.provider.phoneNumber).catch(() => undefined), verified.reason).catch(() => undefined);
       if (verified.reason === 'malformed') return reply.code(ERROR_CODE_INFO.VALIDATION_FAILED.httpStatus).send(makeApiError('VALIDATION_FAILED', 'Invalid webhook envelope', req.id));
       return reply.code(ERROR_CODE_INFO.SIGNATURE_INVALID.httpStatus).send(makeApiError('SIGNATURE_INVALID', 'Invalid webhook signature', req.id));
     }
     const { event } = verified;
     const routed = event.kind === 'incoming_call' || event.kind === 'incoming_text' ? await deps.ownerOf(event.to) : undefined;
-    const stored = await recordOnce(deps.db, { deliveryId: verified.deliveryId, eventType: verified.eventType, businessId: routed, providerId: providerIdOf(event) });
+    const stored = await recordOnce(deps.db, { deliveryId: verified.deliveryId, replayKey: verified.replayKey, eventType: verified.eventType, businessId: routed, providerId: providerIdOf(event) });
     // A repeated delivery changes nothing. For a voice turn the caller hears nothing new.
     if (!stored) return reply.code(200).send({});
     if (verified.test) { await mark(stored.id, routed); return reply.code(200).send({}); }
@@ -84,11 +127,8 @@ export const agentPhoneWebhookPlugin: FastifyPluginAsync<AgentPhoneWebhookDeps> 
       let finished = false;
       const interim = setTimeout(() => { if (!finished) stream.write(formatTurnChunks([{ text: SPEECH.oneMoment, interim: true }])); }, deps.interimAfterMs ?? DEFAULT_INTERIM_AFTER_MS);
       let final: TurnReply = { text: SPEECH.trouble };
-      let businessId = routed;
       try {
-        const out = await deps.voice.turn({ providerCallId: event.providerCallId, to: event.to, callerLast4: event.callerLast4, text: event.text });
-        final = out.reply;
-        businessId = out.businessId ?? routed;
+        final = (await deps.voice.turn({ providerCallId: event.providerCallId, to: event.to, callerLast4: event.callerLast4, text: event.text })).reply;
       } catch {
         deps.log.warn({ job: 'agentphone-webhook', webhookId: stored.id }, 'voice turn failed');
       } finally {
@@ -96,7 +136,9 @@ export const agentPhoneWebhookPlugin: FastifyPluginAsync<AgentPhoneWebhookDeps> 
         clearTimeout(interim);
       }
       stream.end(formatTurnChunks([{ text: final.text, ...(final.hangup ? { hangup: true } : {}) }]));
-      await mark(stored.id, businessId);
+      // Marked with the scope the row was stored under (the business of the dialed number, or none),
+      // which mark_webhook_processed checks; the call's own business can differ after an unpublish.
+      await mark(stored.id, routed);
       return reply;
     }
 

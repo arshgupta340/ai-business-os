@@ -59,7 +59,7 @@ export function createAgentPhoneProvider(settings: AgentPhoneSettings, ports: { 
       if (!sig.ok) return { ok: false, reason: 'signature_invalid' };
       const parsed = parseAgentPhoneEvent(rawBody);
       if (!parsed) return { ok: false, reason: 'malformed' };
-      return { ok: true, deliveryId: sig.deliveryId, eventType: parsed.eventType, test: parsed.test, event: parsed.event };
+      return { ok: true, deliveryId: sig.deliveryId, replayKey: sig.replayKey, eventType: parsed.eventType, test: parsed.test, event: parsed.event };
     },
   };
 }

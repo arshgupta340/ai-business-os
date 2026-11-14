@@ -34,7 +34,26 @@ describe('AgentPhone signature (docs: HMAC-SHA256 over "{timestamp}." + raw body
     expect(agentPhoneSignature(SECRET, TS, body)).toBe(expected);
   });
   it('accepts a good signature and returns the delivery ID', () => {
-    expect(verifyAgentPhoneSignature({ rawBody: body, headers: headers(body), secret: SECRET, nowMs: NOW_MS })).toEqual({ ok: true, deliveryId: 'whd_1' });
+    expect(verifyAgentPhoneSignature({ rawBody: body, headers: headers(body), secret: SECRET, nowMs: NOW_MS }))
+      .toEqual({ ok: true, deliveryId: 'whd_1', replayKey: expect.stringMatching(/^signature\/[0-9a-f]{64}$/) });
+  });
+  it('names the signed content with a replay key that ignores the unsigned delivery ID (review F2)', () => {
+    const key = (h: Record<string, string | undefined>, raw = body) => {
+      const r = verifyAgentPhoneSignature({ rawBody: raw, headers: h, secret: SECRET, nowMs: NOW_MS });
+      return r.ok ? r.replayKey : undefined;
+    };
+    const original = key(headers(body));
+    // The same signed bytes under another delivery ID are the same content.
+    expect(key(headers(body, { 'x-webhook-id': 'whd_other' }))).toBe(original);
+    // Another timestamp or another body is other content.
+    const later = String(Number(TS) + 5);
+    expect(key({ 'x-webhook-signature': agentPhoneSignature(SECRET, later, body), 'x-webhook-timestamp': later, 'x-webhook-id': 'whd_1' })).not.toBe(original);
+    const other = Buffer.from('{"event":"agent.call_ended"}');
+    expect(key(headers(other), other)).not.toBe(original);
+    // It is not the signature itself, cannot be mistaken for a delivery ID, and an unverified request has none.
+    expect(original).not.toContain(agentPhoneSignature(SECRET, TS, body).slice(7));
+    expect(original).toContain('/');
+    expect(key(headers(body, { 'x-webhook-signature': 'sha256=00' }))).toBeUndefined();
   });
   it('refuses a bad signature, a changed body, a missing header or secret, and a stale or future timestamp', () => {
     const v = (h: Record<string, string | undefined>, raw = body, secret: string | undefined = SECRET, nowMs = NOW_MS) => verifyAgentPhoneSignature({ rawBody: raw, headers: h, secret, nowMs });
