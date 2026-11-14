@@ -8,6 +8,8 @@ import {
 import type { Db } from '../db/index';
 import type { Env } from '../env';
 import { AppError } from '../errors';
+import { errorMessage } from '../error-messages';
+import { PolicyError } from '../policy/types';
 import { mapApprovalRow, mapRow } from './rows';
 import { ownerDisplayNames, withApprovalDisplayFields } from './display';
 import { setLiveAgent } from './live-agent';
@@ -346,7 +348,9 @@ export async function apiRoutes(app: FastifyInstance, deps: ApiDependencies): Pr
       catch (error) {
         if (error instanceof AppError) throw error;
         const code = ErrorCodeSchema.safeParse(error && typeof error === 'object' && 'code' in error ? error.code : undefined);
-        if (code.success) throw new AppError(code.data, `Operation failed: ${code.data}.`);
+        // A PolicyError's message is the server's own sentence. Any other error's message may carry a provider
+        // response, so it is replaced by the plain sentence for its code (issue #127).
+        if (code.success) throw new AppError(code.data, error instanceof PolicyError ? error.message : errorMessage(code.data));
         throw error;
       }
       const response = endpoint.response.safeParse(value);

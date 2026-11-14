@@ -147,12 +147,19 @@ export function summaryLine(approval: ApprovalRequest, timeZone: string, catalog
   const t = typedApproval(approval);
   switch (t.bundleType) {
     case 'order_bundle':
-      return `Pickup ${formatDateTime(t.payload.pickupAt, timeZone)}, link to ${recipientLabel(t.payload.messageRecipient)}`;
+      // qr_only is a setting of the business (SPEC 2.9): a customer who gave a number still gets no message.
+      return t.payload.messageChannel === 'qr_only'
+        ? `Pickup ${formatDateTime(t.payload.pickupAt, timeZone)}, QR code only, no message is sent`
+        : `Pickup ${formatDateTime(t.payload.pickupAt, timeZone)}, link to ${recipientLabel(t.payload.messageRecipient)}`;
     case 'booking_bundle':
       return `${formatDateTime(t.payload.startUtc, t.payload.timezone)}, confirmation to ${recipientLabel(t.payload.messageRecipient)}`;
     case 'fact_edit': {
       const what = `${factKindLabel(t.payload.kind)}, ${factKeyLabel(t.payload.kind, t.payload.key)}`;
-      return `${what}: ${formatFactValue(t.payload.kind, t.payload.after)} (now ${formatFactValue(t.payload.kind, t.payload.before)})`;
+      const after = formatFactValue(t.payload.kind, t.payload.after);
+      // A new fact has no current value to compare with.
+      return t.payload.before === null || t.payload.before === undefined
+        ? `${what}: ${after} (new fact)`
+        : `${what}: ${after} (now ${formatFactValue(t.payload.kind, t.payload.before)})`;
     }
     case 'price_edit': {
       const name = variationName(catalog, t.payload.squareItemId, t.payload.variationId) ?? 'An item in the Square catalog';
