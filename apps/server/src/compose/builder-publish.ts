@@ -71,10 +71,19 @@ export function dbPublishEventSink(db: Db): PublishEventSink {
   return { write: (event) => emitActivity(db, event) };
 }
 
-/** Publish refreshes the catalog cache from Square first. Without Square there is nothing to sync. */
+/**
+ * Issue #94 item 6: the one configured Square location's catalog belongs to the business that already
+ * holds its cached rows (the same rule webhook attribution uses). Another business may not copy it.
+ */
+export async function catalogOwnedElsewhere(db: Db, businessId: string): Promise<boolean> {
+  return (await db.query('select 1 from public.catalog_items where business_id <> $1 limit 1', [businessId])).rows.length > 0;
+}
+
+/** Publish refreshes the catalog cache from Square first. Without Square, or for a business that does not sell from it, nothing is synced. */
 export function squareCatalogSync(db: Db, providers: Providers, now: () => Date): CatalogSync {
   return async ({ businessId }) => {
     if (!providers.square) return {};
+    if (await catalogOwnedElsewhere(db, businessId)) return {};
     await providers.square.syncCatalog(db, businessId);
     return { syncedAt: now().toISOString() };
   };

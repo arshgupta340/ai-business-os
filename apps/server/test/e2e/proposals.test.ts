@@ -70,3 +70,16 @@ describe('#93 item 4: two approvals for overlapping booking slots', () => {
     expect(second.json()).toMatchObject({ code: 'SLOT_CONFLICT' });
   });
 });
+
+describe('#94 item 6: the one Square catalog syncs only into the business that sells from it', () => {
+  it('the barbershop cannot sync the pizza catalog; the pizza shop can; publish skips the sync for the barbershop', async () => {
+    const res = await w.app.inject({ method: 'POST', url: `/api/businesses/${BARBER}/catalog/sync`, headers: OWNER, payload: {} });
+    expect(res.json()).toMatchObject({ code: 'CAPABILITY_NOT_ALLOWED' });
+    const ok = await w.app.inject({ method: 'POST', url: `/api/businesses/${PIZZA}/catalog/sync`, headers: OWNER, payload: {} });
+    expect(ok.statusCode, ok.body).toBeLessThan(300);
+    const { squareCatalogSync } = await import('../../src/compose/builder-publish');
+    expect(await squareCatalogSync(w.t.db, w.app.composed.providers, () => new Date())({ businessId: BARBER, agentId: 'agt_barber_01', correlationId: 'corr_test_94_6' })).toEqual({});
+    await new Promise((r) => setTimeout(r, 50));
+    expect((await w.t.db.query('select count(*)::int as n from catalog_items where business_id = $1', [BARBER])).rows[0]).toEqual({ n: 0 });
+  });
+});

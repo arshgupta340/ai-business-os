@@ -41,7 +41,7 @@ import type { PricesDependencies } from '../api/prices/index';
 import type { RecoveryPorts } from '../api/recovery/index';
 import { createDbRecoveryPorts } from './recovery';
 import { createDbFallback, type FallbackDeps } from './fallback';
-import { dbAgentVersionStore, dbLiveAgentStore, dbPublishEventSink, squareCatalogSync } from './builder-publish';
+import { catalogOwnedElsewhere, dbAgentVersionStore, dbLiveAgentStore, dbPublishEventSink, squareCatalogSync } from './builder-publish';
 import { createCallDecisions, type CallDecisionsBus } from './decisions';
 import { createProposeFactFromChat, dbAgentDraftStore, dbBuilderSessionStore, dbBusinessKnowledge, dbDraftFactStore, dbLiveAgentReader, type ProposeFactFromChat } from './builder';
 import { notWiredExecutor, notWiredWebhooks, type Executor, type ExecutorFactory, type SeamDeps, type WebhooksFactory } from './seams';
@@ -198,6 +198,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     async sync({ businessId }) {
       const square = providers.square;
       if (!square) throw new AppError('INTEGRATION_UNAVAILABLE', 'Square is not configured.', undefined, undefined, { provider: 'square' });
+      if (await catalogOwnedElsewhere(db, businessId)) throw new AppError('CAPABILITY_NOT_ALLOWED', 'The Square catalog on this server belongs to another business.');
       const jobId = newId('job_');
       const event = async (type: 'sync.queued' | 'sync.succeeded', extra = {}) => emitActivity(db, { id: newId('evt_'), businessId, correlationId: jobId, type, actorType: 'system', occurredAt: now().toISOString(), payload: { target: 'catalog', jobId, ...extra } });
       await event('sync.queued');
