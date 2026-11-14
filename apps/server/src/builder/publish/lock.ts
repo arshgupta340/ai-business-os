@@ -22,3 +22,9 @@ export class KeyedLock {
     }
   }
 }
+
+// The key for one builder session. Chat turns and agent creates from a
+// session use it on the same KeyedLock (see builder/index.ts).
+export function sessionLockKey(businessId: string, sessionId: string): string {
+  return `${businessId}:${sessionId}`;
+}

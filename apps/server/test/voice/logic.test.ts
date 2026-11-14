@@ -76,6 +76,58 @@ describe('voice logic: stream credential', () => {
   });
 });
 
+describe('voice logic: a credential that can no longer open a stream is reported once (issue #95 item 6)', () => {
+  const report = () => {
+    const seen: { callId: string; why: string }[] = [];
+    const store = new StreamTokenStore<typeof pinned>(60_000, undefined, (value, why) => seen.push({ callId: value.callId, why }));
+    return { store, seen };
+  };
+
+  it('a token presented with the wrong CallSid, with no stream ID, or after expiry burns the credential and reports its call as rejected', () => {
+    for (const consume of [
+      (store: StreamTokenStore<typeof pinned>, t: string) => store.consume(t, 'CA999', 'MZ1', 10),
+      (store: StreamTokenStore<typeof pinned>, t: string) => store.consume(t, 'CA123', undefined, 10),
+      (store: StreamTokenStore<typeof pinned>, t: string) => store.consume(t, 'CA123', 'MZ1', 60_000),
+    ]) {
+      const { store, seen } = report();
+      const t = store.mint(pinned, 0) ?? '';
+      expect(consume(store, t).ok).toBe(false);
+      expect(seen).toEqual([{ callId: pinned.callId, why: 'rejected' }]);
+      // A second use of the burned token is unknown and reports nothing more.
+      expect(store.consume(t, 'CA123', 'MZ1', 20)).toEqual({ ok: false, reason: 'unknown' });
+      store.expireUnclaimed(120_000);
+      expect(seen).toHaveLength(1);
+    }
+  });
+
+  it('a credential never presented is reported as unused once it expires, and only once', () => {
+    const { store, seen } = report();
+    store.mint(pinned, 0);
+    store.expireUnclaimed(59_999);
+    expect(seen).toEqual([]);
+    store.expireUnclaimed(60_000);
+    store.expireUnclaimed(60_001);
+    expect(seen).toEqual([{ callId: pinned.callId, why: 'unused' }]);
+    // Still refused afterwards, as before.
+    expect(store.lookup('CA123', 60_002)).toEqual({ kind: 'refused', state: 'expired' });
+    expect(store.mint(pinned, 60_002)).toBeNull();
+  });
+
+  it('a claimed credential, an ended one and a token nobody minted report nothing', () => {
+    const { store, seen } = report();
+    const t = store.mint(pinned, 0) ?? '';
+    expect(store.consume('not-a-token', 'CA123', 'MZ1', 5).ok).toBe(false);
+    expect(store.consume(undefined, 'CA123', 'MZ1', 5).ok).toBe(false);
+    expect(store.consume(t, 'CA123', 'MZ1', 10).ok).toBe(true);
+    store.expireUnclaimed(120_000);
+    const other = { providerCallId: 'CA456', callId: 'call_test_02' };
+    store.mint(other, 0);
+    store.end('CA456');
+    store.expireUnclaimed(120_000);
+    expect(seen).toEqual([]);
+  });
+});
+
 describe('voice logic: playback and barge-in offsets', () => {
   it('truncates at the last mark Twilio echoed, not at what was sent', () => {
     const p = new PlaybackTracker();

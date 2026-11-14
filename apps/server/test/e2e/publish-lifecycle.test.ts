@@ -48,14 +48,16 @@ describe('publish, pause and rollback on the database', () => {
     const pause = await call(`/api/agents/${AGENT}/pause`, {});
     expect(pause.statusCode, pause.body).toBe(200);
     expect(await q('select state from agents where id = $1', [AGENT])).toEqual([{ state: 'paused' }]);
-    // The phone plays the closed message: the live agent port reads the paused state.
-    expect(await dbLiveAgentPort(w.t.db).resolve(PHONE)).toEqual({ state: 'paused' });
+    // The phone plays the closed message: the live agent port reads the paused state. It also names the
+    // agent and version the number still points at, so the refused call can be recorded (issue #95 item 6).
+    expect(await dbLiveAgentPort(w.t.db).resolve(PHONE)).toEqual({ state: 'paused', businessId: PIZZA, agentId: AGENT, agentVersionId: newVersion });
 
     const back = await call(`/api/agents/${AGENT}/rollback`, { toVersionId: priorVersion, confirm: true });
     expect(back.statusCode, back.body).toBe(200);
     // A rollback of a paused agent moves only the active version; the agent stays paused.
     expect(await q('select state, active_version_id from agents where id = $1', [AGENT])).toEqual([{ state: 'paused', active_version_id: priorVersion }]);
-    expect(await dbLiveAgentPort(w.t.db).resolve(PHONE)).toEqual({ state: 'paused' });
+    const [pointer] = await q('select agent_version_id from live_agent where phone_number = $1', [PHONE]);
+    expect(await dbLiveAgentPort(w.t.db).resolve(PHONE)).toEqual({ state: 'paused', businessId: PIZZA, agentId: AGENT, agentVersionId: String(pointer!.agent_version_id) });
 
     // A restart: a fresh app on the same database sees the same versions and the same agent row.
     const env = parseEnv({ TWILIO_PHONE_NUMBER: PHONE, PUBLIC_SERVER_URL: PUBLIC_URL, MESSAGE_CHANNEL: 'qr_only' });

@@ -75,7 +75,10 @@ const pizzaFaqFacts: BusinessFact[] = [
     value: { question: 'Is there parking?', answer: 'There are two pickup spots in front of the shop.' }, sourceType: 'owner_ui', sourceRef: 'knowledge_review' }),
 ];
 
-/** The uploaded menu (P-12). Its extraction produced one draft menu_item fact and one conflict. */
+/**
+ * The uploaded menu (P-12). Its extraction produced two drafts, a menu_item and a pickup window, and each
+ * disagrees with what the business already has, so the file lists two drafts and two conflicts.
+ */
 export const menuFile = {
   id: 'file_menu_01',
   businessId: PIZZA_BUSINESS_ID,
@@ -84,17 +87,21 @@ export const menuFile = {
   sizeBytes: 182044,
   sha256: 'sha256:4be05c7d1f2a9e83b6c0d4e7f81a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c',
   extractionState: 'EXTRACTED',
-  draftFactIds: ['fact_pizza_menu_marg_lg_d1'],
-  conflictIds: ['cfl_pizza_01'],
+  draftFactIds: ['fact_pizza_menu_marg_lg_d1', 'fact_pizza_draft_pickup'],
+  conflictIds: ['cfl_pizza_01', 'cfl_pizza_02'],
   createdAt: '2026-11-14T18:05:00Z',
 } satisfies FileRecord;
 
-/** A `menu_item` fact comes only from an upload, stays draft and is never a price source (SPEC 2.9). */
+/**
+ * A `menu_item` fact comes only from an upload, stays draft and is never a price source (SPEC 2.9).
+ * Its value and key have the form the extraction writes (CONTRACTS 3, "Menu item drafts").
+ */
+export const MENU_ITEM_DRAFT_KEY = 'margherita:large';
 export const menuItemDraftFact = {
   id: 'fact_pizza_menu_marg_lg_d1',
   businessId: PIZZA_BUSINESS_ID,
   kind: 'menu_item',
-  key: 'margherita_large',
+  key: MENU_ITEM_DRAFT_KEY,
   value: { itemName: 'Margherita', variationName: 'Large', priceMinor: 2100, currency: 'USD' },
   sourceType: 'upload',
   sourceRef: 'menu.pdf page 1',
@@ -106,16 +113,21 @@ export const menuItemDraftFact = {
   updatedAt: '2026-11-14T18:05:30Z',
 } satisfies BusinessFact;
 
-/** The menu says Large Margherita 2100; Square says 2000. Open and required, so publish is blocked. */
+/**
+ * The menu says Large Margherita 2100; Square says 2000. Open and required, so publish is blocked.
+ * The upload candidate carries the draft's value and the square candidate the catalog row's names and
+ * price, with the `cat_` row ID as `sourceRef`: what the extraction writes (CONTRACTS 3). `variationId`
+ * is an extra field only this fixture has; a real conflict is matched by names or by `sourceRef`.
+ */
 export const menuPriceConflict = {
   id: 'cfl_pizza_01',
   businessId: PIZZA_BUSINESS_ID,
   kind: 'menu_item',
-  key: 'margherita_large',
+  key: MENU_ITEM_DRAFT_KEY,
   required: true,
   candidates: [
-    { factId: menuItemDraftFact.id, sourceType: 'upload', sourceRef: 'menu.pdf page 1', value: { priceMinor: 2100, variationId: SQ.varMargheritaLarge } },
-    { sourceType: 'square', sourceRef: 'cat_marg_lg', value: { priceMinor: 2000, variationId: SQ.varMargheritaLarge } },
+    { factId: menuItemDraftFact.id, sourceType: 'upload', sourceRef: 'menu.pdf page 1', value: { ...menuItemDraftFact.value, variationId: SQ.varMargheritaLarge } },
+    { sourceType: 'square', sourceRef: 'cat_marg_lg', value: { itemName: 'Margherita', variationName: 'Large', priceMinor: 2000, currency: 'USD', variationId: SQ.varMargheritaLarge } },
   ],
   state: 'open',
   createdAt: '2026-11-14T18:05:30Z',

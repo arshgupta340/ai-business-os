@@ -8,11 +8,12 @@ import {
 import type { Db } from '../db/index';
 import type { Env } from '../env';
 import { AppError } from '../errors';
-import { mapRow } from './rows';
+import { mapApprovalRow, mapRow } from './rows';
 import { ownerDisplayNames, withApprovalDisplayFields } from './display';
 import { setLiveAgent } from './live-agent';
 import { unavailableCatalog, type CatalogPort, type EnginePorts } from './ports';
 import { createHealthMonitor, type HealthMonitor } from '../compose/health';
+import { createReplayCache } from './replay';
 export { setLiveAgent } from './live-agent';
 
 export type ProviderStatusMap = Record<'square' | 'twilio' | 'openai' | 'google_calendar' | 'google_sheets' | 'message_channel', { configured: boolean; detail: string; noProviderNeeded?: true }>;
@@ -102,7 +103,7 @@ async function list(db: Db, name: keyof typeof collections, businessId: string, 
   values.push(limit + 1);
   const rows = (await db.query(`select *, to_char(${time} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as page_time
     from public.${table} where ${clauses.join(' and ')} order by ${time} desc, id desc limit $${values.length}`, values)).rows;
-  const mapped = rows.slice(0, limit).map(mapRow);
+  const mapped = rows.slice(0, limit).map(name === 'listApprovals' ? mapApprovalRow : mapRow);
   const page = name === 'listActivity' ? await normalizeActivity(db, mapped)
     : name === 'listApprovals' ? await withApprovalDisplayFields(db, businessId, mapped) : mapped;
   const last = page.at(-1);
@@ -114,7 +115,7 @@ async function list(db: Db, name: keyof typeof collections, businessId: string, 
 async function one(db: Db, table: string, id: string, businessId: string) {
   const row = (await db.query(`select * from public.${table} where id = $1 and business_id = $2`, [id, businessId])).rows[0];
   if (!row) throw notFound();
-  return mapRow(row);
+  return table === 'approval_requests' ? mapApprovalRow(row) : mapRow(row);
 }
 
 async function catalog(db: Db, businessId: string) {
@@ -204,11 +205,13 @@ export async function normalizeActivity(db: Db, items: Record<string, unknown>[]
   });
 }
 
-type Replay = { fingerprint: string; expiresAt: number; response: Promise<unknown> };
+/** API.md section 1: a decision's first response is replayed for 24 hours. At most this many keys are held. */
+const REPLAY_TTL_MS = 86_400_000;
+const REPLAY_MAX_ENTRIES = 1000;
 
 export async function apiRoutes(app: FastifyInstance, deps: ApiDependencies): Promise<void> {
   const { db, ports, env } = deps;
-  const replays = new Map<string, Replay>();
+  const replays = createReplayCache<Promise<unknown>>({ ttlMs: REPLAY_TTL_MS, maxEntries: REPLAY_MAX_ENTRIES });
   const healthMonitor = deps.health ?? createHealthMonitor({ status: deps.providerStatus ?? envStatus(env), probes: {}, now: () => new Date() });
   async function execute(name: EndpointName, request: FastifyRequest, params: Record<string, unknown>, query: Record<string, unknown>, body: unknown): Promise<unknown> {
     const ownerUserId = request.ownerUserId;
@@ -282,8 +285,8 @@ export async function apiRoutes(app: FastifyInstance, deps: ApiDependencies): Pr
         if (typeof key !== 'string') return perform();
         const cacheKey = canonicalJson({ ownerUserId, key });
         const fingerprint = canonicalJson({ id, businessId, body: request.body });
-        const now = Date.now();
-        for (const [k, replay] of replays) if (replay.expiresAt <= now) replays.delete(k);
+        // Held in this process only (api/replay.ts). After a restart the repeat reaches the engine, where an
+        // identical decision is recorded once by the database and answers 200 with the current approval.
         const previous = replays.get(cacheKey);
         if (previous) {
           if (previous.fingerprint !== fingerprint) throw new AppError('VALIDATION_FAILED', 'Idempotency key was already used for another request.');
@@ -294,7 +297,7 @@ export async function apiRoutes(app: FastifyInstance, deps: ApiDependencies): Pr
           if (!parsed.success) throw new AppError('INTERNAL', 'Approval engine returned an invalid response.');
           return parsed.data;
         });
-        replays.set(cacheKey, { fingerprint, expiresAt: now + 86_400_000, response });
+        replays.set(cacheKey, { fingerprint, response });
         try { return await response; } catch (error) { replays.delete(cacheKey); throw error; }
       }
       case 'getOrderCheckout': {

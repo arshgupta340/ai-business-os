@@ -53,7 +53,13 @@ export const CALL_SETUP_FAILED_MESSAGE = 'Sorry, we cannot take your call right 
 
 export type TokenCheck<T> = { ok: true; value: T } | { ok: false; reason: 'unknown' | 'expired' | 'call_mismatch' | 'malformed' };
 
-type Credential<T> = { token: string; value: T; expiresAt: number; state: 'pending' | 'claimed' | 'ended' };
+type Credential<T> = { token: string; value: T; expiresAt: number; state: 'pending' | 'claimed' | 'ended'; reported?: true };
+
+/**
+ * Why a credential can no longer open its call's stream: `rejected` when the token itself was presented
+ * and a check failed (wrong CallSid, no stream ID, too late), `unused` when nobody presented it in time.
+ */
+export type UnusableCredential = 'rejected' | 'unused';
 
 /** What a repeated webhook for the same CallSid gets. */
 export type CredentialLookup = { kind: 'none' } | { kind: 'pending'; token: string } | { kind: 'refused'; state: 'claimed' | 'expired' | 'ended' };
@@ -63,6 +69,11 @@ export type CredentialLookup = { kind: 'none' } | { kind: 'pending'; token: stri
  * a repeated webhook gets the same pending token back and never a second one. The WebSocket claims
  * it once, with the exact CallSid and a stream ID, before it expires. A claimed, expired or ended
  * credential never opens a session, and its record is kept so a later retry is refused.
+ *
+ * Issue #95 item 6: a credential that can no longer open a stream leaves a call that will never get
+ * one. `onUnusable` is told once per call, with the pinned value, so the owner of the store can end
+ * that call. It fires only for the call the presented token belongs to, or for a credential that
+ * expired unclaimed. A token nobody minted, or a CallSid alone, identifies no call and ends nothing.
  */
 export class StreamTokenStore<T extends { providerCallId: string }> {
   private byToken = new Map<string, Credential<T>>();
@@ -72,7 +83,19 @@ export class StreamTokenStore<T extends { providerCallId: string }> {
     private readonly ttlMs = STREAM_TOKEN_TTL_MS,
     /** How long a used credential is remembered, to refuse late retries. */
     private readonly retentionMs = 4 * 60 * 60 * 1000,
+    private readonly onUnusable?: ((value: T, why: UnusableCredential) => void) | undefined,
   ) {}
+
+  private unusable(c: Credential<T>, why: UnusableCredential): void {
+    if (c.reported) return;
+    c.reported = true;
+    this.onUnusable?.(c.value, why);
+  }
+
+  /** Reports every credential that expired without being presented. Call it once the life of a credential has passed. */
+  expireUnclaimed(now = Date.now()): void {
+    for (const c of this.byCall.values()) if (c.state === 'pending' && now >= c.expiresAt) this.unusable(c, 'unused');
+  }
 
   lookup(providerCallId: string, now = Date.now()): CredentialLookup {
     this.prune(now);
@@ -100,10 +123,13 @@ export class StreamTokenStore<T extends { providerCallId: string }> {
     if (c === undefined || c.state !== 'pending') return { ok: false, reason: 'unknown' };
     this.byToken.delete(token);
     c.state = 'claimed';
-    if (now >= c.expiresAt) return { ok: false, reason: 'expired' };
-    if (providerCallId === undefined || providerCallId === '' || streamSid === undefined || streamSid === '') return { ok: false, reason: 'malformed' };
-    if (providerCallId !== c.value.providerCallId) return { ok: false, reason: 'call_mismatch' };
-    return { ok: true, value: c.value };
+    const reason = now >= c.expiresAt ? 'expired' as const
+      : providerCallId === undefined || providerCallId === '' || streamSid === undefined || streamSid === '' ? 'malformed' as const
+      : providerCallId !== c.value.providerCallId ? 'call_mismatch' as const : undefined;
+    if (reason === undefined) return { ok: true, value: c.value };
+    // The credential is burned, so this call can never get a stream.
+    this.unusable(c, 'rejected');
+    return { ok: false, reason };
   }
 
   /** The call ended: its credential can never be used or reissued. */

@@ -10,6 +10,7 @@ import {
   type SyncJob,
 } from '../src/index';
 import { messageDispatches } from './executions';
+import { menuFile, menuItemDraftFact } from './facts';
 import { orderAwaitingApproval, orderFulfilled, orderPaid, orderPaymentPending } from './orders';
 import { barberBookingTimeline, barberSlotConflictTimeline, pizzaOrderTimeline } from './timelines';
 
@@ -28,17 +29,26 @@ export const integrationHealth = {
 export const integrationHealthDisconnected: IntegrationHealth = {
   ...integrationHealth, google_sheets: { state: 'disconnected', lastCheckedAt: CHECKED_AT, detail: 'Reconnect Google Sheets to resume sync.' },
 };
+/**
+ * The Sheets row of the paid order, still retrying. It was queued when the payment was verified
+ * (`orderPaid.updatedAt`, FLOWS B28). In the default world Sheets is connected, so the last error is a
+ * slow answer, not a disconnect (issue #103).
+ */
 export const syncJobRetrying: SyncJob = {
   id: 'syn_demo_88', businessId: PIZZA_BUSINESS_ID, target: 'google_sheets', recordType: 'order', recordId: orderPaid.id,
-  state: 'RETRYING', attempts: 2, nextRetryAt: '2026-11-14T20:32:00Z', lastError: 'Google Sheets is disconnected.',
-  createdAt: '2026-11-14T19:24:00Z', updatedAt: CHECKED_AT,
+  state: 'RETRYING', attempts: 2, nextRetryAt: '2026-11-14T20:32:00Z', lastError: 'Google Sheets did not answer in time',
+  createdAt: orderPaid.updatedAt, updatedAt: CHECKED_AT,
 };
 export const syncJobs: SyncJob[] = [syncJobRetrying];
 
-/** A resolution response event. Keeping Square supersedes the draft without creating a new fact version. */
+/**
+ * The event of a resolve response (the conflict of `menuPriceConflictResolved`). Keeping Square supersedes
+ * the draft without creating a new fact version. It is an example only and is not in `allActivityEvents`:
+ * in the stored world `cfl_pizza_01` is still open, and the event is dated after `FIXTURE_NOW` (issue #103).
+ */
 export const factConflictResolvedEvent: ActivityEvent = {
   id: 'evt_conflict_resolved_88', businessId: PIZZA_BUSINESS_ID, type: 'fact.changed', correlationId: 'cfl_pizza_01', actorType: 'owner', occurredAt: '2026-11-14T20:31:00Z',
-  payload: { factId: 'fact_pizza_menu_marg_lg_d1', kind: 'menu_item', key: 'margherita_large', fromVersion: 1, toVersion: 1, sourceType: 'upload', resolvedConflictId: 'cfl_pizza_01' },
+  payload: { factId: 'fact_pizza_menu_marg_lg_d1', kind: 'menu_item', key: menuItemDraftFact.key, fromVersion: 1, toVersion: 1, sourceType: 'upload', resolvedConflictId: 'cfl_pizza_01' },
 };
 
 function checkoutFor(order: typeof orderPaymentPending): OrderCheckout {
@@ -81,7 +91,7 @@ export const otherActivityEvents = [
   { id: 'evt_o02', businessId: BARBER_BUSINESS_ID, type: 'live_agent.changed', correlationId: 'bld_demo_b0', actorType: 'owner', occurredAt: '2026-11-14T17:00:00Z',
     payload: { phoneNumberLast4: '0199', agentId: 'agt_barber_01', agentVersionId: 'agv_barber_01_v1', previousAgentId: 'agt_pizza_01' } },
   { id: 'evt_o03', businessId: PIZZA_BUSINESS_ID, type: 'extraction.completed', correlationId: 'file_menu_01', actorType: 'system', occurredAt: '2026-11-14T18:05:30Z',
-    payload: { fileId: 'file_menu_01', mime: 'application/pdf', extractionState: 'EXTRACTED', draftFactCount: 1, conflictCount: 1 } },
+    payload: { fileId: menuFile.id, mime: menuFile.mime, extractionState: 'EXTRACTED', draftFactCount: menuFile.draftFactIds.length, conflictCount: menuFile.conflictIds.length } },
   { id: 'evt_o04', businessId: PIZZA_BUSINESS_ID, type: 'live_agent.changed', correlationId: 'bld_demo_00', actorType: 'owner', occurredAt: '2026-11-14T18:55:00Z',
     payload: { phoneNumberLast4: '0199', agentId: 'agt_pizza_01', agentVersionId: 'agv_pizza_01_v2', previousAgentId: 'agt_barber_01' } },
   { id: 'evt_o05', businessId: PIZZA_BUSINESS_ID, type: 'webhook.rejected', correlationId: 'whk_rejected_01', actorType: 'provider', occurredAt: '2026-11-14T19:30:00Z',
@@ -92,9 +102,8 @@ export const otherActivityEvents = [
     payload: { approvalId: 'apv_demo_f01', rule: 'no_approval_bypass', reasonCode: 'approval_pending' } },
 ] satisfies ActivityEvent[];
 
-/** Every stored event, oldest first. */
+/** Every stored event, oldest first. Nothing here is later than `FIXTURE_NOW`. */
 export const allActivityEvents: ActivityEvent[] = [
-  factConflictResolvedEvent,
   ...pizzaOrderTimeline.entries.map((e) => e.event),
   ...barberBookingTimeline.entries.map((e) => e.event),
   ...barberSlotConflictTimeline.entries.map((e) => e.event),
