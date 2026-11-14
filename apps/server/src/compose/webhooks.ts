@@ -314,12 +314,17 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
     plugin, enabled, missing, reconcileNow, recoverNow,
     idle: async () => { await flights; },
     start() {
-      if (!enabled || timers.length) return;
-      void recoverNow().catch(() => log.warn({ job: 'webhook-recovery' }, 'webhook recovery will retry'));
-      timers = [
-        setInterval(() => { if (!reconciling) reconciling = reconcileNow().finally(() => { reconciling = undefined; }); }, PAYMENT_POLL_INTERVAL_MS),
-        setInterval(() => { void recoverNow().catch(() => undefined); }, PAYMENT_POLL_INTERVAL_MS * 4),
-      ];
+      if (timers.length || db === unavailableDb) return;
+      // The payment poll is a Square read loop, independent of the webhook routes: without
+      // PUBLIC_SERVER_URL (local runs, a misregistered webhook) it is the only path to PAID_VERIFIED.
+      if (providers.square) {
+        timers.push(setInterval(() => { if (!reconciling) reconciling = reconcileNow().finally(() => { reconciling = undefined; }); }, PAYMENT_POLL_INTERVAL_MS));
+      }
+      // Stored-row recovery only has rows to re-run when the routes store verified events.
+      if (enabled) {
+        void recoverNow().catch(() => log.warn({ job: 'webhook-recovery' }, 'webhook recovery will retry'));
+        timers.push(setInterval(() => { void recoverNow().catch(() => undefined); }, PAYMENT_POLL_INTERVAL_MS * 4));
+      }
       for (const t of timers) t.unref?.();
     },
     async stop() {
