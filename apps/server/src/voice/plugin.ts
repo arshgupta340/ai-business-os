@@ -183,6 +183,7 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
       redactSecrets: secrets,
       now,
       limits: opts.limits,
+      fallback: opts.fallback,
     });
   });
 };

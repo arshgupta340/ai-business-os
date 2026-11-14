@@ -168,6 +168,8 @@ export type VoicePluginOptions = {
   openaiSocketFactory: OpenAISocketFactory;
   /** The server's MESSAGE_CHANNEL setting, for the consent question and the wait script. */
   messageChannel: MessageChannelSetting;
+  /** Human fallback (B-28) at the relay's hook points. Absent: those failures end the call as before. */
+  fallback?: import('./relay').RelayFallback | undefined;
   /** The business that owns the Twilio integration, from configuration. Used only for `webhook.rejected`. */
   twilioBusinessId?: string | undefined;
   /** Defaults to REALTIME_MODEL from the contracts. */

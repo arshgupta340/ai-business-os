@@ -39,6 +39,7 @@ import { mapRow } from '../api/rows';
 import type { PricesDependencies } from '../api/prices/index';
 import type { RecoveryPorts } from '../api/recovery/index';
 import { createDbRecoveryPorts } from './recovery';
+import { createDbFallback, type FallbackDeps } from './fallback';
 import { createProposeFactFromChat, dbAgentDraftStore, dbBuilderSessionStore, dbBusinessKnowledge, dbDraftFactStore, dbLiveAgentReader, type ProposeFactFromChat } from './builder';
 import { notWiredExecutor, notWiredWebhooks, type Executor, type ExecutorFactory, type SeamDeps, type WebhooksFactory } from './seams';
 
@@ -60,6 +61,8 @@ export interface ComposeOptions {
   // PLUG-IN B-13: pass the webhooks plugin factory here, or replace `notWiredWebhooks` below.
   webhooks?: WebhooksFactory;
   log?: SeamDeps['log'];
+  /** Human fallback condition (2): no contract field enables it yet, so the default refuses (compose/fallback.ts). */
+  versionEnablesFallback?: FallbackDeps['versionEnablesFallback'];
   /** Bound on each integration health probe (tests use a short one). */
   healthProbeTimeoutMs?: number;
 }
@@ -88,6 +91,8 @@ export interface ComposedServer {
   webhooksPlugin: FastifyPluginAsync;
   /** The database webhooks wiring, when it is the one in use (jobs, recovery, reconciliation). */
   webhooks: DbWebhooks | undefined;
+  /** Human fallback router (B-28) and the relay hook it serves. */
+  fallback: ReturnType<typeof createDbFallback>;
   /** POST /api/orders/:id/cancel and /api/executions/:id/resolve (B-32), on the 0005 routines. */
   recovery: RecoveryPorts;
   /** POST /api/businesses/:id/catalog/prices/propose (B-26): owner, catalog row, Square read, approval. */
@@ -217,6 +222,9 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   } : {};
   const proposeFactFromChat = createProposeFactFromChat(engine);
 
+  const fallback = createDbFallback({ db, providers, ownedNumber: env.TWILIO_PHONE_NUMBER, newId,
+    ...(options.versionEnablesFallback ? { versionEnablesFallback: options.versionEnablesFallback } : {}) });
+
   const voiceMissing = [
     ...(env.PUBLIC_SERVER_URL ? [] : ['PUBLIC_SERVER_URL']),
     ...(providers.twilioValidator ? [] : ['TWILIO_AUTH_TOKEN']),
@@ -230,7 +238,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       events: dbVoiceEventsPort(db, newId, now),
       toolsetFactory: (ctx) => { const ts = toolsetFor(ctx); return { handler: ts.handler, dispose: () => ts.dispose() }; },
       twilioValidator: providers.twilioValidator,
-      openaiSocketFactory: providers.openaiSocketFactory, messageChannel,
+      openaiSocketFactory: providers.openaiSocketFactory, messageChannel, fallback: fallback.relay,
       ...(env.OPENAI_REALTIME_MODEL ? { model: env.OPENAI_REALTIME_MODEL } : {}),
       redactSecrets: [env.OPENAI_API_KEY, env.TWILIO_AUTH_TOKEN].filter((s): s is string => typeof s === 'string'),
     } }
@@ -261,7 +269,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
 
   let sweep: ReturnType<typeof setInterval> | undefined;
   return {
-    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, prices, recovery, telemetry: telemetryOptions, health, now, newId,
+    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, prices, recovery, fallback, telemetry: telemetryOptions, health, now, newId,
     async close() { if (pool) await pool.end(); },
     startJobs() {
       if (!hasDb || sweep) return;

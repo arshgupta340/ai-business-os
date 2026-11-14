@@ -273,7 +273,15 @@ export type PhoneRelayDeps = {
   redactSecrets?: readonly string[] | undefined;
   now?: (() => number) | undefined;
   limits?: Partial<RelayLimits> | undefined;
+  /** Human fallback (B-28 hook points). Resolves true only when the call was handed to a person. */
+  fallback?: RelayFallback | undefined;
 };
+
+/** Trusted relay outcomes only (B-28 NOTES, voice wiring 3). Never caller text. */
+export type RelayFallback = (input: {
+  businessId: string; callId: string; providerCallId: string;
+  signals: { modelSessionFailed?: boolean; modelSessionReady?: boolean; phoneLineOverloaded?: boolean; guardrailRefusals?: number };
+}) => Promise<boolean>;
 
 /** How the relay finished. A null `endReason` means the call row was not changed. */
 export type RelayOutcome = { endReason: CallEndReason | null; why: string };
@@ -342,6 +350,22 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
   const sendTwilio = (msg: JsonObject) => phone.send(JSON.stringify(msg));
   const sendOpenAI = (msg: JsonObject) => {
     if (!closed && openai?.isOpen) openai.send(JSON.stringify(msg));
+  };
+
+  /**
+   * B-28 hook: before failing the call for a pre-ready model failure or phone back-pressure, offer the
+   * call to the human fallback router. A handoff ends the relay without a terminal call write; the
+   * verified Twilio status callback records the outcome. Otherwise the call fails as before.
+   */
+  let handingOff = false;
+  const failOrHandOff = (why: string, signals: Parameters<RelayFallback>[0]['signals']) => {
+    const call = pinned;
+    if (closed || handingOff) return;
+    if (deps.fallback === undefined || call === undefined) { shutdown('failed', why); return; }
+    handingOff = true;
+    void deps.fallback({ businessId: call.businessId, callId: call.callId, providerCallId: call.providerCallId, signals })
+      .catch(() => false)
+      .then((handed) => { handingOff = false; shutdown(handed ? null : 'failed', handed ? `handed to a person: ${why}` : why); });
   };
 
   const shutdown = (endReason: CallEndReason | null, why: string) => {
@@ -590,7 +614,7 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
         if (phone.bufferedAmount + Buffer.byteLength(JSON.stringify({ event: TWILIO_EVENT.media, streamSid, media: { payload: delta } })) > limits.maxBufferedBytes || playback.pendingMarks >= limits.maxPendingMarks || playback.retainedItems >= 128) {
           // Drop policy: the caller's line cannot keep up, so the call fails rather than buffering without bound.
           logger.error({ ...tag(), bufferedBytes: phone.bufferedAmount, pendingMarks: playback.pendingMarks }, 'voice: phone back-pressure limit reached');
-          shutdown('failed', 'phone back-pressure');
+          failOrHandOff('phone back-pressure', { phoneLineOverloaded: true, modelSessionReady: sessionReady });
           break;
         }
         sendTwilio({ event: TWILIO_EVENT.media, streamSid, media: { payload: delta } });
@@ -626,7 +650,7 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
         const e = asObject(ev.error);
         logger.error({ ...tag(), errorType: code(e?.type), errorCode: code(e?.code) }, 'voice: OpenAI error');
         modelErrors++;
-        if (!sessionReady) shutdown('failed', 'model error during setup');
+        if (!sessionReady) failOrHandOff('model error during setup', { modelSessionFailed: true, modelSessionReady: false });
         else if (!RECOVERABLE_ERRORS.has(code(e?.code))) shutdown('failed', 'fatal model error');
         else if (modelErrors >= MAX_MODEL_ERRORS) shutdown('failed', 'repeated model errors');
         break;
@@ -650,7 +674,7 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
       openai = deps.openaiSocketFactory({ model });
     } catch (err) {
       logger.error({ ...tag(), ...errorInfo(err) }, 'voice: could not open the model session');
-      shutdown('failed', 'session setup failed');
+      failOrHandOff('session setup failed', { modelSessionFailed: true, modelSessionReady: false });
       return;
     }
     if (deps.finishes !== undefined) {
@@ -712,7 +736,7 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     startedAt = now();
     timing.onConnect(startedAt);
     later(limits.setupTimeoutMs, () => {
-      if (!sessionReady) shutdown('failed', 'model session not ready in time');
+      if (!sessionReady) failOrHandOff('model session not ready in time', { modelSessionFailed: true, modelSessionReady: false });
     });
     later(limits.maxSessionMs, () => shutdown('completed', 'maximum call length'));
     touch();

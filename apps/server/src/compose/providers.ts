@@ -36,6 +36,8 @@ export interface Providers {
   message?: MessageAdapter | undefined;
   messageChannel: MessageChannelSetting;
   twilioValidator?: TwilioRequestValidator | undefined;
+  /** Twilio Calls update with inline TwiML, used only by human fallback (B-28). Honors the signal before sending. */
+  twilioCalls?: { update(input: { callSid: string; twiml: string; signal: AbortSignal }): Promise<void> } | undefined;
   openaiSocketFactory?: OpenAISocketFactory | undefined;
   /** Why each provider is or is not configured. Never holds a value from the environment. */
   status: Record<ProviderKey, ProviderStatus>;
@@ -140,10 +142,21 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
     status.message_channel = ok(messageChannel);
   }
 
+  let twilioCalls: Providers['twilioCalls'];
   const twilioValidator = env.TWILIO_AUTH_TOKEN ? createTwilioRequestValidator(env.TWILIO_AUTH_TOKEN) : undefined;
   status.twilio = env.TWILIO_AUTH_TOKEN && env.TWILIO_PHONE_NUMBER && env.PUBLIC_SERVER_URL ? ok() : missing('TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER', 'PUBLIC_SERVER_URL');
   if (status.twilio.configured && env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN) {
     const sid = env.TWILIO_ACCOUNT_SID; const token = env.TWILIO_AUTH_TOKEN;
+    twilioCalls = {
+      async update({ callSid, twiml, signal }) {
+        if (signal.aborted) throw new Error('aborted');
+        // The instruction is never logged; only the status decides the outcome.
+        const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}/Calls/${encodeURIComponent(callSid)}.json`, {
+          method: 'POST', signal, body: new URLSearchParams({ Twiml: twiml }),
+          headers: { Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString('base64')}`, 'Content-Type': 'application/x-www-form-urlencoded' } });
+        if (!res.ok) throw new Error('Twilio refused the call update');
+      },
+    };
     probes.twilio = async () => {
       try {
         const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}.json`, { method: 'GET', headers: { Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString('base64')}` }, signal: AbortSignal.timeout(5000) });
@@ -166,7 +179,7 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
 
   return {
     square, prices, squareLocationId: env.SQUARE_LOCATION_ID, squarePaymentStatus, calendar: calendarAdapter, calendarId: env.GOOGLE_CALENDAR_ID, sheets: sheetsAdapter, sheetId: env.GOOGLE_SHEET_ID,
-    message, messageChannel, twilioValidator, openaiSocketFactory, status, probes,
+    message, messageChannel, twilioValidator, twilioCalls, openaiSocketFactory, status, probes,
     ...overrides,
   };
 }
