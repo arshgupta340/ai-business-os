@@ -19,10 +19,10 @@ describe('voice prompt', () => {
     expect(text).toContain('Hi, thanks for calling Demo Pizza Co. You are speaking with an AI assistant.');
   });
 
-  it('has the wait script for consent and for a declined message', () => {
+  it('uses the counter wait script until trusted consent evidence is available', () => {
     const text = buildInstructions(pizzaSpecV2, pizza);
     const wait = orderWaitScript('surge');
-    expect(text).toContain(wait.consented);
+    expect(text).not.toContain(wait.consented);
     expect(text).toContain(wait.declined);
     expect(wait.consented).toContain('by text message to the number ending in {last4}');
     expect(wait.declined).toContain('shown to you at the counter');
@@ -37,9 +37,9 @@ describe('voice prompt', () => {
     expect(decisionInstruction('restaurant_order_taker', { kind: 'rejected' }, 'surge')).toContain('Nothing has been charged');
   });
 
-  it('S10, S11: explains the read-back step and the fail-closed answer', () => {
+  it('S10, S11: explains the trusted evidence requirement and the fail-closed answer', () => {
     const text = buildInstructions(pizzaSpecV2, pizza);
-    expect(text).toContain('missing field ending in readBack');
+    expect(text).toContain('Message consent requires trusted call evidence');
     expect(text).toContain('you cannot take this right now and do not propose anything');
   });
 
@@ -66,7 +66,8 @@ describe('voice prompt', () => {
     const text = buildInstructions(barberSpecV1, { businessName: 'Demo Barbershop', messageChannel: 'whatsapp_sandbox' });
     expect(text).toContain('book appointments');
     expect(text).toContain('Your appointment is not booked until then.');
-    expect(text).toContain('WhatsApp message');
+    expect(text).not.toContain('will get a confirmation by');
+    expect(text).toContain('no message recipient');
     expect(text).toContain('You are speaking with an AI assistant');
   });
 
@@ -75,4 +76,11 @@ describe('voice prompt', () => {
     expect(channelWord('android_gateway')).toBe('text message');
     expect(channelWord('qr_only')).toBe('message');
   });
+});
+
+
+it('requires plain spoken sentences without phone-hostile formatting', () => {
+  const text = buildInstructions(pizzaSpecV2, { businessName: 'Shop', messageChannel: 'qr_only' });
+  expect(text).toContain('plain spoken sentences');
+  for (const forbidden of ['no Markdown', 'no asterisks', 'no lists', 'no headings']) expect(text).toContain(forbidden);
 });

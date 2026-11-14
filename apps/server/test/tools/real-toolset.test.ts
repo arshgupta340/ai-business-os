@@ -15,9 +15,10 @@ import {
   type ToolName,
 } from '@abos/contracts';
 import { FIXTURE_NOW, SQ, barberFacts, pizzaCatalog, pizzaVerifiedFacts, serviceHaircut } from '@abos/contracts/fixtures';
-import { MAX_QUOTES, MAX_TRACE_ENTRIES, READBACK_FIELD, READBACK_MIN_MS, createRealToolset } from '../../src/tools/real/index';
+import { MAX_QUOTES, MAX_TRACE_ENTRIES, createRealToolset } from '../../src/tools/real/index';
 import type { BookingProposalInput, FactsSnapshot, OrderProposalInput, RealToolsetDeps, RealToolsetPorts } from '../../src/tools/real/types';
 
+const READBACK_MIN_MS = 3000; // Elapsed time is deliberately not consent evidence.
 const PIZZA = 'biz_pizza_01';
 const BARBER = 'biz_barber_01';
 const TZ = 'America/Los_Angeles';
@@ -68,6 +69,7 @@ function setup(opts: SetupOpts = {}) {
       }),
     },
     proposals: {
+      atomicOperations: true,
       createOrderProposal: vi.fn(async (input: OrderProposalInput) => {
         orderProposals.push(input);
         return { ok: true as const, orderId: 'ord_test_01', approvalId: 'apv_test_01' } as Awaited<ReturnType<RealToolsetPorts['proposals']['createOrderProposal']>>;
@@ -78,7 +80,7 @@ function setup(opts: SetupOpts = {}) {
       }),
     },
     orderStatus: {
-      read: vi.fn(async ({ orderId }: { orderId: string }) => (orderId === 'ord_test_01' ? { orderId, status: 'AWAITING_OWNER_APPROVAL' as const, paid: false, checkoutLinkSent: false } : null)),
+      read: vi.fn(async ({ orderId }: { orderId: string }) => (orderId === 'ord_test_01' ? { orderId, businessId: PIZZA, callId: 'call_test_01', status: 'AWAITING_OWNER_APPROVAL' as const, paid: false, checkoutLinkSent: false } : null)),
     },
     availability: { freeSlots: vi.fn<RealToolsetPorts['availability']['freeSlots']>(async () => [slot]) },
   } satisfies RealToolsetPorts;
@@ -98,12 +100,11 @@ async function quoted(s: ReturnType<typeof setup>, c: Cart = cart): Promise<Quot
   return r.quote;
 }
 
-/** Presents the recipient, waits the read-back time, then confirms it. */
+/** A model consent claim has no trusted evidence and therefore uses the counter instead. */
 async function proposeConsented(s: ReturnType<typeof setup>, q: Quote, contact = consented) {
-  const first = await s.ts.tools.propose_order({ cart, contact, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx);
-  expect(first).toMatchObject({ ok: true, missingFields: [READBACK_FIELD.order] });
-  s.clock.advance(READBACK_MIN_MS);
-  return s.ts.tools.propose_order({ cart, contact, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx);
+  const result = await s.ts.tools.propose_order({ cart, contact, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx);
+  expect(s.orderProposals[0]?.contact).toEqual({ name: contact.name, messageConsent: false });
+  return result;
 }
 
 describe('real toolset: the tool table', () => {
@@ -153,8 +154,8 @@ describe('real toolset: trace privacy and bounds (B2)', () => {
     const q = await quoted(s);
     await proposeConsented(s, q);
     const trace = s.ts.trace();
-    expect(trace.map((e) => e.tool)).toEqual(['quote_order', 'propose_order', 'propose_order']);
-    expect(trace[2]).toMatchObject({ input: { valid: true, fields: ['cart', 'contact', 'fulfillment', 'quoteId'] }, output: { ok: true, proposalId: 'ord_test_01', approvalId: 'apv_test_01' } });
+    expect(trace.map((e) => e.tool)).toEqual(['quote_order', 'propose_order']);
+    expect(trace[1]).toMatchObject({ input: { valid: true, fields: ['cart', 'contact', 'fulfillment', 'quoteId'] }, output: { ok: true, proposalId: 'ord_test_01', approvalId: 'apv_test_01' } });
     const text = JSON.stringify(trace);
     for (const leak of ['Maya', '0123', 'SQ_ITEM']) expect(text).not.toContain(leak);
   });
@@ -245,7 +246,7 @@ describe('real toolset: read tools', () => {
     const r = await s.ts.tools.get_order_status({ orderId: 'ord_test_01' }, pizzaCtx);
     expectValid('get_order_status', r);
     expect(r).toMatchObject({ ok: true, status: 'AWAITING_OWNER_APPROVAL', paid: false });
-    expect(s.ports.orderStatus.read).toHaveBeenCalledWith({ businessId: PIZZA, orderId: 'ord_test_01', callId: 'call_test_01' });
+    expect(s.ports.orderStatus.read).toHaveBeenCalledWith({ businessId: PIZZA, orderId: 'ord_test_01', callId: 'call_test_01', signal: expect.any(AbortSignal) });
     expect(await s.ts.tools.get_order_status({ orderId: 'ord_other_99' }, pizzaCtx)).toMatchObject({ ok: false, reason: 'NOT_FOUND' });
   });
 
@@ -257,7 +258,7 @@ describe('real toolset: read tools', () => {
     const r = await s.ts.tools.read_calendar_availability({ serviceId: serviceHaircut.id, date: '2026-11-14' }, barberCtx);
     expectValid('read_calendar_availability', r);
     expect(r).toMatchObject({ ok: true, slots: [s.slot] });
-    expect(s.ports.availability.freeSlots).toHaveBeenCalledWith({ businessId: BARBER, service: serviceHaircut, date: '2026-11-14', hours: { open: '09:00', close: '16:00' }, timezone: TZ, maxSlots: 5 });
+    expect(s.ports.availability.freeSlots).toHaveBeenCalledWith({ businessId: BARBER, service: serviceHaircut, date: '2026-11-14', hours: { open: '09:00', close: '16:00' }, timezone: TZ, maxSlots: 5, signal: expect.any(AbortSignal) });
     expect(await s.ts.tools.read_calendar_availability({ serviceId: 'svc_nope', date: '2026-11-14' }, barberCtx)).toMatchObject({ ok: false, reason: 'NOT_FOUND' });
     // Sunday is closed: no slots and no calendar read.
     expect(await s.ts.tools.read_calendar_availability({ serviceId: serviceHaircut.id, date: '2026-11-15' }, barberCtx)).toMatchObject({ ok: true, slots: [] });
@@ -273,46 +274,48 @@ describe('real toolset: quote_order and propose_order', () => {
     expect(await setup({ unavailable: true }).ts.tools.quote_order({ cart }, pizzaCtx)).toMatchObject({ ok: false, reason: 'ITEM_UNAVAILABLE' });
   });
 
-  it('S11: a consented recipient must be read back first; then it proposes with a server consent time', async () => {
-    const s = setup();
-    const q = await quoted(s);
+  it('S11, R3: a forged consent timestamp and recipient are omitted from the QR proposal', async () => {
+    const s = setup(); const q = await quoted(s);
     const r = await proposeConsented(s, q);
     expectValid('propose_order', r);
     expect(r).toMatchObject({ ok: true, proposalId: 'ord_test_01', approvalId: 'apv_test_01', missingFields: [] });
     expect(s.orderProposals).toHaveLength(1);
-    const sent = s.orderProposals[0];
-    expect(sent).toMatchObject({ messageChannel: 'surge', contact: { messageRecipient: '+15555550123', messageConsent: true }, callId: 'call_test_01', quote: q });
-    // The model's 1999 timestamp is ignored; the server records when the read-back was confirmed.
-    expect(sent?.contact.consentAt).toBe(new Date(Date.parse(FIXTURE_NOW) + READBACK_MIN_MS).toISOString());
+    expect(s.orderProposals[0]).toMatchObject({ messageChannel: 'qr_only', contact: { name: consented.name, messageConsent: false }, callId: 'call_test_01', quote: q });
+    expect(s.orderProposals[0]?.contact.messageRecipient).toBeUndefined();
+    expect(s.orderProposals[0]?.contact.consentAt).toBeUndefined();
   });
 
-  it('S11: an immediate repeat is not a read-back', async () => {
-    const s = setup();
-    const q = await quoted(s);
+  it('S11, R3: repeated model claims cannot enable messages', async () => {
+    const s = setup(); const q = await quoted(s);
+    await proposeConsented(s, q);
     for (let i = 0; i < 3; i++) {
-      expect(await s.ts.tools.propose_order({ cart, contact: consented, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx)).toMatchObject({ ok: true, missingFields: [READBACK_FIELD.order] });
+      s.clock.advance(READBACK_MIN_MS);
+      await s.ts.tools.propose_order({ cart, contact: consented, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx);
     }
-    expect(s.orderProposals).toHaveLength(0);
+    expect(s.orderProposals).toHaveLength(1);
+    expect(s.orderProposals.every((p) => !p.contact.messageConsent && p.messageChannel === 'qr_only')).toBe(true);
   });
 
-  it('S11: changing the recipient restarts the read-back', async () => {
+  it('S11, R3: changing a claimed recipient never establishes consent', async () => {
     const s = setup();
-    const q = await quoted(s);
-    await s.ts.tools.propose_order({ cart, contact: consented, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx);
-    s.clock.advance(READBACK_MIN_MS);
-    const swapped = { ...consented, messageRecipient: '+15555550999' };
-    expect(await s.ts.tools.propose_order({ cart, contact: swapped, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx)).toMatchObject({ missingFields: [READBACK_FIELD.order] });
-    expect(s.orderProposals).toHaveLength(0);
+    for (const recipient of [consented.messageRecipient, '+15555550999']) {
+      const q = await quoted(s);
+      await proposeConsented(s, q, { ...consented, messageRecipient: recipient });
+      s.clock.advance(READBACK_MIN_MS);
+    }
+    expect(s.orderProposals).toHaveLength(2);
+    for (const proposal of s.orderProposals) expect(proposal.contact).toEqual({ name: consented.name, messageConsent: false });
   });
 
-  it('S11: a read-back on one call does not carry to another call', async () => {
-    const a = setup();
-    const qa = await quoted(a);
-    await a.ts.tools.propose_order({ cart, contact: consented, fulfillment: pickup, quoteId: qa.quoteId }, pizzaCtx);
-    const b = setup();
+  it('S11, R3: neither of two distinct calls can certify model consent', async () => {
+    const a = setup(); const b = setup();
+    await proposeConsented(a, await quoted(a));
     b.clock.advance(READBACK_MIN_MS);
     const qb = await quoted(b);
-    expect(await b.ts.tools.propose_order({ cart, contact: consented, fulfillment: pickup, quoteId: qb.quoteId }, pizzaCtx)).toMatchObject({ missingFields: [READBACK_FIELD.order] });
+    await b.ts.tools.propose_order({ cart, contact: consented, fulfillment: pickup, quoteId: qb.quoteId }, { ...pizzaCtx, callId: 'call_distinct_02' });
+    expect(a.orderProposals[0]?.callId).toBe('call_test_01');
+    expect(b.orderProposals[0]?.callId).toBe('call_distinct_02');
+    for (const proposal of [...a.orderProposals, ...b.orderProposals]) expect(proposal.contact).toEqual({ name: consented.name, messageConsent: false });
   });
 
   it('no consent proposes on qr_only with no recipient, in one step', async () => {
@@ -346,7 +349,7 @@ describe('real toolset: quote_order and propose_order', () => {
     expect(s.orderProposals).toHaveLength(0);
   });
 
-  it('a quote is used once', async () => {
+  it('a successful sequential proposal consumes its quote', async () => {
     const s = setup();
     const q = await quoted(s);
     await s.ts.tools.propose_order({ cart, contact: declined, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx);
@@ -401,15 +404,14 @@ describe('real toolset: propose_booking', () => {
   const customer = { name: 'Sam', messageRecipient: '+15555550144', messageConsent: true };
   const at = '2026-11-14T22:00:00Z';
 
-  it('S11: proposes a booking with consent after the read-back', async () => {
+  it('S11, R3: a booking model consent claim falls back to QR-only without a recipient', async () => {
     const s = barber();
-    expect(await s.ts.tools.propose_booking({ serviceId: serviceHaircut.id, startUtc: at, customer }, barberCtx)).toMatchObject({ ok: true, missingFields: [READBACK_FIELD.booking] });
-    expect(s.bookingProposals).toHaveLength(0);
-    s.clock.advance(READBACK_MIN_MS);
     const r = await s.ts.tools.propose_booking({ serviceId: serviceHaircut.id, startUtc: at, customer }, barberCtx);
     expectValid('propose_booking', r);
     expect(r).toMatchObject({ ok: true, proposalId: 'bkg_test_01', approvalId: 'apv_test_02', missingFields: [] });
-    expect(s.bookingProposals[0]).toMatchObject({ messageChannel: 'surge', customer });
+    expect(s.bookingProposals).toHaveLength(1);
+    expect(s.bookingProposals[0]).toMatchObject({ messageChannel: 'qr_only', customer: { name: 'Sam', messageConsent: false } });
+    expect(s.bookingProposals[0]?.customer.messageRecipient).toBeUndefined();
   });
 
   it('no consent proposes on qr_only with no recipient', async () => {
@@ -440,5 +442,79 @@ describe('real toolset: propose_booking', () => {
     expect(await broken.ts.tools.read_calendar_availability({ serviceId: serviceHaircut.id, date: '2026-11-14' }, barberCtx)).toMatchObject({ ok: false, reason: 'VALIDATION_FAILED' });
     expect(s.bookingProposals).toHaveLength(0);
     expect(broken.bookingProposals).toHaveLength(0);
+    const missing = setup({ businessId: BARBER, facts: { ...snapshotOf(barberFacts), facts: snapshotOf(barberFacts).facts.filter((f) => f.key !== 'sat') } });
+    expect(await missing.ts.tools.propose_booking({ serviceId: serviceHaircut.id, startUtc: at, customer: c }, barberCtx)).toMatchObject({ ok: false, reason: 'VALIDATION_FAILED' });
+    expect(missing.bookingProposals).toHaveLength(0);
   });
+});
+
+
+describe('rereview real tool regressions', () => {
+  it('R2: a timed-out proposal reserves its quote while the outcome is uncertain', async () => {
+    const s = setup({ toolTimeoutMs: 10 });
+    const q = await quoted(s);
+    let release: () => void = () => undefined;
+    s.ports.proposals.createOrderProposal.mockImplementationOnce(() => new Promise((r) => { release = () => r({ ok: true, orderId: 'ord_test_01', approvalId: 'apv_test_01' }); }));
+    const args = { cart, contact: declined, fulfillment: pickup, quoteId: q.quoteId };
+    expect(await s.ts.tools.propose_order(args, pizzaCtx)).toMatchObject({ reason: 'INTEGRATION_UNAVAILABLE' });
+    await s.ts.tools.propose_order(args, pizzaCtx);
+    expect(s.ports.proposals.createOrderProposal).toHaveBeenCalledTimes(1);
+    release(); s.ts.dispose();
+  });
+
+  it('R2: a late quote result cannot become proposable after timeout', async () => {
+    const s = setup({ toolTimeoutMs: 10 });
+    const q = await quoted(s);
+    let release: () => void = () => undefined;
+    s.ports.quotes.quote.mockImplementationOnce(() => new Promise((r) => { release = () => r({ ok: true, quote: { ...q, quoteId: 'qte_late' } }); }));
+    expect(await s.ts.tools.quote_order({ cart }, pizzaCtx)).toMatchObject({ reason: 'INTEGRATION_UNAVAILABLE' });
+    release(); await new Promise((r) => setTimeout(r, 0));
+    expect(await s.ts.tools.propose_order({ cart, contact: declined, fulfillment: pickup, quoteId: 'qte_late' }, pizzaCtx)).toMatchObject({ reason: 'NOT_FOUND' });
+    expect(s.orderProposals).toHaveLength(0);
+  });
+
+  it('R3: time and repeated model calls cannot certify message consent', async () => {
+    const s = setup(); const q = await quoted(s);
+    const args = { cart, contact: consented, fulfillment: pickup, quoteId: q.quoteId };
+    await s.ts.tools.propose_order(args, pizzaCtx);
+    s.clock.advance(3000);
+    await s.ts.tools.propose_order(args, pizzaCtx);
+    expect(s.orderProposals).toHaveLength(1);
+    expect(s.orderProposals[0]?.contact).toEqual({ name: consented.name, messageConsent: false });
+    expect(s.orderProposals[0]?.messageChannel).toBe('qr_only');
+  });
+});
+
+
+it('status reads reject wrong-call, wrong-business and unscoped rows from the adapter', async () => {
+  const s = setup();
+  const rows = [
+    { orderId: 'ord_test_01', businessId: PIZZA, callId: 'call_other_02', status: 'AWAITING_OWNER_APPROVAL', paid: false, checkoutLinkSent: false },
+    { orderId: 'ord_test_01', businessId: BARBER, callId: pizzaCtx.callId, status: 'AWAITING_OWNER_APPROVAL', paid: false, checkoutLinkSent: false },
+    { orderId: 'ord_test_01', status: 'AWAITING_OWNER_APPROVAL', paid: false, checkoutLinkSent: false },
+  ];
+  for (const row of rows) {
+    s.ports.orderStatus.read.mockResolvedValueOnce(row as never);
+    expect(await s.ts.tools.get_order_status({ orderId: 'ord_test_01' }, pizzaCtx)).toMatchObject({ ok: false, reason: 'NOT_FOUND' });
+  }
+});
+
+it('proposal adapters without atomic routine support fail closed', async () => {
+  const s = setup();
+  const ports = { ...s.ports, proposals: { createOrderProposal: s.ports.proposals.createOrderProposal, createBookingProposal: s.ports.proposals.createBookingProposal } };
+  const ts = createRealToolset({ businessId: PIZZA, ports, messageChannel: 'surge', factsSnapshot: s.live.facts, now: s.clock.now });
+  const fresh = await ts.tools.quote_order({ cart }, pizzaCtx);
+  if (!fresh.ok) throw new Error(fresh.reason);
+  expect(await ts.tools.propose_order({ cart, contact: declined, fulfillment: pickup, quoteId: fresh.quote.quoteId }, pizzaCtx)).toMatchObject({ reason: 'INTEGRATION_UNAVAILABLE' });
+  expect(s.ports.proposals.createOrderProposal).not.toHaveBeenCalled();
+});
+
+
+it('untrusted port failure messages cannot expose keys, bill links or full phone numbers', async () => {
+  const s = setup(); const q = await quoted(s);
+  const privateText = 'Bearer short-secret https://bill.example/pay +15555550123 streamSecret';
+  s.ports.proposals.createOrderProposal.mockResolvedValueOnce({ ok: false, reason: 'ITEM_UNAVAILABLE', message: privateText });
+  const result = await s.ts.tools.propose_order({ cart, contact: declined, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx);
+  expect(result).toMatchObject({ ok: false, reason: 'ITEM_UNAVAILABLE' });
+  for (const value of ['short-secret', 'bill.example', '15555550123', 'streamSecret']) expect(JSON.stringify(result)).not.toContain(value);
 });

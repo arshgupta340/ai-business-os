@@ -7,6 +7,11 @@ import type { VoiceLogger } from './types';
 
 // ---------- TwiML ----------
 
+/** Server-authored speech has no Markdown emphasis delimiters. */
+export function spokenText(text: string): string {
+  return text.replace(/\*+/g, '').replace(/(?<!\w)_{1,3}(.+?)_{1,3}(?!\w)/g, '$1').replace(/~~(.+?)~~/g, '$1').replace(/`+/g, '');
+}
+
 export function xmlEscape(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 }
@@ -32,7 +37,7 @@ export function buildConnectTwiml(publicServerUrl: string, streamToken: string):
 
 /** TwiML that speaks a short message and hangs up. */
 export function buildSayTwiml(message: string): string {
-  return ['<?xml version="1.0" encoding="UTF-8"?>', '<Response>', `  <Say>${xmlEscape(message)}</Say>`, '  <Hangup />', '</Response>'].join('\n');
+  return ['<?xml version="1.0" encoding="UTF-8"?>', '<Response>', `  <Say>${xmlEscape(spokenText(message))}</Say>`, '  <Hangup />', '</Response>'].join('\n');
 }
 
 /** TwiML for a request we refuse outright (bad signature, replay). */
@@ -153,6 +158,30 @@ export class PlaybackTracker {
   private sentMs = new Map<string, number>();
   private playedMs = new Map<string, number>();
   private cut = new Set<string>();
+  private completed = new Set<string>();
+
+  get retainedItems(): number {
+    return new Set([...this.sentMs.keys(), ...this.playedMs.keys(), ...this.cut, ...this.completed]).size;
+  }
+
+  /** Generation ended. Offsets remain only while Twilio still has this item's audio. */
+  onItemDone(itemId: string): void {
+    this.completed.add(itemId);
+    this.retire(itemId);
+  }
+
+  private retire(itemId: string): void {
+    if (!this.completed.has(itemId) || this.queue.some((m) => m.itemId === itemId)) return;
+    this.sentMs.delete(itemId);
+    this.playedMs.delete(itemId);
+    this.cut.delete(itemId);
+    this.completed.delete(itemId);
+  }
+
+  clear(): void {
+    this.queue = [];
+    this.sentMs.clear(); this.playedMs.clear(); this.cut.clear(); this.completed.clear();
+  }
 
   /** Record an audio chunk about to be sent. Returns the mark name to send right after it. */
   onAudioSent(itemId: string, durationMs: number): string {
@@ -167,7 +196,9 @@ export class PlaybackTracker {
   onMark(name: string): boolean {
     const idx = this.queue.findIndex((m) => m.name === name);
     if (idx === -1) return false;
-    for (const m of this.queue.splice(0, idx + 1)) this.playedMs.set(m.itemId, Math.max(this.playedMs.get(m.itemId) ?? 0, m.endMs));
+    const acknowledged = this.queue.splice(0, idx + 1);
+    for (const m of acknowledged) this.playedMs.set(m.itemId, Math.max(this.playedMs.get(m.itemId) ?? 0, m.endMs));
+    for (const m of acknowledged) this.retire(m.itemId);
     return true;
   }
 
@@ -198,6 +229,7 @@ export class PlaybackTracker {
     this.queue = [];
     this.sentMs.clear();
     this.playedMs.clear();
+    for (const id of this.completed) this.retire(id);
     return result;
   }
 }
@@ -249,10 +281,6 @@ export class TimingTracker {
 // ---------- Redaction: the one path every log line takes ----------
 
 const MAX_LOG_TEXT = 120;
-/** Keys whose values are server-owned identifiers or codes, kept when they look like one. */
-const ID_KEYS = new Set(['callId', 'agentVersionId', 'businessId', 'stage', 'tool', 'status', 'reason', 'endReason', 'state', 'model', 'errorName', 'errorCode', 'errorType', 'path', 'rule', 'reasonCode', 'callerLast4']);
-const SAFE_ID = /^[A-Za-z0-9_.:-]{1,64}$/;
-
 /**
  * Makes any text safe to log: removes configured secrets, OpenAI-style keys, phone numbers (kept as
  * the last four digits), token-like runs (stream tokens, base64) and caps the length.
@@ -263,7 +291,7 @@ export function redact(text: string, secrets: readonly string[] = []): string {
   out = out.replace(/sk-[A-Za-z0-9_\-*]{4,}/g, '[redacted]');
   out = out.replace(/(Incorrect API key provided: )[^.]*\./, '$1[redacted].');
   out = out.replace(/\+?\d[\d\s().-]{5,}\d/g, (m) => `[number ***${m.replace(/\D/g, '').slice(-4)}]`);
-  out = out.replace(/[A-Za-z0-9_-]{20,}/g, '[token]');
+  out = out.replace(/[A-Za-z0-9_-]{24,}/g, '[token]');
   out = out.replace(/\s+/g, ' ');
   return out.length > MAX_LOG_TEXT ? `${out.slice(0, MAX_LOG_TEXT)}...[truncated]` : out;
 }
@@ -271,7 +299,6 @@ export function redact(text: string, secrets: readonly string[] = []): string {
 function sanitizeValue(key: string, value: unknown, secrets: readonly string[], depth: number): unknown {
   if (typeof value === 'number' || typeof value === 'boolean' || value === null || value === undefined) return value;
   if (typeof value === 'string') {
-    if (ID_KEYS.has(key) && SAFE_ID.test(value) && !/\d{7,}/.test(value) && !secrets.some((s) => s.length > 0 && value.includes(s))) return value;
     return redact(value, secrets);
   }
   if (depth > 3) return '[omitted]';
@@ -300,9 +327,11 @@ export function safeLogger(logger: VoiceLogger, secrets: readonly string[] = [])
 
 /** An error as allowlisted metadata only: its class name and a code, never its message. */
 export function errorInfo(err: unknown): { errorName: string; errorCode?: string } {
-  const name = err instanceof Error && /^[A-Za-z]{1,40}$/.test(err.name) ? err.name : 'Error';
+  const names = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'AbortError']);
+  const codes = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'ENOTFOUND']);
+  const name = err instanceof Error && names.has(err.name) ? err.name : 'unknown_error';
   const code = (err as { code?: unknown } | null)?.code;
-  return typeof code === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(code) ? { errorName: name, errorCode: code } : { errorName: name };
+  return { errorName: name, errorCode: typeof code === 'string' && codes.has(code) ? code : 'unknown_error' };
 }
 
 /** The last four digits of a phone number, the only form that may be logged or stored. */

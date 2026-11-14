@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 // The real toolset (SPEC 2.6, CONTRACTS 8): the seven agent tools for phone calls and sim-call.
 // Every tool runs through injected ports only (types.ts). Each tool validates its arguments with
 // the contract schema, returns `{ ok: true, ... }` or `{ ok: false, reason }`, never throws, has a
@@ -32,7 +33,7 @@ import {
   type Toolset,
 } from '@abos/contracts';
 import { localDay, localToEpoch, weekdayOfLocalDate } from './time';
-import type { FactsSnapshot, PortContext, RealToolset, RealToolsetDeps, SafeTraceInput, SafeTraceOutput } from './types';
+import type { FactsSnapshot, PortContext, RealToolset, RealToolsetDeps, InvocationControl, SafeTraceInput, SafeTraceOutput } from './types';
 
 export type * from './types';
 
@@ -43,14 +44,6 @@ const MINUTE_MS = 60 * 1000;
 /** Bounds on per-call memory. */
 export const MAX_TRACE_ENTRIES = 50;
 export const MAX_QUOTES = 10;
-/**
- * A recipient must be presented in one proposal call, then confirmed by a second call with the
- * same number at least this long afterwards: the time it takes to read ten digits back and hear yes.
- */
-export const READBACK_MIN_MS = 3000;
-export const READBACK_FIELD = { order: 'contact.messageRecipient.readBack', booking: 'customer.messageRecipient.readBack' } as const;
-const MAX_PORT_MESSAGE = 200;
-
 // AGENTS rule 6: exactly seven tools, every one a read or propose capability. Checked once at load.
 const ALL_TOOLS: readonly ToolName[] = ToolNameSchema.options;
 if (ALL_TOOLS.length !== 7 || Object.keys(TOOL_CAPABILITY).length !== 7) throw new Error('real toolset: expected exactly seven agent tools');
@@ -60,15 +53,13 @@ const fail = (reason: ToolFailure['reason'], message: string): ToolFailure => ({
 const UNAVAILABLE = 'That information is not available right now.';
 const NO_HOURS = 'Opening hours are not available, so this cannot be taken right now.';
 
-/** A port message reaches the model only as a short single line. */
+/** Provider prose can contain private data. Only fixed local wording reaches error messages. */
 function portMessage(message: string | undefined): string | undefined {
-  if (message === undefined) return undefined;
-  const line = message.replace(/\s+/g, ' ').trim();
-  return line.length > MAX_PORT_MESSAGE ? `${line.slice(0, MAX_PORT_MESSAGE)}...` : line;
+  return message === undefined ? undefined : 'The request could not be completed right now.';
 }
 
-function portContext(ctx: ToolContext): PortContext {
-  return { businessId: ctx.businessId, agentVersionId: ctx.agentVersionId, callId: ctx.callId, testSessionId: ctx.testSessionId, correlationId: ctx.correlationId };
+function portContext(ctx: ToolContext, op: Invocation, operationId: string): PortContext {
+  return { operationId, signal: op.controller.signal, businessId: ctx.businessId, agentVersionId: ctx.agentVersionId, callId: ctx.callId, testSessionId: ctx.testSessionId, correlationId: ctx.correlationId };
 }
 
 /** Outcome metadata for the trace. Server-owned codes and IDs only. */
@@ -83,7 +74,7 @@ function summarize(result: unknown): SafeTraceOutput {
 }
 
 type HoursOnDay = { state: 'open'; open: string; close: string } | { state: 'closed' } | { state: 'unknown' };
-type Invocation = { abandoned: boolean };
+type Invocation = { controller: AbortController };
 type Impl = { [N in ToolName]: (input: ToolInput[N], ctx: ToolContext, op: Invocation) => Promise<ToolResult<N>> };
 
 export function createRealToolset(deps: RealToolsetDeps): RealToolset {
@@ -95,14 +86,17 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
   const traceEntries: ToolTraceEntry[] = [];
   // SPEC 2.9 "Not persisted": quotes made on this call live here, bounded, until a proposal stores one.
   const quotes = new Map<string, { quote: Quote; cart: Cart }>();
-  // Call-bound read-back state for the message recipient (see READBACK_MIN_MS).
-  let readBack: { recipient: string; firstSeenAt: number; confirmedAt?: number } | undefined;
+  const invocations = new Set<AbortController>();
+  const lifetime = new AbortController();
+  // Never release an uncertain quote reservation. Bounded separately from the quote cache.
+  const reservedQuotes = new Map<string, string>();
+  let bookingReserved = false;
 
   // AC-16, FLOWS B2: the facts are the snapshot pinned with the call. Without a pinned snapshot they
   // are read once; a failure is kept, never retried, so a call cannot silently switch versions.
   let facts: Promise<FactsSnapshot>;
   if (deps.factsSnapshot !== undefined) facts = Promise.resolve(structuredClone(deps.factsSnapshot));
-  else if (ports.facts !== undefined) facts = ports.facts.readVerified({ businessId }).then((s) => structuredClone(s));
+  else if (ports.facts !== undefined) facts = ports.facts.readVerified({ businessId, signal: lifetime.signal }).then((s) => structuredClone(s));
   else facts = Promise.reject(new Error('no facts'));
   facts.catch(() => undefined);
 
@@ -143,33 +137,24 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
     quotes.set(quote.quoteId, { quote, cart });
   }
 
-  async function quoteCart(cart: Cart): Promise<{ ok: true; quote: Quote } | ToolFailure> {
-    const r = await ports.quotes.quote({ businessId, cart });
+  async function quoteCart(cart: Cart, op: Invocation): Promise<{ ok: true; quote: Quote } | ToolFailure> {
+    const r = await ports.quotes.quote({ businessId, cart, signal: op.controller.signal });
+    if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
     if (!r.ok) return fail('ITEM_UNAVAILABLE', portMessage(r.message) ?? 'An item in the cart is not available.');
-    if (!disposed) storeQuote(r.quote, cart);
+    storeQuote(r.quote, cart);
     return { ok: true, quote: r.quote };
   }
 
-  /** Returns the server consent time once the recipient was presented earlier and confirmed now, else null. */
-  function confirmRecipient(recipient: string): string | null {
-    const t = now().getTime();
-    if (readBack === undefined || readBack.recipient !== recipient) {
-      readBack = { recipient, firstSeenAt: t };
-      return null;
-    }
-    if (t - readBack.firstSeenAt < READBACK_MIN_MS) return null;
-    readBack.confirmedAt ??= t;
-    return new Date(readBack.confirmedAt).toISOString();
-  }
-
-  const channelFor = (consent: boolean): MessageChannelSetting => (consent ? deps.messageChannel : 'qr_only');
-  const live = (op: Invocation) => !op.abandoned && !disposed;
+  // No trusted read-back/affirmative-turn integration exists yet. The model cannot certify consent.
+  const channelFor = (_consent: boolean): MessageChannelSetting => 'qr_only';
+  const live = (op: Invocation) => !op.controller.signal.aborted && !disposed;
 
   // ---- The seven tools ----
 
   const impl: Impl = {
-    async read_catalog(input) {
-      const items = await ports.catalog.search({ businessId, query: input.query, limit: MAX_CATALOG_RESULTS });
+    async read_catalog(input, _ctx, op) {
+      const items = await ports.catalog.search({ businessId, query: input.query, limit: MAX_CATALOG_RESULTS, signal: op.controller.signal });
+      if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
       return {
         ok: true,
         items: items
@@ -188,8 +173,9 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
       };
     },
 
-    async read_business_facts(input) {
+    async read_business_facts(input, _ctx, op) {
       const snapshot = await facts;
+      if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
       const kinds = input.kinds;
       const out = snapshot.facts
         .filter((f) => kinds === undefined || kinds.includes(f.kind))
@@ -197,51 +183,51 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
       return { ok: true, facts: out, timezone: snapshot.timezone };
     },
 
-    async quote_order(input) {
-      return quoteCart(input.cart);
+    async quote_order(input, _ctx, op) {
+      return quoteCart(input.cart, op);
     },
 
     async propose_order(input, ctx, op) {
       // Only a quote made on this call can be proposed (FLOWS B14).
       const stored = quotes.get(input.quoteId);
       if (stored === undefined) return fail('NOT_FOUND', 'Unknown quote. Call quote_order first.');
+      if (reservedQuotes.has(input.quoteId)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
       const hash = await cartHash(input.cart);
-      const expired = now().getTime() > Date.parse(stored.quote.expiresAt);
+      if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
+      const expired = now().getTime() >= Date.parse(stored.quote.expiresAt);
       if (expired || hash !== stored.quote.cartHash) {
         quotes.delete(input.quoteId);
-        const fresh = await quoteCart(input.cart);
+        const fresh = await quoteCart(input.cart, op);
         if (!fresh.ok) return fresh;
         return { ok: false, reason: 'QUOTE_EXPIRED', message: expired ? 'The quote expired. Read back the new total.' : 'The cart changed. Read back the new total.', quote: fresh.quote };
       }
       if (input.contact.name.trim() === '') return { ok: true, quote: stored.quote, missingFields: ['contact.name'] };
 
       const snapshot = await facts;
+      if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
       const pickup = Date.parse(input.fulfillment.pickupAt);
       if (pickup < now().getTime()) return fail('VALIDATION_FAILED', 'The pickup time is in the past.');
       const where = insideHours(snapshot, pickup, pickup);
       if (where === 'unknown') return fail('VALIDATION_FAILED', NO_HOURS);
       if (where === 'outside') return fail('VALIDATION_FAILED', 'The pickup time is outside opening hours.');
 
-      // SPEC 2.9: without consent there is no recipient and the channel is qr_only. With consent the
-      // recipient must have been read back on this call, and the consent time is the server's.
-      let contact: Contact;
-      if (input.contact.messageConsent && input.contact.messageRecipient !== undefined) {
-        const consentAt = confirmRecipient(input.contact.messageRecipient);
-        if (consentAt === null) return { ok: true, quote: stored.quote, missingFields: [READBACK_FIELD.order] };
-        contact = { name: input.contact.name, messageRecipient: input.contact.messageRecipient, messageConsent: true, consentAt };
-      } else {
-        contact = { name: input.contact.name, messageConsent: false };
-      }
+      const contact: Contact = { name: input.contact.name, messageConsent: false };
 
       if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
+      if (ports.proposals.atomicOperations !== true || reservedQuotes.size >= MAX_QUOTES) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
+      // Synchronous reservation after validation and before the first proposal await.
+      if (reservedQuotes.has(input.quoteId)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
+      const operationId = randomUUID();
+      reservedQuotes.set(input.quoteId, operationId);
       const r = await ports.proposals.createOrderProposal({
-        ...portContext(ctx),
+        ...portContext(ctx, op, operationId),
         cart: input.cart,
         quote: stored.quote,
         contact,
         fulfillment: input.fulfillment,
         messageChannel: channelFor(contact.messageConsent),
       });
+      if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
       if (!r.ok) {
         const out: ToolFailure = { ok: false, reason: r.reason };
         const message = portMessage(r.message);
@@ -253,21 +239,24 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
       return { ok: true, proposalId: r.orderId, approvalId: r.approvalId, quote: stored.quote, missingFields: [] };
     },
 
-    async get_order_status(input, ctx) {
-      const view = await ports.orderStatus.read({ businessId, orderId: input.orderId, callId: ctx.callId });
-      if (view === null) return fail('NOT_FOUND', 'No order with that ID on this call.');
+    async get_order_status(input, ctx, op) {
+      const view = await ports.orderStatus.read({ businessId, orderId: input.orderId, callId: ctx.callId, signal: op.controller.signal });
+      if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
+      if (view === null || ctx.callId === undefined || view.businessId !== businessId || view.callId !== ctx.callId || view.orderId !== input.orderId) return fail('NOT_FOUND', 'No order with that ID on this call.');
       return { ok: true, orderId: view.orderId, status: view.status, paid: view.paid, checkoutLinkSent: view.checkoutLinkSent };
     },
 
-    async read_calendar_availability(input) {
+    async read_calendar_availability(input, _ctx, op) {
       const snapshot = await facts;
+      if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
       const service = servicesIn(snapshot).find((s) => s.id === input.serviceId);
       if (service === undefined) return fail('NOT_FOUND', 'No such service.');
       const max = input.maxSlots ?? DEFAULT_MAX_SLOTS;
       const h = hoursOn(snapshot, weekdayOfLocalDate(input.date));
       if (h.state === 'unknown') return fail('VALIDATION_FAILED', NO_HOURS);
       if (h.state === 'closed') return { ok: true, slots: [], timezone: snapshot.timezone };
-      const slots = await ports.availability.freeSlots({ businessId, service, date: input.date, hours: { open: h.open, close: h.close }, timezone: snapshot.timezone, maxSlots: max });
+      const slots = await ports.availability.freeSlots({ businessId, service, date: input.date, hours: { open: h.open, close: h.close }, timezone: snapshot.timezone, maxSlots: max, signal: op.controller.signal });
+      if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
       // Only slots that are inside the pinned hours and match the pinned duration are offered.
       const ok = (s: AvailabilitySlot) =>
         s.serviceId === service.id &&
@@ -278,6 +267,7 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
 
     async propose_booking(input, ctx, op) {
       const snapshot = await facts;
+      if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
       const service = servicesIn(snapshot).find((s) => s.id === input.serviceId);
       if (service === undefined) return fail('NOT_FOUND', 'No such service.');
       const start = Date.parse(input.startUtc);
@@ -289,23 +279,21 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
       if (where === 'outside') return fail('VALIDATION_FAILED', 'That time is outside opening hours.');
       if (input.customer.name.trim() === '') return { ok: true, missingFields: ['customer.name'], slot };
 
-      let customer: BookingCustomer;
-      if (input.customer.messageConsent && input.customer.messageRecipient !== undefined) {
-        if (confirmRecipient(input.customer.messageRecipient) === null) return { ok: true, missingFields: [READBACK_FIELD.booking], slot };
-        customer = { name: input.customer.name, messageRecipient: input.customer.messageRecipient, messageConsent: true };
-      } else {
-        customer = { name: input.customer.name, messageConsent: false };
-      }
+      const customer: BookingCustomer = { name: input.customer.name, messageConsent: false };
 
       if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
+      if (ports.proposals.atomicOperations !== true || bookingReserved) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
+      bookingReserved = true;
       const r = await ports.proposals.createBookingProposal({
-        ...portContext(ctx),
+        ...portContext(ctx, op, randomUUID()),
         serviceId: input.serviceId,
         startUtc: input.startUtc,
         customer,
         messageChannel: channelFor(customer.messageConsent),
       });
+      if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
       if (!r.ok) {
+        bookingReserved = false;
         const out: ToolFailure = { ok: false, reason: r.reason };
         const message = portMessage(r.message);
         if (message !== undefined) out.message = message;
@@ -316,7 +304,7 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
     },
   };
 
-  async function run<N extends ToolName>(name: N, input: ToolInput[N], ctx: ToolContext): Promise<{ result: ToolResult<N>; trace: SafeTraceInput }> {
+  async function run<N extends ToolName>(name: N, input: ToolInput[N], ctx: ToolContext, control?: InvocationControl): Promise<{ result: ToolResult<N>; trace: SafeTraceInput }> {
     const parsed = TOOL_INPUT_SCHEMAS[name].safeParse(input);
     if (!parsed.success) return { result: fail('VALIDATION_FAILED', 'The arguments do not match the tool.'), trace: { valid: false } };
     const fields = Object.keys(parsed.data as object).sort();
@@ -326,19 +314,27 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
     if (ctx.businessId !== businessId) return { result: fail('CAPABILITY_NOT_ALLOWED', 'This toolset belongs to another business.'), trace: traced };
     if (!allowed.has(name)) return { result: fail('CAPABILITY_NOT_ALLOWED', 'This agent version does not have that tool.'), trace: traced };
 
-    const op: Invocation = { abandoned: false };
-    const timeoutMs = deps.toolTimeoutMs ?? CAPABILITIES[TOOL_CAPABILITY[name]].timeoutMs;
+    const controller = new AbortController();
+    invocations.add(controller);
+    const abort = () => controller.abort();
+    control?.signal.addEventListener('abort', abort, { once: true });
+    if (control?.signal.aborted) controller.abort();
+    const op: Invocation = { controller };
+    const timeoutMs = control?.timeoutMs ?? deps.toolTimeoutMs ?? CAPABILITIES[TOOL_CAPABILITY[name]].timeoutMs;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<'timeout'>((resolve) => {
-      timer = setTimeout(() => resolve('timeout'), timeoutMs);
+      if (controller.signal.aborted) resolve('timeout');
+      else controller.signal.addEventListener('abort', () => resolve('timeout'), { once: true });
+      if (control === undefined) timer = setTimeout(() => { controller.abort(); resolve('timeout'); }, timeoutMs);
     });
     let result: ToolResult<N>;
     try {
       const fn = impl[name] as (input: ToolInput[N], ctx: ToolContext, op: Invocation) => Promise<ToolResult<N>>;
-      const outcome = await Promise.race([fn(parsed.data as ToolInput[N], ctx, op), deadline]);
+      const work = live(op) ? fn(parsed.data as ToolInput[N], ctx, op) : Promise.resolve(fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE));
+      const outcome = await Promise.race([work, deadline]);
       if (outcome === 'timeout') {
-        // The abandoned operation can still finish; `op.abandoned` stops it before any proposal.
-        op.abandoned = true;
+        // The abandoned operation can still finish; the shared signal stops it before any state change.
+        controller.abort();
         return { result: fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE), trace: traced };
       }
       result = outcome;
@@ -347,15 +343,17 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
       return { result: fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE), trace: traced };
     } finally {
       clearTimeout(timer);
+      control?.signal.removeEventListener('abort', abort);
+      invocations.delete(controller);
     }
     // A port that returns a malformed shape is treated as unavailable, so the model never sees it.
     if (!toolResultSchema(name).safeParse(result).success) return { result: fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE), trace: traced };
     return { result, trace: traced };
   }
 
-  async function call<N extends ToolName>(name: N, input: ToolInput[N], ctx: ToolContext): Promise<ToolResult<N>> {
+  async function call<N extends ToolName>(name: N, input: ToolInput[N], ctx: ToolContext, control?: InvocationControl): Promise<ToolResult<N>> {
     const started = performance.now();
-    const { result, trace } = await run(name, input, ctx);
+    const { result, trace } = await run(name, input, ctx, control);
     const capabilityId = TOOL_CAPABILITY[name];
     const effect = CAPABILITIES[capabilityId].effect;
     if (isToolEffect(effect) && !disposed) {
@@ -379,8 +377,11 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
     },
     dispose: () => {
       disposed = true;
+      lifetime.abort();
       quotes.clear();
-      readBack = undefined;
+      for (const controller of invocations) controller.abort();
+      invocations.clear();
+      reservedQuotes.clear();
       traceEntries.length = 0;
     },
   };
