@@ -20,7 +20,9 @@ import {
   isApiError,
   useActivityFeed,
   useApprovals,
+  useCatalog,
   useMockControls,
+  type CatalogItem,
   type ApprovalRequest,
   type ApprovalState,
   type OrderApprovalPayload,
@@ -68,6 +70,9 @@ export function ApprovalsInbox() {
   const byId = new Map<string, ApprovalRequest>();
   for (const a of shownQueries.flatMap((q) => q.data?.items ?? [])) byId.set(a.id, a);
   const items = sortInbox([...byId.values()]);
+  // Names the item of a price edit. Only loaded when a price edit is listed.
+  const hasPriceEdit = items.some((a) => a.bundleType === 'price_edit');
+  const catalog = useCatalog(hasPriceEdit ? businessId : null);
 
   const hasPending = (pending.data?.items.length ?? 0) > 0;
   const now = useNow(hasPending);
@@ -118,7 +123,15 @@ export function ApprovalsInbox() {
       ) : (
         <List hasDividers>
           {items.map((a) => (
-            <InboxRow key={a.id} approval={a} now={now} timeZone={timeZone} href={hrefFor(a.id)} isSelected={a.id === openId} />
+            <InboxRow
+              key={a.id}
+              approval={a}
+              now={now}
+              timeZone={timeZone}
+              href={hrefFor(a.id)}
+              isSelected={a.id === openId}
+              catalog={catalog.data?.items}
+            />
           ))}
         </List>
       )}
@@ -136,12 +149,14 @@ function InboxRow({
   timeZone,
   href,
   isSelected,
+  catalog,
 }: {
   approval: ApprovalRequest;
   now: number;
   timeZone: string;
   href: string;
   isSelected: boolean;
+  catalog?: readonly CatalogItem[];
 }) {
   const state = effectiveState(approval, now);
   const view = statusView('approval', state);
@@ -153,7 +168,7 @@ function InboxRow({
       align="first-line"
       label={
         <Text weight="semibold" maxLines={3}>
-          {`${bundleLabel(approval.bundleType)}: ${summaryLine(approval, timeZone)}`}
+          {`${bundleLabel(approval.bundleType)}: ${summaryLine(approval, timeZone, catalog)}`}
         </Text>
       }
       description={

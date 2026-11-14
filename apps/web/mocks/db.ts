@@ -187,6 +187,90 @@ const flags: Flags = {
   nextCatalogSyncFails: false,
   nextCallQrOnly: false,
 };
+/** Businesses emptied by the simulateEmptyBusiness control, until reset. */
+const emptyBusinesses = new Set<string>();
+
+/** One rule of the simulateRequestFailure control. */
+export interface RequestFailureRule {
+  /** Matches when the request path (for example "/api/calls") starts with this. */
+  path: string;
+  /** HTTP method to match. Default GET. */
+  method?: string;
+  /** "error" answers with the API error envelope; "invalid" answers 200 with a body that does not match the contract. */
+  mode?: "error" | "invalid";
+  /** The error code for mode "error". Default INTERNAL (retryable). */
+  code?: ErrorCode;
+  /** The message for mode "error". */
+  message?: string;
+  /** How many matching requests fail. Default: every one until reset() or clearRequestFailures(). */
+  times?: number;
+}
+const requestFailures: RequestFailureRule[] = [];
+
+/** Mock control: the requests the rule matches fail until reset. */
+export function addRequestFailure(rule: RequestFailureRule): void {
+  requestFailures.push({ ...rule });
+}
+
+export function clearRequestFailures(): void {
+  requestFailures.length = 0;
+}
+
+/**
+ * The failure a request should get, if a rule matches. Spends one of the
+ * rule's `times`. The handler calls it before the route runs.
+ */
+export function takeRequestFailure(method: string, pathname: string): RequestFailureRule | null {
+  const index = requestFailures.findIndex(
+    (r) => (r.method ?? "GET").toUpperCase() === method.toUpperCase() && pathname.startsWith(r.path),
+  );
+  if (index < 0) return null;
+  const rule = requestFailures[index];
+  if (rule.times !== undefined) {
+    rule.times -= 1;
+    if (rule.times <= 0) requestFailures.splice(index, 1);
+  }
+  return rule;
+}
+
+/**
+ * Mock control: one business has nothing yet. Its agents, versions, calls,
+ * orders, bookings, approvals, executions, messages, sync jobs, activity,
+ * facts, conflicts, files, catalog and builder sessions are removed until
+ * reset(). The business itself stays, so it is still in the selector.
+ */
+export function emptyBusiness(businessId: string): void {
+  requireBusiness(businessId);
+  emptyBusinesses.add(businessId);
+  const other = <T extends { businessId: string }>(rows: T[]) => rows.filter((r) => r.businessId !== businessId);
+  const agentIds = new Set(state.agents.filter((a) => a.businessId === businessId).map((a) => a.id));
+  state = {
+    ...state,
+    facts: other(state.facts),
+    conflicts: other(state.conflicts),
+    files: other(state.files),
+    catalog: other(state.catalog),
+    agents: other(state.agents),
+    versions: state.versions.filter((v) => !agentIds.has(v.agentId)),
+    builderSessions: state.builderSessions.filter((s) => s.session.businessId !== businessId),
+    approvals: other(state.approvals),
+    orders: other(state.orders),
+    bookings: other(state.bookings),
+    calls: other(state.calls),
+    executions: other(state.executions),
+    dispatches: other(state.dispatches),
+    syncJobs: other(state.syncJobs),
+    activity: other(state.activity),
+  };
+  if (state.liveAgent.businessId === businessId || (state.liveAgent.agentId && agentIds.has(state.liveAgent.agentId))) {
+    state.liveAgent = { phoneNumber: state.liveAgent.phoneNumber, businessId, updatedAt: nowIso() };
+  }
+}
+
+export function isEmptyBusiness(businessId: string): boolean {
+  return emptyBusinesses.has(businessId);
+}
+
 /** Files whose scripted extraction ends in FAILED. */
 const failingExtractions = new Set<string>();
 
@@ -221,6 +305,8 @@ export async function resetDb(now: number = Date.now()): Promise<void> {
   flags.nextCatalogSyncFails = false;
   flags.nextCallQrOnly = false;
   failingExtractions.clear();
+  emptyBusinesses.clear();
+  requestFailures.length = 0;
   clockOffsetMs = 0;
   seeding = buildSeed(now).then((seed) => {
     state = seed;
@@ -1740,8 +1826,9 @@ export function getHealth(refresh: boolean) {
   return state.health;
 }
 
-/** The shared telemetry fixture. It has no times, so it needs no materializing. */
-export function getTelemetry() {
+/** The shared telemetry fixture. It has no times, so it needs no materializing. An emptied business has no measurements. */
+export function getTelemetry(businessId?: string) {
+  if (businessId && emptyBusinesses.has(businessId)) return { metrics: [] };
   return structuredClone(sharedTelemetry);
 }
 

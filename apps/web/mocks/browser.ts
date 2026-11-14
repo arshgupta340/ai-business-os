@@ -82,6 +82,8 @@ export function startMockWorker(): Promise<void> {
       .then(() => ready())
       .then(() => {
         registerMockControls(mockControls);
+        // For Playwright scripts and the browser console: the same controls, in mock mode only.
+        (window as unknown as { __abosMock?: typeof mockControls }).__abosMock = mockControls;
         // The real server expires approvals with a job; the mock checks every 5 seconds.
         setInterval(() => sweepExpired(), 5000);
       });

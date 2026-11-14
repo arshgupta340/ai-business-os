@@ -6,6 +6,7 @@
 import type {
   ApiError,
   ApprovalRequest,
+  CatalogItem,
   ApprovalState,
   BookingApprovalPayload,
   BundleType,
@@ -124,8 +125,25 @@ export function recipientLabel(recipient: string | undefined): string {
   return `${looksLikePhone ? 'phone' : 'recipient'} ending ${lastFour(recipient)}`;
 }
 
-/** The one-line summary shown in the inbox row. Uses only the hashed payload. */
-export function summaryLine(approval: ApprovalRequest, timeZone: string): string {
+/**
+ * The owner-facing name of a catalog variation, for example "Margherita, Large".
+ * Undefined when the catalog is not loaded or no longer has the variation.
+ * A variation named like its item (Square's "Regular") shows the item name only.
+ */
+export function variationName(catalog: readonly CatalogItem[] | undefined, squareItemId: string, variationId: string): string | undefined {
+  if (!catalog) return undefined;
+  const item = catalog.find((i) => i.squareItemId === squareItemId) ?? catalog.find((i) => i.variations.some((v) => v.id === variationId));
+  const variation = item?.variations.find((v) => v.id === variationId);
+  if (!item || !variation) return undefined;
+  const name = variation.name.trim();
+  return !name || name === item.name || /^regular$/i.test(name) ? item.name : `${item.name}, ${name}`;
+}
+
+/**
+ * The one-line summary shown in the inbox row. Uses the hashed payload; a
+ * price edit names its item from the catalog when it is loaded.
+ */
+export function summaryLine(approval: ApprovalRequest, timeZone: string, catalog?: readonly CatalogItem[]): string {
   const t = typedApproval(approval);
   switch (t.bundleType) {
     case 'order_bundle':
@@ -136,8 +154,10 @@ export function summaryLine(approval: ApprovalRequest, timeZone: string): string
       const what = `${factKindLabel(t.payload.kind)}, ${factKeyLabel(t.payload.kind, t.payload.key)}`;
       return `${what}: ${formatFactValue(t.payload.kind, t.payload.after)} (now ${formatFactValue(t.payload.kind, t.payload.before)})`;
     }
-    case 'price_edit':
-      return `Price ${formatMoney(t.payload.fromPriceMinor, t.payload.currency)} to ${formatMoney(t.payload.newPriceMinor, t.payload.currency)}`;
+    case 'price_edit': {
+      const name = variationName(catalog, t.payload.squareItemId, t.payload.variationId) ?? 'An item in the Square catalog';
+      return `${name}, ${formatMoney(t.payload.fromPriceMinor, t.payload.currency)} to ${formatMoney(t.payload.newPriceMinor, t.payload.currency)}`;
+    }
   }
 }
 

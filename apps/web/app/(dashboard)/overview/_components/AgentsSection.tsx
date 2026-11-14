@@ -1,5 +1,6 @@
 'use client';
 
+import {Button} from '@astryxdesign/core/Button';
 import {ClickableCard} from '@astryxdesign/core/ClickableCard';
 import {Grid} from '@astryxdesign/core/Grid';
 import {Heading} from '@astryxdesign/core/Heading';
@@ -80,6 +81,7 @@ export function AgentsSection({businessId}: {businessId: string}) {
         title="No agents yet"
         description="Build an agent by describing your business in a conversation."
         headingLevel={3}
+        actions={<Button label="Build an agent" variant="primary" href="/build" />}
       />
     );
   } else {

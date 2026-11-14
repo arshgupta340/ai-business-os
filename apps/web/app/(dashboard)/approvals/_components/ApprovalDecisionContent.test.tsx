@@ -75,7 +75,7 @@ describe('order bundle', () => {
     expect(body).toEqual({decision: 'approve', payloadHash: stored.payloadHash});
     expect(decisionRequests()[0].headers.get('Idempotency-Key')).toBeTruthy();
     expect(onDecided).toHaveBeenCalledWith(expect.objectContaining({approvalId: PENDING, state: 'APPROVED'}));
-    expect(screen.getByRole('link', {name: 'Open Live operations'}).getAttribute('href')).toBe('/activity');
+    expect(screen.getByRole('link', {name: 'Open Live operations'}).getAttribute('href')).toBe(`/activity?call=${orderAwaitingApproval.callId}`);
   });
 
   it('rejects with an optional reason', async () => {
@@ -100,7 +100,7 @@ describe('requests that cannot be acted on', () => {
   it('shows a decided request with who and when and no decision buttons', async () => {
     renderDecision(approvalOrderRejected.id);
     await screen.findByText('Nothing was sent or charged.');
-    expect(screen.getByText(/^Decided .* by usr_owner_01\.$/)).toBeTruthy();
+    expect(screen.getByText(/^Decided .* by the owner\.$/)).toBeTruthy();
     expect(screen.queryByRole('button', {name: 'Approve'})).toBeNull();
   });
 
@@ -185,5 +185,40 @@ describe('fact edit', () => {
     expect(screen.getByText('11:00 to 23:00')).toBeTruthy();
     expect(screen.getByText('Friday')).toBeTruthy();
     expect(button('Confirm change')).toBeTruthy();
+  });
+});
+
+describe('states around the decision', () => {
+  it('says Google Sheets is disconnected on a pending order, and Approve stays on (the order does not depend on it)', async () => {
+    mockControls.simulateSheetsDisconnected?.();
+    renderDecision(PENDING);
+    expect(await screen.findByText('Google Sheets is disconnected')).toBeTruthy();
+    expect(screen.getByText(/report sheet is not updated/)).toBeTruthy();
+    expect(button('Approve').getAttribute('aria-disabled')).not.toBe('true');
+  });
+
+  it('names the item of a price change instead of its Square IDs', async () => {
+    const {approvalPriceEditPending} = await import('@abos/contracts/fixtures');
+    renderDecision(approvalPriceEditPending.id);
+    expect(await screen.findByText('Price change request')).toBeTruthy();
+    expect(await screen.findByText('Pepperoni, Large')).toBeTruthy();
+  });
+
+  it('shows the server reason when a decision fails, with a retry for a retryable failure', async () => {
+    mockControls.simulateRequestFailure?.({path: '/api/approvals', method: 'POST', code: 'INTEGRATION_UNAVAILABLE', message: 'Square is not answering.'});
+    renderDecision(PENDING);
+    fireEvent.click(await screen.findByRole('button', {name: 'Approve'}));
+    expect(await screen.findByText('The decision did not go through')).toBeTruthy();
+    expect(screen.getByText('Square is not answering.')).toBeTruthy();
+    expect(screen.getByRole('button', {name: 'Try again'})).toBeTruthy();
+    expect(screen.queryByText('The actions are now running.')).toBeNull();
+  });
+
+  it('after approving a booking, Open Live operations opens that call, not whichever call is newest', async () => {
+    renderDecision(approvalBookingPending.id, BARBER);
+    fireEvent.click(await screen.findByRole('button', {name: 'Approve'}));
+    const link = await screen.findByRole('link', {name: 'Open Live operations'});
+    const booking = getState().bookings.find((b) => b.id === approvalBookingPending.subjectId)!;
+    expect(link.getAttribute('href')).toBe(`/activity?call=${booking.callId}`);
   });
 });
