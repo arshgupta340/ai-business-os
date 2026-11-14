@@ -187,13 +187,14 @@ describe('POST execution resolve', () => {
     expect((response.json() as { message: string }).message).toBe(RECOVERY_MESSAGES.messageNotResent);
     expect(h.state.lookups).toBe(1); expect(h.state.resolverCalls).toBe(0); expect(h.state.events).toHaveLength(0);
   });
-  it('requeues a checkout retry after proven absence, keeping the key and the attempt count', async () => {
+  // Review of 0008, finding 2: no Square read proves a payment link absent, so even a lookup that claims
+  // absence cannot requeue or abandon a checkout. The owner cancels the order.
+  it.each(['retry', 'abandon'] as const)('refuses a checkout %s on a claimed absence, saying to cancel the order', async action => {
     const h = await harness('checkout');
-    const response = await h.request('retry');
-    expect(response.statusCode).toBe(200); expect(response.json().execution).toMatchObject({ status: 'QUEUED', attempts: 1, idempotencyKey: h.originalKey });
-    expect(h.state.resolution).toMatchObject({ action: 'retry', status: 'QUEUED', lookup: { outcome: 'absent' } });
-    expect(h.state.resolution?.record.execution.idempotencyKey).toBe(h.originalKey);
-    expect(h.state.events.map(e => e.type)).toEqual(['execution.failed']);
+    const response = await h.request(action);
+    error(response, 409, 'INVALID_STATE');
+    expect((response.json() as { message: string }).message).toBe(RECOVERY_MESSAGES.checkoutNotProvable);
+    expect(h.state.resolverCalls).toBe(0); expect(h.state.events).toHaveLength(0);
   });
   it('abandons a message in UNKNOWN without provider proof: the owner marks it failed', async () => {
     const h = await harness('message'); h.state.lookup = { outcome: 'unknown' };
@@ -206,8 +207,8 @@ describe('POST execution resolve', () => {
     ['a pending approval', (h: Harness) => { h.state.record.approval.state = 'PENDING'; delete h.state.record.approval.decidedAt; delete h.state.record.approval.decidedBy; }, 'INVALID_STATE'],
     ['an altered approval hash', (h: Harness) => { h.state.record.approval.payloadHash = `sha256:${'f'.repeat(64)}`; }, 'PAYLOAD_HASH_MISMATCH'],
     ['exhausted attempts', (h: Harness) => { h.state.record.execution.attempts = 3; }, 'INVALID_STATE'],
-  ] as const)('refuses a checkout requeue with %s, before the routine', async (_name, mutate, code) => {
-    const h = await harness('checkout'); mutate(h);
+  ] as const)('refuses a calendar requeue with %s, before the routine', async (_name, mutate, code) => {
+    const h = await harness('booking'); mutate(h);
     error(await h.request('retry'), 409, code); expect(h.state.resolverCalls).toBe(0); expect(h.state.events).toHaveLength(0);
   });
   it('says why an unknown checkout outcome cannot be resolved', async () => {
@@ -236,7 +237,7 @@ describe('POST execution resolve', () => {
     expect(h.state.resolverCalls).toBe(1);
   });
   it('abandons only after lookup proves absence', async () => {
-    const h = await harness(); const response = await h.request('abandon');
+    const h = await harness('booking'); const response = await h.request('abandon');
     expect(response.statusCode).toBe(200); expect(response.json().execution.status).toBe('FAILED');
     expect(h.state.lookups).toBe(1); expect(h.state.resolverCalls).toBe(1); expect(h.state.events).toHaveLength(1);
     expect(h.state.resolution).toMatchObject({ action: 'abandon', status: 'FAILED', lookup: { outcome: 'absent' } });
@@ -247,7 +248,7 @@ describe('POST execution resolve', () => {
     error(await h.request(action), 409, 'INVALID_STATE'); expect(h.state.record.execution.status).toBe('NEEDS_REVIEW');
     expect(h.state.resolverCalls).toBe(0); expect(h.state.events).toHaveLength(0);
   });
-  it.each(['checkout', 'booking', 'message'] as const)('serializes same-process %s abandon requests around one generation', async kind => {
+  it.each(['booking', 'message'] as const)('serializes same-process %s abandon requests around one generation', async kind => {
     const h = await harness(kind);
     const responses = await Promise.all([h.request('abandon'), h.request('abandon')]);
     expect(responses.map(r => r.statusCode)).toEqual([200, 200]);
@@ -255,12 +256,13 @@ describe('POST execution resolve', () => {
     error(await h.request('abandon'), 409, 'INVALID_STATE');
     expect(h.state.lookups).toBe(1); expect(h.state.resolverCalls).toBe(1); expect(h.state.events).toHaveLength(1);
   });
-  it('replays abandon without another event or lookup', async () => {
-    const h = await harness(); await h.request('abandon'); await h.request('abandon');
+  it('replays abandon without another event or lookup, with the same 200 body', async () => {
+    const h = await harness('booking'); const first = await h.request('abandon'); const second = await h.request('abandon');
+    expect([first.statusCode, second.statusCode]).toEqual([200, 200]); expect(second.json()).toEqual(first.json());
     expect(h.state.lookups).toBe(1); expect(h.state.events).toHaveLength(1); expect(h.state.resolverCalls).toBe(1);
   });
   it('allows a later NEEDS_REVIEW worker generation without changing the provider key', async () => {
-    const h = await harness();
+    const h = await harness('booking');
     expect((await h.request('abandon')).statusCode).toBe(200);
     h.state.record.execution = { ...h.state.record.execution, status: 'NEEDS_REVIEW', attempts: h.state.record.execution.attempts + 1 };
     expect((await h.request('abandon')).statusCode).toBe(200);
@@ -268,7 +270,7 @@ describe('POST execution resolve', () => {
     expect(h.state.keys).toEqual([h.originalKey, h.originalKey]);
   });
   it('rejects a different recovery decision after abandon', async () => {
-    const h = await harness(); await h.request('abandon');
+    const h = await harness('booking'); await h.request('abandon');
     error(await h.request('retry'), 409, 'INVALID_STATE'); expect(h.state.resolverCalls).toBe(1);
   });
   it('rejects another owner before lookup', async () => {
@@ -342,7 +344,7 @@ describe('POST execution resolve', () => {
     expect(h.state.record.execution.status).toBe('NEEDS_REVIEW'); expect(h.state.resolverCalls).toBe(0);
   });
   it('rolls back an abandon decision when its checked routine cannot persist the audit event', async () => {
-    const h = await harness(); h.state.throwActivity = true;
+    const h = await harness('booking'); h.state.throwActivity = true;
     error(await h.request('abandon'), 500, 'INTERNAL'); expect(h.state.record.execution.status).toBe('NEEDS_REVIEW');
     expect(h.state.resolverCalls).toBe(0); expect(h.state.decision).toBeUndefined();
   });
@@ -351,7 +353,7 @@ describe('POST execution resolve', () => {
     error(await h.request('abandon'), 409, 'INVALID_STATE'); expect(h.state.record.execution.status).toBe('NEEDS_REVIEW');
   });
   it('rejects a port attempting to replace the existing key', async () => {
-    const h = await harness(); h.state.mutateKey = true;
+    const h = await harness('booking'); h.state.mutateKey = true;
     error(await h.request('abandon'), 500, 'INTERNAL'); expect(h.state.resolverCalls).toBe(0);
   });
   it.each(['bogus', 'RETRY', ''])('rejects invalid action %s', async action => {

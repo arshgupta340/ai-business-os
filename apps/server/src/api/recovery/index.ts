@@ -23,6 +23,7 @@ export const RECOVERY_MESSAGES = {
   outcomeUnknown: 'The provider could not confirm whether this step happened, so it cannot be retried or abandoned yet. For an order, cancel it instead.',
   attemptsUsed: 'This step has used all of its attempts, so it cannot be retried. Abandon it instead.',
   approvalNotApproved: 'This step does not belong to an approved request, so it cannot be retried.',
+  checkoutNotProvable: 'Square cannot show that this payment link was never created, so the checkout cannot be retried or abandoned. Cancel the order instead.',
 } as const;
 
 async function scopeFor(ports: RecoveryPorts, request: FastifyRequest, id: string, businessId: string): Promise<RecoveryScope> {
@@ -167,12 +168,14 @@ export function createRecoveryPlugin(ports: RecoveryPorts): FastifyPluginAsync {
           return finish('abandon', 'FAILED', failed('FAILED'));
         }
         if (lookup.outcome === 'unknown') return refuse('INVALID_STATE', RECOVERY_MESSAGES.outcomeUnknown);
+        // No Square read can prove a payment link absent (0008 refuses it too), so a checkout without
+        // evidence of its link is neither requeued nor abandoned.
+        if (lookup.outcome === 'absent' && e.actionType === 'square.checkout.create') return refuse('INVALID_STATE', RECOVERY_MESSAGES.checkoutNotProvable);
         if (body.data.action === 'retry') {
           // A provider effect proven to match the approved material completes the step from that evidence
           // (checkout references and PAYMENT_LINK_READY, the verified booking and its Sheets job). Proven
-          // absence requeues the same step row, so the same idempotency key (owner_resolve_execution, 0008).
-          // A checkout keeps its order in RECOVERY_REQUIRED and the retried step moves it to
-          // PAYMENT_LINK_READY; a calendar step moves its booking back to RECHECKING_SLOT.
+          // absence (today only a calendar read) requeues the same step row, so the same idempotency key
+          // (owner_resolve_execution, 0008), and moves the booking back to RECHECKING_SLOT.
           if (lookup.outcome === 'exists') return finish('retry', 'SUCCEEDED', succeeded(lookup.externalRef));
           if (record.approval.state !== 'APPROVED') return refuse('INVALID_STATE', RECOVERY_MESSAGES.approvalNotApproved);
           if (!await verifyPayloadHash(record.approval.bundleType, record.approval.payload as unknown as Record<string, unknown>, record.approval.payloadHash)) return refuse('PAYLOAD_HASH_MISMATCH');

@@ -222,6 +222,26 @@ export function createCalendarAdapter(deps: CalendarDependencies): CalendarAdapt
       } catch { return unavailable(); }
     },
 
+    async findEventForRecovery(input) {
+      const unknown = { outcome: 'unknown' as const };
+      if (!BookingIdSchema.safeParse(input.bookingId).success || !input.calendarId.trim() || !IdempotencyKeySchema.safeParse(input.eventId).success
+        || !IsoDateTimeSchema.safeParse(input.startUtc).success || !IsoDateTimeSchema.safeParse(input.endUtc).success) return unknown;
+      try {
+        // The same two reads createEvent uses before it inserts: the booking's private property, then the
+        // deterministic event ID (404 or 410 means none). Both must answer for "absent".
+        const byProperty = await findByProperty(input.bookingId, input.calendarId);
+        const byId = await findById(input.calendarId, input.eventId);
+        const live = [...byProperty, ...(byId ? [byId] : [])];
+        const ids = new Set(live.map((e) => e.id));
+        if (live.length === 0) return { outcome: 'absent' };
+        if (ids.size !== 1 || !byId || byId.id !== input.eventId) return unknown;
+        // The event must be at the approved slot; any other time, or a missing time, is not evidence.
+        const at = (v: string | null | undefined) => (v ? Date.parse(v) : NaN);
+        if (at(byId.start?.dateTime) !== Date.parse(input.startUtc) || at(byId.end?.dateTime) !== Date.parse(input.endUtc)) return unknown;
+        return { outcome: 'found', googleEventId: input.eventId };
+      } catch { return unknown; }
+    },
+
     async deleteEventForBooking(bookingId, calendarId) {
       if (!BookingIdSchema.safeParse(bookingId).success || !calendarId.trim()) return invalid();
       try {

@@ -117,11 +117,8 @@ export function createExecutor(deps: ExecutorDeps) {
     if (!refusal && material && !outcome.apply && (outcome.status === 'FAILED' || outcome.status === 'NEEDS_REVIEW')) {
       const subject = material;
       if (step.actionType === 'square.checkout.create') {
-        outcome.apply = async (subjects) => {
-          // An owner retry runs from RECOVERY_REQUIRED, which has no move to UNAVAILABLE; it stays there.
-          if ((await subjects.loadOrder(step.businessId, subject.subjectId)).status === 'RECOVERY_REQUIRED') return;
-          await subjects.moveOrder(step.businessId, subject.subjectId, outcome.errorCode === 'ITEM_UNAVAILABLE' ? 'UNAVAILABLE' : 'RECOVERY_REQUIRED');
-        };
+        outcome.apply = (subjects) => subjects.moveOrder(step.businessId, subject.subjectId,
+          outcome.errorCode === 'ITEM_UNAVAILABLE' ? 'UNAVAILABLE' : 'RECOVERY_REQUIRED');
       } else if (step.actionType === 'calendar.event.create') {
         outcome.apply = (subjects) => subjects.moveBooking(step.businessId, subject.subjectId, 'RETRY_REQUIRED');
       }

@@ -1,16 +1,15 @@
 // Issue #54 on migration 0008: the owner's retry or abandon through POST /api/executions/:id/resolve,
 // on the in-process Postgres as abos_app, with the real engine, executor and recovery ports, and fake
 // providers. Each test counts the external writes it caused.
-import Fastify from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createRecoveryPlugin, RECOVERY_MESSAGES } from '../../src/api/recovery/index';
-import { createDbRecoveryPorts } from '../../src/compose/recovery';
+import { RECOVERY_MESSAGES } from '../../src/api/recovery/index';
+import { BOOKING_PROPERTY_KEY, bookingPropertyValue } from '../../src/adapters/calendar/index';
 import { currentRole } from '../support/db';
 import { OWNER, OTHER, createWorld, type World } from './world';
-import { PIZZA, approve, count, counts, delta, order, pizzaOrder, steps } from '../adversarial/helpers';
+import { BARBER, PIZZA, approve, bookingProposal, count, counts, delta, order, pizzaOrder, statusOf, steps, type Booked } from '../adversarial/helpers';
 
-const resolve = (w: World, id: string, action: 'retry' | 'abandon', headers = OWNER) =>
-  w.app.inject({ method: 'POST', url: `/api/executions/${id}/resolve?businessId=${PIZZA}`, headers, payload: { action } });
+const resolve = (w: World, id: string, action: 'retry' | 'abandon', headers = OWNER, businessId = PIZZA) =>
+  w.app.inject({ method: 'POST', url: `/api/executions/${id}/resolve?businessId=${businessId}`, headers, payload: { action } });
 const dispatchOf = async (w: World, approvalId: string) =>
   (await w.t.db.query('select status, provider_message_id from message_dispatches where approval_id = $1', [approvalId])).rows as { status: string; provider_message_id: string | null }[];
 
@@ -51,8 +50,14 @@ describe('a message whose delivery is unknown', () => {
     expect(await dispatchOf(w, ids.approvalId)).toEqual([{ status: 'FAILED', provider_message_id: null }]);
     expect(await count(w, 'activity_events where business_id = $1', [PIZZA])).toBe(events + 2);
     expect(await count(w, "activity_events where type = 'message.failed' and actor_type = 'owner' and payload->>'status' = 'FAILED' and payload->>'subjectId' = $1", [ids.orderId])).toBe(1);
-    // A repeat is refused at the route: the step is no longer in review.
-    expect((await resolve(w, message.id, 'abandon')).statusCode).toBe(409);
+    // The identical repeat answers what the first request answered (0008 recovery_decisions) and writes nothing.
+    const repeat = await resolve(w, message.id, 'abandon');
+    expect(repeat.statusCode, repeat.body).toBe(200);
+    expect(repeat.json()).toEqual(abandon.json());
+    expect(await count(w, 'activity_events where business_id = $1', [PIZZA])).toBe(events + 2);
+    expect(await count(w, 'recovery_decisions where execution_id = $1', [message.id])).toBe(1);
+    // The opposite action for the same attempt is refused.
+    expect((await resolve(w, message.id, 'retry')).statusCode).toBe(409);
     w.app.composed.executor.kick(PIZZA);
     await w.settle();
     expect(sends).toHaveLength(1);
@@ -61,16 +66,88 @@ describe('a message whose delivery is unknown', () => {
   });
 });
 
-describe('a checkout retry after a lookup proves no link exists', () => {
-  // The Square lookup in compose/recovery.ts cannot prove absence (a timed-out CreatePaymentLink leaves no
-  // reference to read back), so it answers "unknown" and the route refuses. This test replaces only the
-  // lookup with one that proves absence, to show what the database and the executor do with that proof.
+describe('a calendar step whose insert outcome is unknown: the owner retries after a real calendar read', () => {
+  // The fake Google Calendar answers the recovery read with the event (found), with nothing (not found),
+  // or with an error. Only "not found" requeues; "found" completes through 0005's resolve_execution.
   let w: World;
   beforeAll(async () => { w = await createWorld(); }, 120_000);
   afterAll(async () => { await w?.close(); });
 
-  it('requeues the same step with the same key; the next attempt creates the link from RECOVERY_REQUIRED and the bundle goes on', async () => {
-    const c = w.app.composed;
+  async function stuckBooking() {
+    const events = w.calendar.client.events;
+    // The insert is sent and its answer is lost; the adapter's follow-up read finds nothing yet, so the
+    // outcome is unknown (SPEC 2.9) and the step goes to review.
+    const saved = { insert: events.insert };
+    events.insert = async (): Promise<never> => { w.calendarWrites.push('events.insert'); throw Object.assign(new Error('backend error'), { code: 503 }); };
+    let booked: Booked;
+    try {
+      booked = await bookingProposal(w);
+      await approve(w, BARBER, booked.approvalId);
+      await w.settle();
+    } finally { Object.assign(events, saved); }
+    const calendarStep = (await steps(w, booked.approvalId))[0]!;
+    expect(calendarStep).toMatchObject({ action_type: 'calendar.event.create', status: 'NEEDS_REVIEW', attempts: 1 });
+    expect(await statusOf(w, 'bookings', booked.bookingId)).toBe('RETRY_REQUIRED');
+    return { ...booked, step: calendarStep };
+  }
+
+  it('found: the event under the step key at the approved slot completes the step, with no second insert; a repeat answers the same', async () => {
+    const b = await stuckBooking();
+    const approved = (await w.t.db.query('select payload_canonical from approval_requests where id = $1', [b.approvalId])).rows[0] as { payload_canonical: string };
+    const slot = JSON.parse(approved.payload_canonical) as { startUtc: string; endUtc: string };
+    // The insert had landed at Google before the answer was lost.
+    w.calendar.events.set(b.step.idempotency_key, { id: b.step.idempotency_key, summary: 'Haircut', description: '', start: { dateTime: slot.startUtc }, end: { dateTime: slot.endUtc },
+      transparency: 'opaque', extendedProperties: { private: { [BOOKING_PROPERTY_KEY]: await bookingPropertyValue(b.bookingId) } } });
+    const writes = w.calendarWrites.length;
+    const res = await resolve(w, b.step.id, 'retry', OWNER, BARBER);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().execution).toMatchObject({ status: 'SUCCEEDED', externalRef: b.step.idempotency_key });
+    expect(await statusOf(w, 'bookings', b.bookingId)).toBe('BOOKED_VERIFIED');
+    expect(await count(w, "recovery_decisions where execution_id = $1 and provider_read = 'calendar_event_found' and result_status = 'SUCCEEDED'", [b.step.id])).toBe(1);
+    const again = await resolve(w, b.step.id, 'retry', OWNER, BARBER);
+    expect(again.statusCode).toBe(200);
+    expect(again.json()).toEqual(res.json());
+    expect(w.calendarWrites.length).toBe(writes);
+  });
+
+  it('not found: the step is requeued with its key and the next attempt inserts once with that key', async () => {
+    const b = await stuckBooking();
+    const writes = w.calendarWrites.length;
+    const res = await resolve(w, b.step.id, 'retry', OWNER, BARBER);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().execution).toMatchObject({ status: 'QUEUED', attempts: 1, idempotencyKey: b.step.idempotency_key });
+    expect(await count(w, "recovery_decisions where execution_id = $1 and provider_read = 'calendar_event_absent' and result_status = 'QUEUED'", [b.step.id])).toBe(1);
+    w.app.composed.executor.kick(BARBER);
+    await w.settle();
+    expect((await steps(w, b.approvalId))[0]).toMatchObject({ status: 'SUCCEEDED', attempts: 2, idempotency_key: b.step.idempotency_key, external_ref: b.step.idempotency_key });
+    expect(await statusOf(w, 'bookings', b.bookingId)).toBe('BOOKED_VERIFIED');
+    expect(w.calendarWrites.length).toBe(writes + 1);
+    expect(w.calendar.events.has(b.step.idempotency_key)).toBe(true);
+  });
+
+  it('error: a calendar read that fails is unknown, so retry and abandon are refused and nothing changes', async () => {
+    const b = await stuckBooking();
+    const events = w.calendar.client.events;
+    const get = events.get;
+    events.get = async (): Promise<never> => { throw Object.assign(new Error('backend error'), { code: 500 }); };
+    try {
+      for (const action of ['retry', 'abandon'] as const) {
+        const res = await resolve(w, b.step.id, action, OWNER, BARBER);
+        expect(res.json()).toMatchObject({ code: 'INVALID_STATE', message: RECOVERY_MESSAGES.outcomeUnknown });
+      }
+    } finally { events.get = get; }
+    expect((await steps(w, b.approvalId))[0]).toMatchObject({ status: 'NEEDS_REVIEW', attempts: 1 });
+    expect(await statusOf(w, 'bookings', b.bookingId)).toBe('RETRY_REQUIRED');
+    expect(await count(w, 'recovery_decisions where execution_id = $1', [b.step.id])).toBe(0);
+  });
+});
+
+describe('a checkout whose link may or may not exist', () => {
+  let w: World;
+  beforeAll(async () => { w = await createWorld(); }, 120_000);
+  afterAll(async () => { await w?.close(); });
+
+  it('cannot be retried or abandoned, because no Square read proves absence; the owner cancels the order', async () => {
     w.square.mode.create = 'timeout';
     let ids: { orderId: string; approvalId: string };
     try {
@@ -79,39 +156,14 @@ describe('a checkout retry after a lookup proves no link exists', () => {
       await w.settle();
     } finally { w.square.mode.create = 'ok'; }
     const checkout = (await steps(w, ids.approvalId))[0]!;
-    expect(checkout).toMatchObject({ status: 'NEEDS_REVIEW', attempts: 1, external_ref: null });
-    expect((await order(w, ids.orderId)).status).toBe('RECOVERY_REQUIRED');
-    // Through the real route and ports, the lookup cannot prove absence.
-    expect((await resolve(w, checkout.id, 'retry')).json()).toMatchObject({ code: 'INVALID_STATE', message: RECOVERY_MESSAGES.outcomeUnknown });
-
-    const ports = createDbRecoveryPorts({ db: c.db, now: c.now, newId: c.newId, providers: c.providers });
-    const owner = (await w.t.db.query('select owner_id from businesses where id = $1', [PIZZA])).rows[0] as { owner_id: string };
-    const proving = Fastify();
-    proving.addHook('preHandler', async (req) => { req.ownerUserId = owner.owner_id; });
-    await proving.register(createRecoveryPlugin({ ...ports, lookup: async () => ({ outcome: 'absent' }) }));
-    try {
-      // Another owner whose route-level ownership check is bypassed is still refused by the database.
-      const other = Fastify();
-      other.addHook('preHandler', async (req) => { req.ownerUserId = 'usr_other_01'; });
-      await other.register(createRecoveryPlugin({ ...ports, ownsBusiness: async () => true, lookup: async () => ({ outcome: 'absent' }) }));
-      const refused = await other.inject({ method: 'POST', url: `/api/executions/${checkout.id}/resolve?businessId=${PIZZA}`, payload: { action: 'retry' } });
-      expect(refused.json()).toMatchObject({ code: 'FORBIDDEN_BUSINESS' });
-      await other.close();
-      expect((await steps(w, ids.approvalId))[0]!.status).toBe('NEEDS_REVIEW');
-      const res = await proving.inject({ method: 'POST', url: `/api/executions/${checkout.id}/resolve?businessId=${PIZZA}`, payload: { action: 'retry' } });
-      expect(res.statusCode, res.body).toBe(200);
-      expect(res.json().execution).toMatchObject({ id: checkout.id, status: 'QUEUED', attempts: 1, idempotencyKey: checkout.idempotency_key });
-    } finally { await proving.close(); }
-
-    const keysBefore = w.square.createKeys.length;
-    c.executor.kick(PIZZA);
-    await w.settle();
-    const after = await steps(w, ids.approvalId);
-    expect(after.map((s) => [s.status, s.attempts])).toEqual([['SUCCEEDED', 2], ['SUCCEEDED', 1], ['SUCCEEDED', 1]]);
-    expect(after[0]!.idempotency_key).toBe(checkout.idempotency_key);
-    // One more CreatePaymentLink, with the original key.
-    expect(w.square.createKeys.slice(keysBefore)).toEqual([checkout.idempotency_key]);
-    expect(await order(w, ids.orderId)).toMatchObject({ status: 'PAYMENT_PENDING', checkout_url: expect.stringMatching(/^https:\/\//) });
-    expect(await count(w, "activity_events where type = 'execution.failed' and payload->>'executionId' = $1 and payload->>'nextStatus' = 'QUEUED'", [checkout.id])).toBe(1);
+    expect(checkout).toMatchObject({ status: 'NEEDS_REVIEW', external_ref: null });
+    for (const action of ['retry', 'abandon'] as const) {
+      expect((await resolve(w, checkout.id, action)).json()).toMatchObject({ code: 'INVALID_STATE', message: RECOVERY_MESSAGES.outcomeUnknown });
+    }
+    const writes = w.squareWrites.length;
+    const cancelled = await w.app.inject({ method: 'POST', url: `/api/orders/${ids.orderId}/cancel?businessId=${PIZZA}`, headers: OWNER, payload: {} });
+    expect(cancelled.statusCode).toBe(200);
+    expect((await order(w, ids.orderId)).status).toBe('CANCELLED');
+    expect(w.squareWrites.length).toBe(writes);
   });
 });

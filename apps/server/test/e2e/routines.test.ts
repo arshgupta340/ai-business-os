@@ -123,8 +123,11 @@ describe('recovery of a NEEDS_REVIEW checkout', () => {
     expect((await order(w, orderId)).status).toBe('PAYMENT_PENDING');
     // No second payment link was created.
     expect(w.squareWrites.length).toBe(writes);
-    // A repeat is refused: the step is no longer in review.
-    expect((await resolve(PIZZA, checkout!.id, 'retry')).statusCode).toBe(409);
+    // The identical repeat answers what the first request answered (0008 recovery_decisions); abandon is refused.
+    const repeat = await resolve(PIZZA, checkout!.id, 'retry');
+    expect(repeat.statusCode).toBe(200);
+    expect(repeat.json().execution).toMatchObject({ id: checkout!.id, status: 'SUCCEEDED' });
+    expect((await resolve(PIZZA, checkout!.id, 'abandon')).statusCode).toBe(409);
   });
 
   it('link may not exist: Square timed out, nothing proves either way, retry and abandon are refused, the owner cancels', async () => {
