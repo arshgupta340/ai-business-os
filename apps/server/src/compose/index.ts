@@ -245,8 +245,17 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   const integrations = { read: () => health.read({ refresh: true }) };
   // Extraction keeps its in-memory stores: uploaded bytes have no database column or storage bucket
   // wired, and upload facts reference their files row, so the set moves together (see the report).
+  // With a database but no way to verify tokens, the builder answers INTEGRATION_UNAVAILABLE (a server
+  // setting is missing), not UNAUTHENTICATED, so the web app does not sign a valid owner out. The
+  // explicit local opt-in BUILDER_DEV_AUTH=1 keeps the builder's own loopback-only stand-in.
+  const unconfiguredAuth: NonNullable<BuilderPluginOptions['auth']> = {
+    verified: true,
+    async authenticate() { throw new AppError('INTEGRATION_UNAVAILABLE', 'Sign-in is not configured on this server.'); },
+    async ownsBusiness() { return false; },
+  };
+  const devAuth = process.env.BUILDER_DEV_AUTH === '1';
   const builder: BuilderPluginOptions = hasDb ? {
-    ...(authConfigured ? { auth: createBuilderAuth(db, verifier) } : {}),
+    ...(authConfigured ? { auth: createBuilderAuth(db, verifier) } : devAuth ? {} : { auth: unconfiguredAuth }),
     liveAgent: dbLiveAgentReader(db), sessions: dbBuilderSessionStore(db), agents: dbAgentDraftStore(db),
     draftFacts: dbDraftFactStore(db), knowledge: dbBusinessKnowledge(db), proposeFactFromChat,
     publish: {
