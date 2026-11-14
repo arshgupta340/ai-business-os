@@ -3,6 +3,6 @@ import { CONTRACTS_VERSION } from './index';
 
 describe('contracts package', () => {
   it('exports a version', () => {
-    expect(CONTRACTS_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(CONTRACTS_VERSION).toBe('1.0.0');
   });
 });
