@@ -1,6 +1,6 @@
 # Feature matrix
 
-**Task:** S-06. **Updated:** 2026-11-14. **Describes:** the code on `main` at commit `4f1bed8`, merged into branch `arsh/S-06-docs`.
+**Task:** S-06. **Updated:** 2026-11-14. **Describes:** the code on `main` at commit `4d840fd`, merged into branch `arsh/S-06-docs`.
 
 One row for each acceptance criterion AC-01 to AC-20 and for each P0 item in `docs/PRD.md` section 4. Task IDs come from `scripts/tasks.json`. Where the PRD and `docs/SPEC.md` use different names, the row uses the SPEC name.
 
@@ -20,7 +20,7 @@ Three things apply to every row.
 - **The web app run against the deployed server is not verified.** The web screens are covered by unit tests on fixtures.
 - **The payment in the live run was a SIMULATED sandbox payment.** The script opened the Square order with UpdateOrder and paid it through the API with Square's sandbox test nonce. There was no card form and no real money. Paying through Square's hosted checkout page with a test card is not verified.
 
-Test totals for this checkout are in `SECURITY_NOTES.md` section 3. In short: typecheck passed for all four workspaces, 2170 of 2172 server and package tests passed with 2 marked as expected failures (two known open defects), and all 600 web tests passed.
+Test totals for this checkout are in `SECURITY_NOTES.md` section 3. In short: typecheck passed for all four workspaces, 2199 of 2201 server and package tests passed with 2 marked as expected failures (two known open defects), and all 600 web tests passed.
 
 Paths are shortened: `server/` means `apps/server/`, `builder/` means `apps/server/src/builder/`, `db/` means `packages/db/test/`, and `contracts/` means `packages/contracts/src/`.
 

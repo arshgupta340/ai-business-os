@@ -2,7 +2,7 @@ DRAFT
 
 # Demo runbook
 
-**Task:** S-06. **Updated:** 2026-11-14. **Describes:** the code on `main` at commit `4f1bed8`, merged into branch `arsh/S-06-docs`.
+**Task:** S-06. **Updated:** 2026-11-14. **Describes:** the code on `main` at commit `4d840fd`, merged into branch `arsh/S-06-docs`.
 
 This is a draft script. It is not a record of a demo that happened. No rehearsal by a person is recorded for any step in it, so every step is marked "Not rehearsed". Where a script has verified part of a step against real services, the step says which part and where. The complete list of real checks is in `SECURITY_NOTES.md` section 2.
 
