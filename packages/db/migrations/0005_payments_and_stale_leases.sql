@@ -191,13 +191,13 @@ begin
   elsif a.bundle_type = 'fact_edit' then
     select * into f from public.business_facts where id=a.subject_id and business_id=a.business_id;
     if not found or f.kind is distinct from p->>'kind' or f.key is distinct from p->>'key'
-      or not (
+      or not coalesce(
         (f.status='verified' and f.version=(p->>'fromVersion')::integer and f.value=p->'before')
         or ((p->>'fromVersion')::integer=0 and p->'before'='null'::jsonb
           and f.status='draft' and f.value=p->'after'
           and not exists(select 1 from public.business_facts v where v.business_id=a.business_id
-            and v.kind=f.kind and v.key=f.key and v.status='verified'))
-      )
+            and v.kind=f.kind and v.key=f.key and v.status='verified')),
+      false)
     then raise exception 'SUBJECT: fact material mismatch'; end if;
   elsif a.bundle_type = 'price_edit' then
     select * into c from public.catalog_items where id=a.subject_id and business_id=a.business_id;
@@ -362,6 +362,16 @@ begin
     select 1 from public.message_dispatches m where m.execution_id=x.id and m.status in ('SENT','DELIVERED')
       and m.provider_message_id=p_external_ref) then
     raise exception 'RESULT: message step needs its sent dispatch and provider message ID'; end if;
+  -- A completion must match the provider identity already saved by save_checkout or verify_booking,
+  -- so the execution row and its subject never disagree. A checkout with no saved references keeps
+  -- the 0004 behavior; a calendar step succeeds only on its verified booking.
+  if p_status='SUCCEEDED' and x.action_type='square.checkout.create' and x.square_order_id is not null
+    and x.square_order_id is distinct from p_external_ref then
+    raise exception 'RESULT: checkout step needs its saved Square order ID'; end if;
+  if p_status='SUCCEEDED' and x.action_type='calendar.event.create' and not exists(
+    select 1 from public.approval_requests a join public.bookings b on b.id=a.subject_id and b.business_id=a.business_id
+      where a.id=x.approval_id and b.status='BOOKED_VERIFIED' and b.google_event_id=p_external_ref) then
+    raise exception 'RESULT: calendar step needs its verified booking event ID'; end if;
   update public.action_executions set status=p_status,external_ref=p_external_ref,last_error=p_error,
     next_attempt_at=case when p_status='QUEUED' then p_retry_at else next_attempt_at end,
     locked_by=null,locked_at=null,lease_deadline=null,finished_at=case when p_status='QUEUED' then null else pg_catalog.clock_timestamp() end
@@ -693,10 +703,15 @@ begin
   if x.status<>'NEEDS_REVIEW' then raise exception 'LEASE: NEEDS_REVIEW required'; end if;
   if p_status is null or p_status not in ('SUCCEEDED','QUEUED','FAILED') then raise exception 'TRANSITION: invalid resolution'; end if;
   if a.state<>'APPROVED' or a.decided_at>=a.expires_at then raise exception 'SUBJECT: approved bundle required'; end if;
-  perform private.check_subject(a);
+  -- Abandoning writes nothing external and moves no subject, so it needs no material match.
+  if p_status<>'FAILED' then perform private.check_subject(a); end if;
   if p_status='QUEUED' and exists(select 1 from public.action_executions where approval_id=a.id and step_index>x.step_index and started_at is not null) then
     raise exception 'PREDECESSOR: successor already started'; end if;
   if p_status='QUEUED' and (p_nothing_written is distinct from true or x.attempts>=3 or x.external_ref is not null or x.square_order_id is not null) then
+    raise exception 'RESULT: proved absent provider write and attempts below limit required'; end if;
+  -- A stored send contradicts a claim that nothing was written.
+  if p_status='QUEUED' and exists(select 1 from public.message_dispatches m where m.execution_id=x.id
+    and (m.status in ('SENT','DELIVERED') or m.provider_message_id is not null)) then
     raise exception 'RESULT: proved absent provider write and attempts below limit required'; end if;
   if p_status='SUCCEEDED' and nullif(p_external_ref,'') is null then raise exception 'RESULT: provider reference required'; end if;
   if p_status='SUCCEEDED' and x.external_ref is not null and x.external_ref is distinct from p_external_ref then
@@ -798,7 +813,7 @@ begin
   if x.action_type<>'local.fact.update' or x.status<>'RUNNING' or x.locked_by is distinct from p_worker or p_worker is null
     or x.attempts is distinct from p_attempt or x.lease_deadline is null or x.lease_deadline<=pg_catalog.clock_timestamp() then raise exception 'LEASE: current fact worker required'; end if;
   -- Serializes two different draft subjects proposing the same new key.
-  perform 1 from public.businesses where id=p_business for update;
+  perform 1 from public.businesses where id=p_business for no key update;
   perform private.check_subject(a);
   m:=a.payload_canonical::jsonb;
   select * into f from public.business_facts where id=a.subject_id and business_id=p_business for update;
