@@ -1,31 +1,39 @@
+// The one place every route group is registered. Dependencies come from the composition root
+// (compose/index.ts); tests pass overrides through the same options.
 import { randomUUID } from 'node:crypto';
 import { ERROR_CODE_INFO, type ErrorCode } from '@abos/contracts';
 import cors from '@fastify/cors';
-import { createDb, createPool, unavailableDb, type Db } from './db/index';
-import { createVerifier, createAuthGuard, type TokenVerifier } from './auth/verify';
-import { apiRoutes } from './api/routes';
-import { unavailableEngine, type EnginePorts, type CatalogPort } from './api/ports';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { healthRoutes } from './api/health';
+import { apiRoutes } from './api/routes';
+import { registerSimCall } from './api/simcall/index';
+import { createAuthGuard } from './auth/verify';
 import { builderPlugin } from './builder/index';
+import { composeServer, type ComposeOptions, type ComposedServer } from './compose/index';
 import type { Env } from './env';
 import { AppError, type ErrorEnvelope } from './errors';
+import { voicePlugin } from './voice/plugin';
 
 declare module 'fastify' {
   interface FastifyRequest {
     correlationId: string;
+  }
+  interface FastifyInstance {
+    /** The composed dependencies, for index.ts (jobs) and tests. */
+    composed: ComposedServer;
   }
 }
 
 const CORRELATION_HEADER = 'x-correlation-id';
 const SAFE_ID = /^[A-Za-z0-9._-]{8,128}$/;
 
-export async function buildApp(env: Env, options: { logger?: boolean; db?: Db; verifier?: TokenVerifier; ports?: EnginePorts; catalog?: CatalogPort; webOrigin?: string } = {}): Promise<FastifyInstance> {
-  const app = Fastify({ logger: options.logger ?? false });
+export type BuildAppOptions = ComposeOptions & { logger?: boolean; webOrigin?: string };
 
-  const pool = !options.db && env.DATABASE_URL ? createPool(env) : undefined;
-  const db = options.db ?? (pool ? createDb(pool) : unavailableDb);
-  if (pool) app.addHook('onClose', async () => { await pool.end(); });
+export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise<FastifyInstance> {
+  const app = Fastify({ logger: options.logger ?? false });
+  const composed = composeServer(env, { log: app.log, ...options });
+  app.decorate('composed', composed);
+  app.addHook('onClose', async () => { await composed.stopJobs(); await composed.close(); });
 
   // Every request gets a correlation ID, and every response carries it back
   // (docs/SPEC.md section 2.9). A caller-supplied ID is used only if it is
@@ -81,10 +89,20 @@ export async function buildApp(env: Env, options: { logger?: boolean; db?: Db; v
   });
   app.decorateRequest('ownerUserId', '');
   app.decorateRequest('businessId', undefined);
-  app.addHook('preHandler', createAuthGuard(db, options.verifier ?? createVerifier(env)));
-  await app.register(apiRoutes, { db, ports: options.ports ?? unavailableEngine, env, catalog: options.catalog });
+  // Authenticates every contract route Arsh owns. Builder routes use their own BuilderAuth seam.
+  app.addHook('preHandler', createAuthGuard(composed.db, composed.verifier));
+
   await app.register(healthRoutes, { env });
-  await app.register(builderPlugin);
+  await app.register(apiRoutes, { db: composed.db, ports: composed.enginePorts, env, catalog: composed.catalogSync, providerStatus: composed.providers.status });
+  registerSimCall(app, { db: composed.db, calls: composed.calls, toolsetFor: composed.toolsetFor, model: composed.agentModel, now: composed.now, newId: composed.newId });
+  await app.register(builderPlugin, composed.builder);
+
+  // Phone calls (B-15). Off, with a log line naming the missing settings, when a key is absent.
+  if (composed.voice.ok) await app.register(voicePlugin, composed.voice.options);
+  else app.log.warn({ missing: composed.voice.missing }, 'phone voice is off: missing settings');
+
+  // Provider webhooks (B-13 seam). The default refuses them without reading the body.
+  await app.register(composed.webhooksPlugin);
 
   return app;
 }

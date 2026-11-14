@@ -13,7 +13,8 @@ import { setLiveAgent } from './live-agent';
 import { unavailableCatalog, type CatalogPort, type EnginePorts } from './ports';
 export { setLiveAgent } from './live-agent';
 
-export interface ApiDependencies { db: Db; ports: EnginePorts; env: Env; catalog?: CatalogPort }
+export type ProviderStatusMap = Record<'square' | 'twilio' | 'openai' | 'google_calendar' | 'google_sheets' | 'message_channel', { configured: boolean; detail: string }>;
+export interface ApiDependencies { db: Db; ports: EnginePorts; env: Env; catalog?: CatalogPort; providerStatus?: ProviderStatusMap }
 export const CORE_ENDPOINTS = Object.entries(ENDPOINTS).filter(([name, e]) =>
   e.owner === 'arsh' && e.tier === 'MUST' && name !== 'simCall') as [EndpointName, EndpointDefinition][];
 
@@ -99,7 +100,8 @@ async function list(db: Db, name: keyof typeof collections, businessId: string, 
   values.push(limit + 1);
   const rows = (await db.query(`select *, to_char(${time} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as page_time
     from public.${table} where ${clauses.join(' and ')} order by ${time} desc, id desc limit $${values.length}`, values)).rows;
-  const page = rows.slice(0, limit).map(mapRow);
+  const mapped = rows.slice(0, limit).map(mapRow);
+  const page = name === 'listActivity' ? await normalizeActivity(db, mapped) : mapped;
   const last = page.at(-1);
   return { items: page, ...(rows.length > limit && last ? {
     nextCursor: Buffer.from(JSON.stringify({ id: last.id, time: last.pageTime, scope })).toString('base64url'),
@@ -132,20 +134,47 @@ async function catalog(db: Db, businessId: string) {
   return { items: [...grouped.values()], syncedAt: rows.reduce((latest, row) => String(row.syncedAt) > latest ? String(row.syncedAt) : latest, new Date(0).toISOString()) };
 }
 
-function health(env: Env) {
+/**
+ * API 3.11. Reports whether each provider is configured and its client was built at startup
+ * (compose/providers.ts). It makes no live provider call, so `connected` means "configured and
+ * usable", not "reachable right now"; `refresh=1` is accepted and changes nothing yet.
+ */
+function health(env: Env, status?: ProviderStatusMap) {
   const lastCheckedAt = new Date().toISOString();
-  const entry = (configured: unknown) => ({ state: configured ? 'connected' : 'disconnected', detail: configured ? 'ok' : 'unconfigured', lastCheckedAt });
-  const messageConfigured = env.MESSAGE_CHANNEL === 'qr_only' ||
-    (env.MESSAGE_CHANNEL === 'surge' && env.SURGE_API_KEY && env.SURGE_ACCOUNT_ID) ||
-    (env.MESSAGE_CHANNEL === 'android_gateway' && env.ANDROID_GATEWAY_URL && env.ANDROID_GATEWAY_API_KEY) ||
-    (env.MESSAGE_CHANNEL === 'whatsapp_sandbox' && env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.TWILIO_PHONE_NUMBER);
-  return {
-    square: { ...entry(env.SQUARE_ACCESS_TOKEN && env.SQUARE_LOCATION_ID), environment: 'sandbox' },
-    twilio: entry(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.TWILIO_PHONE_NUMBER),
-    openai: entry(env.OPENAI_API_KEY), google_calendar: entry(env.GOOGLE_SERVICE_ACCOUNT_JSON && env.GOOGLE_CALENDAR_ID),
-    google_sheets: entry(env.GOOGLE_SERVICE_ACCOUNT_JSON && env.GOOGLE_SHEET_ID),
-    message_channel: { ...entry(messageConfigured), ...(env.MESSAGE_CHANNEL ? { channel: env.MESSAGE_CHANNEL } : {}) },
+  const fromEnv: ProviderStatusMap = {
+    square: { configured: Boolean(env.SQUARE_ACCESS_TOKEN && env.SQUARE_LOCATION_ID), detail: '' },
+    twilio: { configured: Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.TWILIO_PHONE_NUMBER), detail: '' },
+    openai: { configured: Boolean(env.OPENAI_API_KEY), detail: '' },
+    google_calendar: { configured: Boolean(env.GOOGLE_SERVICE_ACCOUNT_JSON && env.GOOGLE_CALENDAR_ID), detail: '' },
+    google_sheets: { configured: Boolean(env.GOOGLE_SERVICE_ACCOUNT_JSON && env.GOOGLE_SHEET_ID), detail: '' },
+    message_channel: { configured: env.MESSAGE_CHANNEL === 'qr_only', detail: '' },
   };
+  const s = status ?? fromEnv;
+  const entry = (k: keyof ProviderStatusMap) => ({ state: s[k].configured ? 'connected' : 'disconnected', detail: s[k].configured ? 'ok' : 'unconfigured', lastCheckedAt });
+  return {
+    square: { ...entry('square'), environment: 'sandbox' },
+    twilio: entry('twilio'), openai: entry('openai'), google_calendar: entry('google_calendar'), google_sheets: entry('google_sheets'),
+    message_channel: { ...entry('message_channel'), ...(env.MESSAGE_CHANNEL ? { channel: env.MESSAGE_CHANNEL } : {}) },
+  };
+}
+
+/**
+ * The decision and expiry routines write their own order.status_changed and booking.status_changed
+ * rows with `{ subjectId, from, to }` (migration 0004), while the contract payload names the subject
+ * `orderId` or `bookingId` and requires `callId` for orders. Fill those from the subject at read time,
+ * so the audit list stays valid without rewriting append-only rows.
+ */
+async function normalizeActivity(db: Db, items: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
+  const out: Record<string, unknown>[] = [];
+  for (const item of items) {
+    const payload = item.payload as Record<string, unknown> | undefined;
+    const kind = item.type === 'order.status_changed' ? 'orders' : item.type === 'booking.status_changed' ? 'bookings' : undefined;
+    if (!kind || !payload || typeof payload.subjectId !== 'string' || payload.orderId !== undefined || payload.bookingId !== undefined) { out.push(item); continue; }
+    const subject = (await db.query(`select call_id from public.${kind} where id = $1 and business_id = $2`, [payload.subjectId, item.businessId])).rows[0] as { call_id?: string | null } | undefined;
+    const { subjectId, ...rest } = payload;
+    out.push({ ...item, payload: { ...rest, ...(kind === 'orders' ? { orderId: subjectId } : { bookingId: subjectId }), ...(subject?.call_id ? { callId: subject.call_id } : {}) } });
+  }
+  return out;
 }
 
 type Replay = { fingerprint: string; expiresAt: number; response: Promise<unknown> };
@@ -228,7 +257,7 @@ export async function apiRoutes(app: FastifyInstance, deps: ApiDependencies): Pr
         const ready = typeof order.checkoutUrl === 'string' && typeof order.squarePaymentLinkId === 'string' && typeof order.squareOrderId === 'string';
         return { orderId: id, ready, environment: 'sandbox', ...(ready ? { checkoutUrl: order.checkoutUrl, qrText: order.checkoutUrl, squarePaymentLinkId: order.squarePaymentLinkId } : {}), ...(message ? { message } : {}) };
       }
-      case 'getIntegrationsHealth': return health(env);
+      case 'getIntegrationsHealth': return health(env, deps.providerStatus);
       case 'getLiveAgent': {
         if (!env.TWILIO_PHONE_NUMBER) throw new AppError('INTEGRATION_UNAVAILABLE', 'Phone number is not configured.');
         const rows = await db.query(`select l.* from public.live_agent l join public.businesses b on b.id = l.business_id
