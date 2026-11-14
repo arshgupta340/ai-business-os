@@ -189,10 +189,24 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
           const existing = await one(tx, `select o.*, a.id as pending_approval_id from public.orders o
             join public.approval_requests a on a.subject_id = o.id and a.business_id = o.business_id and a.bundle_type = 'order_bundle' and a.state = 'PENDING'
             where o.business_id=$1 and o.call_id=$2 and o.cart_hash=$3 and o.status='AWAITING_OWNER_APPROVAL' order by a.created_at desc limit 1`, [input.businessId, input.callId, hash]);
+          // Issue #93 item 3: only a repeat with the same contact, pickup and channel is the same proposal.
+          // The stored order is frozen from insert (0006) and orders are unique per call and cart, so a
+          // changed recipient or pickup time for the same cart on the same call is refused, never merged
+          // into the pending one: the owner only ever approves the details the caller confirmed.
+          const pickupIso = new Date(input.fulfillment.pickupAt).toISOString();
           if (existing) {
             const approval = await approvalById(tx, String(existing.pending_approval_id), input.businessId);
             const { pending_approval_id: _p, ...orderRow } = existing;
-            if (approval?.state === 'PENDING') return { order: { ...OrderSchema.parse(mapRow(orderRow)), approvalId: approval.id }, approval };
+            const stored = OrderSchema.parse(mapRow(orderRow));
+            // consentAt is the time of each propose, so it is not a detail the owner approves.
+            const material = (c: typeof contact) => ({ name: c.name, messageRecipient: c.messageRecipient ?? null, messageConsent: c.messageConsent });
+            const same = canonicalJson(material(stored.contact)) === canonicalJson(material(contact))
+              && stored.fulfillment.type === input.fulfillment.type && new Date(stored.fulfillment.pickupAt).toISOString() === pickupIso
+              && (approval?.payload as { messageChannel?: string } | undefined)?.messageChannel === channel;
+            if (approval?.state === 'PENDING') {
+              if (same) return { order: { ...stored, approvalId: approval.id }, approval };
+              throw new PolicyError('INVALID_STATE', 'A proposal for this cart is already waiting for the owner with different details.');
+            }
           }
           const at = await dbNow(tx);
           const createdAt = at.toISOString();
@@ -353,6 +367,8 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
           payloadHash: input.payloadHash, decision: target, reason: input.reason ?? null,
         }));
       } catch (error) {
+        // Issue #93 item 4: approving a booking whose slot overlaps an approved one trips bookings_no_overlap.
+        if (error && typeof error === 'object' && 'code' in error && (error as { code: unknown }).code === '23P01') throw new PolicyError('SLOT_CONFLICT');
         const code = routineErrorCode(error);
         if (code !== 'APPROVAL_ALREADY_DECIDED') return rethrow(error);
         // A repeat that differs only in its reason is still the same decision (AC-10).
