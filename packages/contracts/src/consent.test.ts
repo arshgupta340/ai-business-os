@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { BookingCustomerSchema, ContactSchema, OrderSchema, BookingSchema, TOOL_INPUT_SCHEMAS, OrderApprovalPayloadSchema, BookingApprovalPayloadSchema, approvalPayloadHash, payloadHash, canonicalJson, pickMaterialFields, ActivityEventSchema } from './index';
-import { orderAwaitingApproval, bookingAwaitingApproval, approvalOrderPending, approvalBookingPending, approvalOrderQrOnly } from '../fixtures';
+import { BookingCustomerSchema, ContactSchema, OrderSchema, BookingSchema, TOOL_INPUT_SCHEMAS, OrderApprovalPayloadSchema, BookingApprovalPayloadSchema, approvalPayloadHash, payloadHash, canonicalJson, hashCanonical, pickMaterialFields, ActivityEventSchema } from './index';
+import { orderAwaitingApproval, bookingAwaitingApproval, approvalOrderPending, approvalBookingPending, approvalOrderQrOnly, orderQrOnly } from '../fixtures';
 
 describe('message consent', () => {
   const contact = { name: 'Sam', messageConsent: false };
@@ -24,28 +24,27 @@ describe('message consent', () => {
   });
   for (const [schema, approval] of [[OrderApprovalPayloadSchema, approvalOrderPending], [BookingApprovalPayloadSchema, approvalBookingPending]] as const) {
     const { messageRecipient: _recipient, ...payload } = approval.payload;
-    it(`${approval.bundleType}: accepts qr_only without consent or recipient`, () => {
-      expect(schema.safeParse({ ...payload, messageConsent: false, messageChannel: 'qr_only' }).success).toBe(true);
+    it(`${approval.bundleType}: accepts qr_only without a recipient`, () => {
+      expect(schema.safeParse({ ...payload, messageChannel: 'qr_only' }).success).toBe(true);
     });
-    it(`${approval.bundleType}: rejects a real channel without consent`, () => {
-      expect(schema.safeParse({ ...approval.payload, messageConsent: false }).success).toBe(false);
+    it(`${approval.bundleType}: accepts qr_only with a recipient`, () => {
+      expect(schema.safeParse({ ...approval.payload, messageChannel: 'qr_only' }).success).toBe(true);
     });
-    it(`${approval.bundleType}: rejects a recipient without consent even for qr_only`, () => {
-      expect(schema.safeParse({ ...approval.payload, messageConsent: false, messageChannel: 'qr_only' }).success).toBe(false);
+    it(`${approval.bundleType}: requires a recipient for any channel other than qr_only`, () => {
+      for (const messageChannel of ['surge', 'android_gateway', 'whatsapp_sandbox']) {
+        expect(schema.safeParse({ ...payload, messageChannel }).success, messageChannel).toBe(false);
+      }
     });
-    it(`${approval.bundleType}: requires recipient for a real channel`, () => {
-      expect(schema.safeParse(payload).success).toBe(false);
-    });
-    it(`${approval.bundleType}: rejects consent without recipient`, () => {
-      expect(schema.safeParse({ ...payload, messageConsent: true, messageChannel: 'qr_only' }).success).toBe(false);
+    it(`${approval.bundleType}: refuses messageConsent, which is not a material field`, () => {
+      expect(schema.safeParse({ ...payload, messageChannel: 'qr_only', messageConsent: false }).success).toBe(false);
+      expect(schema.safeParse({ ...approval.payload, messageConsent: true }).success).toBe(false);
     });
   }
   it('hashes a qr_only order identically with an absent or undefined recipient', async () => {
     const { messageRecipient: _recipient, ...payload } = approvalOrderPending.payload;
-    const source = { ...payload, messageChannel: 'qr_only', messageConsent: false };
+    const source = { ...payload, messageChannel: 'qr_only' };
     const picked = pickMaterialFields('order_bundle', source);
     expect(picked).not.toHaveProperty('messageRecipient');
-    expect(picked).not.toHaveProperty('messageConsent');
     expect(canonicalJson(picked)).not.toContain('messageRecipient');
     const hash = await approvalPayloadHash('order_bundle', source);
     expect(hash).toMatch(/^sha256:[a-f0-9]{64}$/);
@@ -55,10 +54,12 @@ describe('message consent', () => {
     expect(await payloadHash(OrderApprovalPayloadSchema.parse(source))).toBe(hash);
     expect(() => pickMaterialFields('order_bundle', { ...source, messageChannel: 'surge' })).toThrow();
   });
-  it('keeps the stored qr_only fixture hash stable and excludes consent metadata', async () => {
-    const { messageConsent: _consent, ...material } = approvalOrderQrOnly.payload;
-    expect(await payloadHash(approvalOrderQrOnly.payload)).toBe('sha256:f4626dafb297f34a5e48b4b5081f21fd1c74282ac9e2a1f96f25629e79366d10');
-    expect(await payloadHash(approvalOrderQrOnly.payload)).toBe(await payloadHash(material));
+  it('the declined-consent fixture: qr_only, no recipient, consent kept on the order contact only', async () => {
+    expect(orderQrOnly.contact).toEqual({ name: orderQrOnly.contact.name, messageConsent: false });
+    expect(approvalOrderQrOnly.payload.messageChannel).toBe('qr_only');
+    expect(approvalOrderQrOnly.payload).not.toHaveProperty('messageRecipient');
+    expect(approvalOrderQrOnly.payload).not.toHaveProperty('messageConsent');
+    expect(approvalOrderQrOnly.payloadHash).toBe(await hashCanonical(approvalOrderQrOnly.payload));
   });
 });
 

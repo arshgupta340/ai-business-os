@@ -24,10 +24,10 @@ import type { Env } from '../env';
 import { AppError } from '../errors';
 import { emitActivity } from '../policy/activity';
 import { createPolicyEngine, type PolicyEngine } from '../policy/engine';
-import { createRealToolset, type RealToolset, type RealToolsetPorts } from '../tools/real/index';
+import { createRealToolset, type FactsSnapshot, type RealToolset, type RealToolsetPorts } from '../tools/real/index';
 import type { VoicePluginOptions } from '../voice/types';
 import {
-  calendarAvailabilityPort, dbCallsPort, dbCatalogPort, dbFactsPort, dbLiveAgentPort, dbOrderStatusPort, engineProposalPort, squareQuotePort,
+  calendarAvailabilityPort, dbCallsPort, dbVoiceEventsPort, dbCatalogPort, dbFactsPort, dbLiveAgentPort, dbOrderStatusPort, engineProposalPort, squareQuotePort,
   type CallsStore,
 } from './ports';
 import { buildProviders, type Providers } from './providers';
@@ -66,7 +66,7 @@ export interface ComposedServer {
   providers: Providers;
   calls: CallsStore;
   toolsetPorts: RealToolsetPorts;
-  toolsetFor(ctx: { businessId: string; agentVersionId: string; callId: string; capabilities: readonly import('@abos/contracts').CapabilityId[] }): RealToolset;
+  toolsetFor(ctx: { businessId: string; agentVersionId: string; callId: string; capabilities: readonly import('@abos/contracts').CapabilityId[]; facts?: FactsSnapshot | undefined }): RealToolset;
   agentModel: AgentModel;
   /** Options for the builder plugin's own seams (auth, stores, knowledge, live agent). */
   builder: BuilderPluginOptions;
@@ -108,9 +108,10 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     quotes: squareQuotePort(db, providers),
     proposals: engineProposalPort(engine, facts, providers),
     orderStatus: dbOrderStatusPort(db),
-    availability: calendarAvailabilityPort(facts, providers),
+    availability: calendarAvailabilityPort(providers),
   };
-  const toolsetFor: ComposedServer['toolsetFor'] = (ctx) => createRealToolset({ businessId: ctx.businessId, messageChannel, ports: toolsetPorts, capabilities: ctx.capabilities, now });
+  const toolsetFor: ComposedServer['toolsetFor'] = (ctx) => createRealToolset({ businessId: ctx.businessId, messageChannel, ports: toolsetPorts, capabilities: ctx.capabilities, now,
+    ...(ctx.facts ? { factsSnapshot: ctx.facts } : {}) });
   const calls = dbCallsPort(db, newId);
 
   const seamDeps: SeamDeps = { env, db, engine, providers, now, newId, log };
@@ -164,7 +165,10 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   const voice: ComposedServer['voice'] = voiceMissing.length === 0 && env.PUBLIC_SERVER_URL && providers.twilioValidator && providers.openaiSocketFactory
     ? { ok: true, options: {
       publicServerUrl: env.PUBLIC_SERVER_URL, liveAgent: dbLiveAgentPort(db), calls,
-      toolsetFactory: (ctx) => toolsetFor(ctx).handler, twilioValidator: providers.twilioValidator,
+      facts: { snapshot: (businessId) => facts.readVerified({ businessId }) },
+      events: dbVoiceEventsPort(db, newId, now),
+      toolsetFactory: (ctx) => { const ts = toolsetFor(ctx); return { handler: ts.handler, dispose: () => ts.dispose() }; },
+      twilioValidator: providers.twilioValidator,
       openaiSocketFactory: providers.openaiSocketFactory, messageChannel,
       ...(env.OPENAI_REALTIME_MODEL ? { model: env.OPENAI_REALTIME_MODEL } : {}),
       redactSecrets: [env.OPENAI_API_KEY, env.TWILIO_AUTH_TOKEN].filter((s): s is string => typeof s === 'string'),

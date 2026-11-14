@@ -1,6 +1,7 @@
 // The mock toolset (SPEC 2.6, CONTRACTS 8): the seven agent tools, backed only by the fixtures.
 // Used by preview and the test console (AC-03). It never touches the network, the database or a provider,
-// writes no events, and returns approvals with the `apv_mock_` prefix. State lives in one instance only.
+// writes no events, and returns approvals with the `apv_mock_` prefix. State lives in one instance only;
+// `createMockToolsetRegistry` keeps one instance per test session.
 // There is no tool for any write or external_message capability, and no code path reaches one.
 import {
   CAPABILITIES,
@@ -60,6 +61,8 @@ export type MockToolset = {
   /** A copy of every call so far, oldest first. */
   trace(): ToolTraceEntry[];
   clearTrace(): void;
+  /** Clears every quote, proposal and trace entry and restarts the mock ID counters. */
+  reset(): void;
 };
 
 const GRID_MS = 15 * 60 * 1000;
@@ -338,6 +341,54 @@ export function createMockToolset(options: MockToolsetOptions): MockToolset {
     trace: () => traceEntries.map((e) => ({ ...e })),
     clearTrace: () => {
       traceEntries.length = 0;
+    },
+    reset: () => {
+      traceEntries.length = 0;
+      quotes.clear();
+      proposals.clear();
+      for (const key of Object.keys(counters) as (keyof typeof counters)[]) counters[key] = 0;
+    },
+  };
+}
+
+export type MockToolsetRegistryOptions = {
+  /** Clock shared by every session's toolset. Defaults to the fixture snapshot time. */
+  now?: () => Date;
+};
+
+export type MockToolsetRegistry = {
+  /**
+   * The toolset of one test session, created on first use. Each session has its own quotes, proposals,
+   * trace and ID counters. A session is bound to one business: asking for it with another business throws.
+   */
+  forSession(sessionId: string, businessId: string): MockToolset;
+  /** Resets one session's toolset (see `MockToolset.reset`). Other sessions are not touched. Unknown IDs are ignored. */
+  reset(sessionId: string): void;
+  /** Resets every session's toolset. */
+  resetAll(): void;
+};
+
+/** One isolated mock toolset per test session (for example per browser tab or per test). */
+export function createMockToolsetRegistry(options: MockToolsetRegistryOptions = {}): MockToolsetRegistry {
+  const sessions = new Map<string, MockToolset>();
+  return {
+    forSession(sessionId, businessId) {
+      const existing = sessions.get(sessionId);
+      if (existing !== undefined) {
+        if (existing.businessId !== businessId) {
+          throw new Error(`mock toolset registry: session ${sessionId} belongs to ${existing.businessId}, not ${businessId}`);
+        }
+        return existing;
+      }
+      const toolset = createMockToolset(options.now === undefined ? { businessId } : { businessId, now: options.now });
+      sessions.set(sessionId, toolset);
+      return toolset;
+    },
+    reset(sessionId) {
+      sessions.get(sessionId)?.reset();
+    },
+    resetAll() {
+      for (const toolset of sessions.values()) toolset.reset();
     },
   };
 }

@@ -3,9 +3,9 @@
 import { BARBER_BUSINESS_ID, PIZZA_BUSINESS_ID, SEEDED_TIMEZONE, type Business, type BusinessSummary } from '../src/index';
 
 /** The instant the fixture snapshot describes. The mock toolset uses it as its default clock. */
-export const FIXTURE_NOW = '2026-11-14T20:30:00Z';
+export const FIXTURE_NOW: string = '2026-11-14T20:30:00Z';
 /** When the seed script ran. */
-export const SEEDED_AT = '2026-11-13T08:00:00Z';
+export const SEEDED_AT: string = '2026-11-13T08:00:00Z';
 
 /** The one phone number both agents share (P-06). Fictional 555 number. */
 export const DEMO_PHONE_NUMBER = '+15555550199';
@@ -73,3 +73,31 @@ export function isoUtc(epochMs: number): string {
 }
 
 export const MINUTE_MS = 60 * 1000;
+
+/** An ISO instant in UTC (`Z`), with or without milliseconds: the only timestamp form the fixtures use. */
+export const ISO_UTC_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+
+/**
+ * Deep copy of `value` with every ISO UTC string moved by `deltaMs`. The form is kept: a string with
+ * milliseconds (the `toISOString()` form payloads use) stays in that form, one without stays without.
+ * Other values are copied unchanged.
+ */
+export function shiftIsoTimes<T>(value: T, deltaMs: number): T {
+  return shiftAny(value, deltaMs) as T;
+}
+
+function shiftAny(value: unknown, deltaMs: number): unknown {
+  if (typeof value === 'string') {
+    const m = ISO_UTC_PATTERN.exec(value);
+    if (m === null) return value;
+    const shifted = Date.parse(value) + deltaMs;
+    return m[1] === undefined ? isoUtc(shifted) : new Date(shifted).toISOString();
+  }
+  if (Array.isArray(value)) return value.map((v) => shiftAny(v, deltaMs));
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = shiftAny(v, deltaMs);
+    return out;
+  }
+  return value;
+}

@@ -53,6 +53,9 @@ export const pizzaCalls: Call[] = [
     startedAt: '2026-11-14T19:10:00Z', endedAt: '2026-11-14T19:13:30Z' }),
   call({ id: 'call_demo_07', business: 'pizza', channel: 'phone', stage: 'CUSTOMER_CONFIRMED', status: 'COMPLETED', endReason: 'completed', callerLast4: '0129',
     startedAt: '2026-11-14T20:00:00Z', endedAt: '2026-11-14T20:03:00Z' }),
+  // The caller declined messages, so the order uses the dashboard QR code (ord_demo_qr).
+  call({ id: 'call_demo_qr', business: 'pizza', channel: 'phone', stage: 'CUSTOMER_CONFIRMED', status: 'COMPLETED', endReason: 'completed', callerLast4: '0133',
+    startedAt: '2026-11-14T20:25:00Z', endedAt: '2026-11-14T20:28:10Z', sid: '11' }),
   // Caller hung up before confirming (AC-18): no order exists.
   call({ id: 'call_demo_08', business: 'pizza', channel: 'phone', stage: 'COLLECTING', status: 'DROPPED', endReason: 'dropped', callerLast4: '0130',
     startedAt: '2026-11-14T20:10:00Z', endedAt: '2026-11-14T20:11:05Z' }),

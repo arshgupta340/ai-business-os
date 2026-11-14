@@ -6,6 +6,7 @@ import {
   canonicalJson,
   cartHash,
   hashCanonical,
+  toCanonicalTimestamp,
   idempotencyKey,
   newId,
   normalizeCart,
@@ -146,5 +147,17 @@ describe('newId', () => {
   it('makes a prefixed id like gen_id', () => {
     expect(newId('ord_')).toMatch(/^ord_[0-9a-f]{32}$/);
     expect(newId('ord_')).not.toBe(newId('ord_'));
+  });
+});
+
+describe('toCanonicalTimestamp', () => {
+  it('gives one toISOString() form for every spelling of an instant, so the hash is the same', async () => {
+    const forms = ['2026-11-14T20:30:00Z', '2026-11-14T20:30:00.000Z', '2026-11-14T20:30:00+00:00', '2026-11-14T12:30:00-08:00'];
+    for (const f of forms) expect(toCanonicalTimestamp(f)).toBe('2026-11-14T20:30:00.000Z');
+    expect(toCanonicalTimestamp(new Date('2026-11-14T20:30:00Z'))).toBe('2026-11-14T20:30:00.000Z');
+    expect(toCanonicalTimestamp(Date.parse('2026-11-14T20:30:00Z'))).toBe('2026-11-14T20:30:00.000Z');
+    expect(await hashCanonical({ t: '2026-11-14T20:30:00Z' })).not.toBe(await hashCanonical({ t: '2026-11-14T20:30:00+00:00' }));
+    expect(await hashCanonical({ t: toCanonicalTimestamp('2026-11-14T20:30:00Z') })).toBe(await hashCanonical({ t: toCanonicalTimestamp('2026-11-14T20:30:00+00:00') }));
+    expect(() => toCanonicalTimestamp('not a time')).toThrow();
   });
 });

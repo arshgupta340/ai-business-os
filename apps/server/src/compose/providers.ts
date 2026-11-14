@@ -6,12 +6,11 @@
 import { calendar } from '@googleapis/calendar';
 import { sheets } from '@googleapis/sheets';
 import { JWT } from 'google-auth-library';
-import { SquareClient, SquareEnvironment } from 'square';
 import type { MessageChannelSetting } from '@abos/contracts';
 import { createCalendarAdapter, type CalendarAdapter } from '../adapters/calendar/index';
 import { createMessageAdapter, type MessageAdapter } from '../adapters/message/index';
 import { createSheetsAdapter, type ReportingAdapter } from '../adapters/sheets/index';
-import { createSquareAdapter, type SquareAdapter } from '../adapters/square/index';
+import { createSandboxSquareClient, createSquareAdapter, type SquareAdapter } from '../adapters/square/index';
 import type { Env } from '../env';
 import { createTwilioRequestValidator, createWsOpenAISocketFactory, type OpenAISocketFactory, type TwilioRequestValidator } from '../voice/plugin';
 
@@ -55,7 +54,7 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   let square: SquareAdapter | undefined;
   if (env.SQUARE_ACCESS_TOKEN && env.SQUARE_LOCATION_ID) {
     square = createSquareAdapter({
-      client: new SquareClient({ token: env.SQUARE_ACCESS_TOKEN, environment: SquareEnvironment.Sandbox }),
+      client: createSandboxSquareClient({ accessToken: env.SQUARE_ACCESS_TOKEN }),
       locationId: env.SQUARE_LOCATION_ID, environment: env.SQUARE_ENVIRONMENT, now,
     });
     status.square = ok('sandbox');

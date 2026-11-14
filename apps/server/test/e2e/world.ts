@@ -12,7 +12,8 @@ import type { FastifyInstance } from 'fastify';
 import { pizzaCatalog, pizzaCatalogRows, DEMO_TAX_RATE_BPS } from '@abos/contracts/fixtures';
 import { buildApp, type BuildAppOptions } from '../../src/app';
 import { createCalendarAdapter, type GoogleCalendarClient } from '../../src/adapters/calendar/index';
-import { createSquareAdapter, type SquareClient } from '../../src/adapters/square/index';
+import type { SquareClient } from '../../src/adapters/square/index';
+import { createSquareAdapterForTest } from '../../src/adapters/square/testing';
 import type { AgentModel, AgentTurnInput } from '../../src/builder/runner/agent-model';
 import { parseEnv } from '../../src/env';
 import type { TokenVerifier } from '../../src/auth/verify';
@@ -60,7 +61,7 @@ export function fakeSquareClient() {
       },
       get: refuse('orders.get') as SquareClient['orders']['get'],
     },
-    checkout: { paymentLinks: { create: refuse('checkout.paymentLinks.create') as SquareClient['checkout']['paymentLinks']['create'] } },
+    checkout: { paymentLinks: { create: refuse('checkout.paymentLinks.create') as SquareClient['checkout']['paymentLinks']['create'], get: refuse('checkout.paymentLinks.get') as SquareClient['checkout']['paymentLinks']['get'], list: refuse('checkout.paymentLinks.list') as SquareClient['checkout']['paymentLinks']['list'] } },
     payments: { get: refuse('payments.get') as SquareClient['payments']['get'], list: refuse('payments.list') as SquareClient['payments']['list'] },
   };
   return { client, writes };
@@ -101,6 +102,8 @@ export type World = {
   squareWrites: string[];
   calendarWrites: string[];
   messageSends: number;
+  /** The server clock is real time plus this offset. Tests advance it (read-back waits, poll windows). */
+  clock: { offsetMs: number; advance(ms: number): void; now(): Date };
   close(): Promise<void>;
 };
 
@@ -124,11 +127,13 @@ export async function createWorld(extra: BuildAppOptions = {}, envExtra: Record<
   const cal = fakeCalendarClient();
   const model = new ScriptedModel();
   const world = { messageSends: 0 } as World;
+  const clock: World['clock'] = { offsetMs: 0, advance(ms) { this.offsetMs += ms; }, now: () => new Date(Date.now() + clock.offsetMs) };
+  world.clock = clock;
   const env = parseEnv({ TWILIO_PHONE_NUMBER: PHONE, MESSAGE_CHANNEL: 'surge', SURGE_API_KEY: 'test-key', SURGE_ACCOUNT_ID: 'test-account', GOOGLE_CALENDAR_ID: CALENDAR_ID, ...envExtra });
   const app = await buildApp(env, {
-    db: t.db, verifier, agentModel: model,
+    db: t.db, verifier, agentModel: model, now: clock.now,
     providers: {
-      square: createSquareAdapter({ client: square.client, locationId: 'LOC_E2E', environment: 'sandbox', now: () => new Date() }),
+      square: createSquareAdapterForTest(square.client, { locationId: 'LOC_E2E', environment: 'sandbox', now: () => new Date() }),
       calendar: createCalendarAdapter({ client: cal.client, now: () => new Date() }),
       calendarId: CALENDAR_ID,
       message: { channel: 'surge', async send() { world.messageSends += 1; throw new Error('e2e: a message send is an external write'); } },

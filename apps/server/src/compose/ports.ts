@@ -14,8 +14,9 @@ import { emitActivity } from '../policy/activity';
 import type { PolicyEngine } from '../policy/engine';
 import { PolicyError } from '../policy/types';
 import type { AvailabilityPort, CatalogPort, FactsPort, FactsSnapshot, OrderStatusPort, ProposalPort, QuotePort } from '../tools/real/types';
-import type { CallsPort, LiveAgentPort, LiveAgentResolution } from '../voice/types';
+import type { CallsPort, LiveAgentPort, LiveAgentResolution, VoiceEventsPort } from '../voice/types';
 import { initialStage } from '../voice/relay';
+import { weekdayOf } from '../adapters/calendar/slots';
 import type { Providers } from './providers';
 
 type Row = Record<string, unknown>;
@@ -99,16 +100,16 @@ function localDate(iso: string, timezone: string): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(iso));
 }
 
-export function calendarAvailabilityPort(facts: FactsPort, providers: Providers): AvailabilityPort {
+export function calendarAvailabilityPort(providers: Providers): AvailabilityPort {
   return {
-    async freeSlots({ businessId, serviceId, date, maxSlots }) {
-      const ctx = await bookingContext(facts, businessId, serviceId, providers.calendarId);
-      if (!ctx) return null;
-      if (!providers.calendar) throw new AppError('INTEGRATION_UNAVAILABLE', 'Google Calendar is not configured.', undefined, undefined, { provider: 'google_calendar' });
-      const r = await providers.calendar.getAvailability({ calendarId: ctx.calendarId, timezone: ctx.timezone, serviceId, date, hours: ctx.hours,
-        serviceDurationMinutes: ctx.service.durationMinutes, bufferMinutes: ctx.service.bufferMinutes ?? 0, minNoticeMinutes: ctx.minNoticeMinutes, maxSlots });
+    // The toolset passes the call's pinned service, that date's pinned hours and the time zone, so this
+    // never reads facts again. Minimum notice is re-checked by the proposal port (bookingContext).
+    async freeSlots({ businessId: _businessId, service, date, hours, timezone, maxSlots }) {
+      if (!providers.calendar || !providers.calendarId) throw new AppError('INTEGRATION_UNAVAILABLE', 'Google Calendar is not configured.', undefined, undefined, { provider: 'google_calendar' });
+      const r = await providers.calendar.getAvailability({ calendarId: providers.calendarId, timezone, serviceId: service.id, date, hours: { [weekdayOf(date)]: hours },
+        serviceDurationMinutes: service.durationMinutes, bufferMinutes: service.bufferMinutes ?? 0, minNoticeMinutes: 0, maxSlots });
       if (!r.ok) throw new AppError('INTEGRATION_UNAVAILABLE', 'Google Calendar free/busy failed.', undefined, undefined, { provider: 'google_calendar' });
-      return { slots: r.slots, timezone: ctx.timezone };
+      return r.slots;
     },
   };
 }
@@ -228,18 +229,19 @@ export function dbCallsPort(db: Db, newId: (prefix: string) => string): CallsSto
     const inserted = await rows(tx, `insert into public.calls (id, business_id, agent_id, agent_version_id, channel, provider_call_id, caller_last4, stage)
       values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict (provider_call_id) do nothing returning id, started_at`,
     [id, input.businessId, input.agentId, input.agentVersionId, channel, input.providerCallId ?? null, input.callerLast4 ?? null, stage]);
-    if (!inserted[0]) {
-      // A retried Twilio webhook returns the call it already opened.
-      const existing = (await rows(tx, 'select id from public.calls where provider_call_id = $1', [input.providerCallId]))[0];
-      if (!existing) throw new AppError('INTERNAL', 'Call could not be started.');
-      return { callId: String(existing.id) };
-    }
+    // A second delivery of the same CallSid (another process) must not open a second call or credential
+    // (voice NOTES 4): the webhook answers with the setup-failed message instead.
+    if (!inserted[0]) throw new AppError('INVALID_STATE', 'Call was already started.');
     const at = inserted[0].started_at instanceof Date ? inserted[0].started_at : new Date();
     await emitActivity(tx, { id: newId('evt_'), businessId: input.businessId, correlationId: id, type: 'call.started', actorType: 'system', occurredAt: at.toISOString(),
       payload: { callId: id, agentId: input.agentId, agentVersionId: input.agentVersionId, channel, ...(input.callerLast4 ? { callerLast4: input.callerLast4 } : {}) } });
     return { callId: id };
   }
   return {
+    async findByProviderCallId(providerCallId) {
+      const row = (await rows(db, 'select id, status from public.calls where provider_call_id = $1', [providerCallId]))[0];
+      return row ? { callId: String(row.id), status: String(row.status) as CallStatus } : null;
+    },
     startCall: (input) => db.transaction((tx) => start(tx, input)),
     startSimulatedCall: (input) => db.transaction((tx) => start(tx, input)),
     async getStatus(callId) {
@@ -261,5 +263,15 @@ export function dbCallsPort(db: Db, newId: (prefix: string) => string): CallsSto
           payload: { callId, status: STATUS_FOR_REASON[reason], reason, durationSec: Math.max(0, Math.round((end.getTime() - started.getTime()) / 1000)) } });
       });
     },
+  };
+}
+
+/** webhook.rejected and guardrail.refused from the voice worker. Payloads are fixed codes. */
+export function dbVoiceEventsPort(db: Db, newId: (prefix: string) => string, now: () => Date): VoiceEventsPort {
+  const write = (businessId: string, type: 'webhook.rejected' | 'guardrail.refused', payload: unknown, correlationId: string) =>
+    emitActivity(db, { id: newId('evt_'), businessId, correlationId, type, actorType: type === 'webhook.rejected' ? 'provider' : 'system', occurredAt: now().toISOString(), payload });
+  return {
+    async webhookRejected({ businessId, payload }) { if (businessId) await write(businessId, 'webhook.rejected', payload, newId('req_')); },
+    async guardrailRefused({ businessId, payload }) { await write(businessId, 'guardrail.refused', payload, payload.callId ?? newId('req_')); },
   };
 }

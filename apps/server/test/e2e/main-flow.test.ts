@@ -1,9 +1,11 @@
 // Phase 4: the main flows end to end, on the in-process Postgres as abos_app, through the real
 // toolset, the real approval engine and routines, and the REST API, with fake providers.
-// The executor is not on this branch, so every flow stops at "steps queued". See world.ts EXTEND.
+// The executor is left unwired in this file, so every flow stops at "steps queued". flows.test.ts runs the steps.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { APPROVAL_EXPIRY_MS, ENDPOINTS, executionStepsFor, idempotencyKey, type Cart, type ToolResult } from '@abos/contracts';
 import { ageApproval, currentRole } from '../support/db';
+import { notWiredExecutor } from '../../src/compose/seams';
+import { READBACK_MIN_MS } from '../../src/tools/real/index';
 import { CALENDAR_ID, OTHER, OWNER, createWorld, nextLocalDate, zonedIso, type World } from './world';
 
 const PIZZA = 'biz_pizza_01';
@@ -11,7 +13,8 @@ const BARBER = 'biz_barber_01';
 const CART: Cart = { lines: [{ catalogItemId: 'SQ_ITEM_PEP', variationId: 'SQ_VAR_PEP_LG', quantity: 2, modifierIds: [] }] };
 
 let w: World;
-beforeAll(async () => { w = await createWorld(); }, 120_000);
+// This file covers everything up to "steps queued", so the executor stays unwired here; flows.test.ts runs the steps.
+beforeAll(async () => { w = await createWorld({ executor: notWiredExecutor }); }, 120_000);
 afterAll(async () => { await w?.close(); });
 
 async function sim(agentId: string, businessId: string, body: Record<string, unknown>) {
@@ -33,7 +36,9 @@ async function pizzaOrder(consent: boolean) {
     async ({ executeTool }) => {
       const contact = consent ? { name: 'Sam', messageRecipient: '+15555550123', messageConsent: true, consentAt: new Date().toISOString() } : { name: 'Sam', messageConsent: false };
       const pickupAt = zonedIso(nextLocalDate([0, 1, 2, 3, 4, 5, 6]), '18:00', 'America/Los_Angeles');
-      const r = await executeTool('propose_order', { cart: CART, contact, fulfillment: { type: 'pickup', pickupAt }, quoteId });
+      let r = await executeTool('propose_order', { cart: CART, contact, fulfillment: { type: 'pickup', pickupAt }, quoteId });
+      // With consent the recipient is read back first: the same number again at least 3 seconds later.
+      if (consent) { w.clock.advance(READBACK_MIN_MS + 100); r = await executeTool('propose_order', { cart: CART, contact, fulfillment: { type: 'pickup', pickupAt }, quoteId }); }
       return JSON.stringify(r);
     },
   );
@@ -190,8 +195,12 @@ describe('barbershop booking (Flow C)', () => {
         slot = r.slots[0]!.startUtc;
         return `First slot ${slot}`;
       },
-      async ({ executeTool }) => JSON.stringify(await executeTool('propose_booking', { serviceId: 'svc_haircut', startUtc: slot,
-        customer: { name: 'Ana', messageRecipient: '+15555550124', messageConsent: true } })),
+      async ({ executeTool }) => {
+        const input = { serviceId: 'svc_haircut', startUtc: slot, customer: { name: 'Ana', messageRecipient: '+15555550124', messageConsent: true } };
+        await executeTool('propose_booking', input);
+        w.clock.advance(READBACK_MIN_MS + 100);
+        return JSON.stringify(await executeTool('propose_booking', input));
+      },
     );
     const first = await sim('agt_barber_01', BARBER, { message: 'Can I get a haircut?' });
     expect(first.body.reply).toMatch(/^First slot/);

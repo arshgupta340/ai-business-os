@@ -22,7 +22,6 @@ import {
   msBetween,
 } from '../primitives';
 import { APPROVAL_EXPIRY_MS } from '../constants';
-import { checkMessageConsent } from './orders';
 
 // SPEC 2.3: each bundle type carries exactly its own ordered action list.
 export const OrderBundleActionsSchema = z.tuple([
@@ -40,18 +39,17 @@ export const BookingBundleActionsSchema = z.tuple([
 export const FactEditActionsSchema = z.tuple([z.literal('local.fact.update')]);
 export const PriceEditActionsSchema = z.tuple([z.literal('square.catalog.price.update'), z.literal('local.catalog.sync')]);
 
-// Consent is optional validation metadata; SPEC 2.9 material fields remain unchanged.
-function checkMessageChannel(payload: { messageConsent?: boolean | undefined; messageRecipient?: string | undefined; messageChannel: string }, ctx: z.RefinementCtx): void {
-  checkMessageConsent(payload, ctx);
+// SPEC 2.9 "Customer who declines messages": without consent there is no recipient and the channel is
+// qr_only. The payload carries no consent flag: a qr_only payload with no messageRecipient says it.
+function checkMessageChannel(payload: { messageRecipient?: string | undefined; messageChannel: string }, ctx: z.RefinementCtx): void {
   if (payload.messageChannel !== 'qr_only' && payload.messageRecipient === undefined) {
-    ctx.addIssue({ code: 'custom', path: ['messageRecipient'], message: 'A message channel requires messageRecipient' });
-  }
-  if (payload.messageConsent === false && payload.messageChannel !== 'qr_only') {
-    ctx.addIssue({ code: 'custom', path: ['messageChannel'], message: 'Declined messages require qr_only' });
+    ctx.addIssue({ code: 'custom', path: ['messageRecipient'], message: 'A message channel other than qr_only requires messageRecipient' });
   }
 }
 
-export const OrderApprovalPayloadBaseSchema = z.object({
+// CONTRACTS 4: a payload holds exactly the material fields, so each payload schema is strict and an
+// extra field is refused. payloadHash is the hash of the whole payload.
+export const OrderApprovalPayloadBaseSchema = z.strictObject({
   businessId: BusinessIdSchema,
   subjectId: OrderIdSchema,
   agentVersionId: AgentVersionIdSchema, // always from the calls row (SPEC 2.9)
@@ -60,7 +58,6 @@ export const OrderApprovalPayloadBaseSchema = z.object({
   currency: CurrencySchema,
   pickupAt: IsoDateTimeSchema,
   messageRecipient: E164Schema.optional(),
-  messageConsent: z.boolean().optional(),
   messageChannel: MessageChannelSettingSchema, // the server's MESSAGE_CHANNEL at proposal time
   actionBundle: OrderBundleActionsSchema,
   expiresAt: IsoDateTimeSchema,
@@ -68,7 +65,7 @@ export const OrderApprovalPayloadBaseSchema = z.object({
 export const OrderApprovalPayloadSchema = OrderApprovalPayloadBaseSchema.superRefine(checkMessageChannel);
 export type OrderApprovalPayload = z.infer<typeof OrderApprovalPayloadSchema>;
 
-export const BookingApprovalPayloadBaseSchema = z.object({
+export const BookingApprovalPayloadBaseSchema = z.strictObject({
   businessId: BusinessIdSchema,
   subjectId: BookingIdSchema,
   agentVersionId: AgentVersionIdSchema,
@@ -78,7 +75,6 @@ export const BookingApprovalPayloadBaseSchema = z.object({
   endUtc: IsoDateTimeSchema,
   timezone: TimezoneSchema,
   messageRecipient: E164Schema.optional(),
-  messageConsent: z.boolean().optional(),
   messageChannel: MessageChannelSettingSchema,
   actionBundle: BookingBundleActionsSchema,
   expiresAt: IsoDateTimeSchema,
@@ -87,7 +83,7 @@ export const BookingApprovalPayloadSchema = BookingApprovalPayloadBaseSchema.sup
   .refine((p) => msBetween(p.startUtc, p.endUtc) > 0, { path: ['endUtc'], message: 'endUtc must be after startUtc' });
 export type BookingApprovalPayload = z.infer<typeof BookingApprovalPayloadSchema>;
 
-export const FactEditApprovalPayloadSchema = z.object({
+export const FactEditApprovalPayloadSchema = z.strictObject({
   businessId: BusinessIdSchema,
   subjectId: FactIdSchema, // the new draft fact
   kind: FactKindSchema,
@@ -100,7 +96,7 @@ export const FactEditApprovalPayloadSchema = z.object({
 });
 export type FactEditApprovalPayload = z.infer<typeof FactEditApprovalPayloadSchema>;
 
-export const PriceEditApprovalPayloadSchema = z.object({
+export const PriceEditApprovalPayloadSchema = z.strictObject({
   businessId: BusinessIdSchema,
   subjectId: CatalogItemRowIdSchema, // the cat_ id
   squareItemId: z.string().min(1),

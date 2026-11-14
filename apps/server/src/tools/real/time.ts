@@ -43,6 +43,12 @@ export function localToEpoch(date: string, time: string, timeZone: string): numb
   return epoch;
 }
 
+/** The weekday key of a local `YYYY-MM-DD` date. */
+export function weekdayOfLocalDate(date: string): HoursKey {
+  const [y, m, d] = date.split('-').map(Number);
+  return WEEKDAYS[new Date(Date.UTC(y ?? 0, (m ?? 1) - 1, d ?? 1)).getUTCDay()] ?? 'sun';
+}
+
 /** The local date (`YYYY-MM-DD`) and weekday key of an instant. */
 export function localDay(epochMs: number, timeZone: string): { date: string; weekday: HoursKey } {
   const p = zonedParts(epochMs, timeZone);

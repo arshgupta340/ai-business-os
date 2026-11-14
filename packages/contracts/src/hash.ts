@@ -122,20 +122,19 @@ export type PayloadFor<B extends BundleType> = {
 
 /**
  * Picks exactly the material fields of `bundleType` from a wider object (for example a payload plus
- * `callId`, or rows joined by the executor) and validates them. The server and the UI hash this result,
- * so both hash the same fields. Throws a ZodError if a field is missing or malformed.
+ * `callId`, or rows joined by the executor) and validates them with the strict payload schema. The
+ * result is a valid stored payload: for a stored payload `p`, `pickMaterialFields(bundleType, p)`
+ * deep-equals `p`. Throws a ZodError if a field is missing or malformed.
  */
 export function pickMaterialFields<B extends BundleType>(bundleType: B, source: Record<string, unknown>): PayloadFor<B> {
-  // Check consent metadata before selecting only SPEC 2.9's hash fields.
-  const validated = PAYLOAD_SCHEMAS[bundleType].parse(source) as Record<string, unknown>;
   const picked: Record<string, unknown> = {};
   for (const field of MATERIAL_FIELDS[bundleType]) {
-    if (validated[field] !== undefined) picked[field] = validated[field];
+    if (source[field] !== undefined) picked[field] = source[field];
   }
   return PAYLOAD_SCHEMAS[bundleType].parse(picked) as PayloadFor<B>;
 }
 
-/** Hash of the material fields of `source` for `bundleType`. */
+/** Hash of the material fields of `source` for `bundleType`. For a stored payload this is `sha256(canonicalJson(payload))`. */
 export async function approvalPayloadHash(bundleType: BundleType, source: Record<string, unknown>): Promise<string> {
   return hashCanonical(pickMaterialFields(bundleType, source));
 }

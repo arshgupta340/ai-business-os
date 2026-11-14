@@ -12,4 +12,5 @@ export * from './executions';
 export * from './timelines';
 export * from './operations';
 export * from './responses';
+export * from './materialize';
 export { storedHash, storedKey } from './hashes';

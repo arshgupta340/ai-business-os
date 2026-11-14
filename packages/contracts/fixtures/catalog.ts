@@ -3,7 +3,7 @@
 import { PIZZA_BUSINESS_ID, type CatalogItem, type CatalogModifierList } from '../src/index';
 
 /** When the `catalog_items` cache was last synced from Square. */
-export const CATALOG_SYNCED_AT = '2026-11-14T16:00:00Z';
+export const CATALOG_SYNCED_AT: string = '2026-11-14T16:00:00Z';
 
 export const SQ = {
   itemMargherita: 'SQ_ITEM_MARG',

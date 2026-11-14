@@ -16,6 +16,7 @@ import type {
   OrderStatus,
   Quote,
   ReadableFactKind,
+  ServiceOffering,
   ToolFailureReason,
   ToolHandler,
   ToolTraceEntry,
@@ -36,7 +37,7 @@ export interface CatalogPort {
   search(args: { businessId: string; query?: string | undefined; limit: number }): Promise<CatalogItem[]>;
 }
 
-/** The verified facts of a business, without `menu_item` drafts. */
+/** The verified facts of a business, without `menu_item` drafts. Immutable once pinned to a call. */
 export type FactsSnapshot = {
   facts: { kind: ReadableFactKind; key: string; value: JsonValue; version: number }[];
   timezone: string;
@@ -57,6 +58,7 @@ export interface QuotePort {
 export type OrderProposalInput = PortContext & {
   cart: Cart;
   quote: Quote;
+  /** With consent, the recipient was read back on this call and `consentAt` is set by the server. */
   contact: Contact;
   fulfillment: Fulfillment;
   /** `qr_only` when the caller declined messages. */
@@ -81,7 +83,8 @@ export type BookingProposalResult =
 
 /**
  * The approval engine. One transaction stores the immutable proposal and its ApprovalRequest.
- * It re-checks what policy requires (business scope, availability, the slot) and performs no external write.
+ * It re-checks what policy requires (business scope, that `callId` is still IN_PROGRESS, opening
+ * hours, availability, the slot) and performs no external write.
  */
 export interface ProposalPort {
   createOrderProposal(input: OrderProposalInput): Promise<OrderProposalResult>;
@@ -98,14 +101,25 @@ export interface OrderStatusPort {
   read(args: { businessId: string; orderId: string; callId?: string | undefined }): Promise<OrderStatusView | null>;
 }
 
-/** Free slots from Google Calendar free/busy (FLOWS C3). Returns null for a service this business does not offer. */
+/**
+ * Free slots from Google Calendar free/busy (FLOWS C3), computed from the call's pinned service
+ * (duration, buffer) and that date's pinned opening hours, never from a fresh fact read.
+ */
 export interface AvailabilityPort {
-  freeSlots(args: { businessId: string; serviceId: string; date: string; maxSlots: number }): Promise<{ slots: AvailabilitySlot[]; timezone: string } | null>;
+  freeSlots(args: {
+    businessId: string;
+    service: ServiceOffering;
+    date: string;
+    hours: { open: string; close: string };
+    timezone: string;
+    maxSlots: number;
+  }): Promise<AvailabilitySlot[]>;
 }
 
 export type RealToolsetPorts = {
   catalog: CatalogPort;
-  facts: FactsPort;
+  /** Used only when no snapshot is pinned (sim-call). Read once; a failure is not retried. */
+  facts?: FactsPort | undefined;
   quotes: QuotePort;
   proposals: ProposalPort;
   orderStatus: OrderStatusPort;
@@ -117,11 +131,19 @@ export type RealToolsetDeps = {
   /** The server's MESSAGE_CHANNEL setting. A caller who declines messages always gets `qr_only`. */
   messageChannel: MessageChannelSetting;
   ports: RealToolsetPorts;
+  /** The fact snapshot pinned with the call (FLOWS B2). When set, facts are never read again. */
+  factsSnapshot?: FactsSnapshot | undefined;
   /** The pinned agent version's capabilities. Only tools for these are callable. Defaults to all seven tools. */
   capabilities?: readonly CapabilityId[] | undefined;
-  /** Clock for quote expiry and pickup checks. */
+  /** Clock for quote expiry, read-back and pickup checks. */
   now?: (() => Date) | undefined;
+  /** Overrides the registry `timeoutMs` of every tool (tests). */
+  toolTimeoutMs?: number | undefined;
 };
+
+/** One trace entry holds metadata only: field names and outcome codes, never values. */
+export type SafeTraceInput = { valid: true; fields: string[] } | { valid: false };
+export type SafeTraceOutput = { ok: boolean; reason?: string; missingFields?: string[]; proposalId?: string; approvalId?: string };
 
 export type RealToolset = {
   readonly businessId: string;
@@ -129,7 +151,9 @@ export type RealToolset = {
   readonly handler: ToolHandler;
   /** The same seven tools as functions, through the same validation and trace. */
   readonly tools: Toolset;
-  /** A copy of every call so far, oldest first. A message recipient is masked to its last four digits. */
+  /** A copy of the most recent calls, oldest first. Metadata only (`SafeTraceInput`, `SafeTraceOutput`). */
   trace(): ToolTraceEntry[];
   clearTrace(): void;
+  /** Ends the toolset: clears quotes, the read-back state and the trace. Later calls fail closed. */
+  dispose(): void;
 };

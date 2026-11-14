@@ -1,15 +1,17 @@
 import websocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import twilio from 'twilio';
 import WebSocket from 'ws';
-import { pizzaSpecV2 } from '@abos/contracts/fixtures';
-import { voicePlugin } from '../../src/voice/plugin';
-import type { LiveAgentResolution } from '../../src/voice/types';
-import { FakeSocket, fakeCalls, fakeHandler, fakeLogger, specWith } from './helpers';
+import { barberSpecV1, pizzaSpecV2 } from '@abos/contracts/fixtures';
+import { createTwilioRequestValidator, voicePlugin } from '../../src/voice/plugin';
+import type { FactsSnapshot, LiveAgentResolution, VoicePluginOptions } from '../../src/voice/types';
+import { FakeSocket, PIZZA_SNAPSHOT, fakeCalls, fakeEvents, fakeLogger, fakeToolset, specWith } from './helpers';
 
 const PUBLIC_URL = 'https://demo.example.test';
 const FORM = 'CallSid=CA123&From=%2B15555550123&To=%2B15555550199';
 const live: LiveAgentResolution = { state: 'live', businessId: 'biz_pizza_01', businessName: 'Demo Pizza Co.', agentId: 'agt_pizza_01', agentVersionId: 'agv_pizza_01_v2', spec: pizzaSpecV2 };
+const tokenOf = (body: string) => /name="streamToken" value="([^"]+)"/.exec(body)?.[1];
 
 let app: FastifyInstance | undefined;
 afterEach(async () => {
@@ -17,27 +19,32 @@ afterEach(async () => {
   app = undefined;
 });
 
-async function build(resolution: LiveAgentResolution = live) {
+async function build(opts: { resolution?: LiveAgentResolution; facts?: () => Promise<FactsSnapshot>; validator?: VoicePluginOptions['twilioValidator']; rootWebsocket?: boolean } = {}) {
   const calls = fakeCalls();
+  let resolution = opts.resolution ?? live;
   const liveAgent = { resolve: vi.fn(async () => resolution) };
+  const facts = { snapshot: vi.fn(opts.facts ?? (async () => PIZZA_SNAPSHOT)) };
+  const events = fakeEvents();
   const validated: { url: string; params: Record<string, string> }[] = [];
-  const twilioValidator = { validate: vi.fn((sig: string, url: string, params: Record<string, string>) => (validated.push({ url, params }), sig === 'good')) };
+  const twilioValidator = opts.validator ?? { validate: vi.fn((sig: string, url: string, params: Record<string, string>) => (validated.push({ url, params }), sig === 'good')) };
   const sockets: FakeSocket[] = [];
   const openaiSocketFactory = vi.fn(() => {
     const s = new FakeSocket();
     sockets.push(s);
     return s;
   });
-  const { handler } = fakeHandler();
+  const { toolset } = fakeToolset();
+  const toolsetFactory = vi.fn((_ctx: Parameters<VoicePluginOptions['toolsetFactory']>[0]) => toolset);
   const { logger, lines } = fakeLogger();
   app = Fastify();
-  // The app registers the WebSocket plugin at the root; the voice plugin then reuses it.
-  await app.register(websocket);
-  await app.register(voicePlugin, { publicServerUrl: `${PUBLIC_URL}/`, liveAgent, calls, toolsetFactory: () => handler, twilioValidator, openaiSocketFactory, messageChannel: 'surge', logger });
+  // The app may register the WebSocket plugin at the root; the voice plugin then reuses it.
+  if (opts.rootWebsocket !== false) await app.register(websocket);
+  await app.register(voicePlugin, { publicServerUrl: `${PUBLIC_URL}/`, liveAgent, facts, calls, events, toolsetFactory, twilioValidator, openaiSocketFactory, messageChannel: 'surge', logger, twilioBusinessId: 'biz_pizza_01' });
   await app.ready();
-  const post = (signature = 'good') =>
-    app!.inject({ method: 'POST', url: '/webhooks/twilio/voice', headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-twilio-signature': signature }, payload: FORM });
-  return { app, calls, liveAgent, twilioValidator, validated, sockets, openaiSocketFactory, lines, post };
+  const a = app;
+  const post = (signature = 'good', form = FORM) =>
+    a.inject({ method: 'POST', url: '/webhooks/twilio/voice', headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-twilio-signature': signature }, payload: form });
+  return { app: a, calls, liveAgent, facts, events, validated, sockets, openaiSocketFactory, toolsetFactory, lines, post, switchAgent: (r: LiveAgentResolution) => (resolution = r) };
 }
 
 describe('voice plugin: POST /webhooks/twilio/voice', () => {
@@ -47,19 +54,26 @@ describe('voice plugin: POST /webhooks/twilio/voice', () => {
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('text/xml');
     expect(res.body).toContain('<Stream url="wss://demo.example.test/ws/phone">');
-    expect(res.body).toMatch(/<Parameter name="streamToken" value="[A-Za-z0-9_-]{20,}" \/>/);
+    expect(tokenOf(res.body)).toMatch(/^[A-Za-z0-9_-]{20,}$/);
     expect(t.validated[0]).toEqual({ url: 'https://demo.example.test/webhooks/twilio/voice', params: { CallSid: 'CA123', From: '+15555550123', To: '+15555550199' } });
-    expect(t.liveAgent.resolve).toHaveBeenCalledWith('+15555550199');
     expect(t.calls.startCall).toHaveBeenCalledWith({ businessId: 'biz_pizza_01', agentId: 'agt_pizza_01', agentVersionId: 'agv_pizza_01_v2', providerCallId: 'CA123', callerLast4: '0123' });
     expect(JSON.stringify(t.lines)).not.toContain('+15555550123');
   });
 
   it('a bad signature gets 403 and nothing starts', async () => {
     const t = await build();
-    const res = await t.post('forged');
-    expect(res.statusCode).toBe(403);
+    expect((await t.post('forged')).statusCode).toBe(403);
     expect(t.liveAgent.resolve).not.toHaveBeenCalled();
     expect(t.calls.startCall).not.toHaveBeenCalled();
+  });
+
+  it('S13: a bad signature writes webhook.rejected with the trusted business and nothing from the body', async () => {
+    const t = await build();
+    await t.post('forged');
+    expect(t.events.webhookRejected).toHaveBeenCalledWith({ businessId: 'biz_pizza_01', payload: { provider: 'twilio', reason: 'signature_invalid' } });
+    expect(JSON.stringify(t.events.webhookRejected.mock.calls)).not.toMatch(/CA123|5555550/);
+    await t.post('good', 'From=%2B15555550123');
+    expect(t.events.webhookRejected).toHaveBeenLastCalledWith({ businessId: 'biz_pizza_01', payload: { provider: 'twilio', reason: 'malformed' } });
   });
 
   it('a missing signature gets 403', async () => {
@@ -69,11 +83,10 @@ describe('voice plugin: POST /webhooks/twilio/voice', () => {
   });
 
   it('no live agent gets the spoken refusal and starts no call or session', async () => {
-    const t = await build({ state: 'none' });
+    const t = await build({ resolution: { state: 'none' } });
     const res = await t.post();
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('<Say>Sorry, this line is not taking calls right now.');
-    expect(res.body).toContain('<Hangup />');
     expect(res.body).not.toContain('<Stream');
     expect(t.calls.startCall).not.toHaveBeenCalled();
     expect(t.openaiSocketFactory).not.toHaveBeenCalled();
@@ -81,9 +94,8 @@ describe('voice plugin: POST /webhooks/twilio/voice', () => {
 
   it('a paused agent gets the spoken refusal', async () => {
     for (const r of [{ state: 'paused' } as const, { ...live, spec: specWith(pizzaSpecV2, { status: 'paused' }) }]) {
-      const t = await build(r);
-      const res = await t.post();
-      expect(res.body).toContain('<Say>');
+      const t = await build({ resolution: r });
+      expect((await t.post()).body).toContain('<Say>');
       expect(t.calls.startCall).not.toHaveBeenCalled();
       await t.app.close();
       app = undefined;
@@ -91,9 +103,93 @@ describe('voice plugin: POST /webhooks/twilio/voice', () => {
   });
 
   it('a live spec with a write capability outside its bundle is refused before the call starts', async () => {
-    const t = await build({ ...live, spec: specWith(pizzaSpecV2, { capabilities: [...pizzaSpecV2.capabilities, 'catalog.price.update'] }) });
+    const t = await build({ resolution: { ...live, spec: specWith(pizzaSpecV2, { capabilities: [...pizzaSpecV2.capabilities, 'catalog.price.update'] }) } });
+    expect((await t.post()).body).toContain('<Say>');
+    expect(t.calls.startCall).not.toHaveBeenCalled();
+  });
+});
+
+describe('voice plugin: replayed webhooks (B1)', () => {
+  it('B1: an identical signed retry gets the same pending token, never a second one', async () => {
+    const authToken = 'test_auth_token_value';
+    const validator = createTwilioRequestValidator(authToken);
+    const params = { CallSid: 'CA123', From: '+15555550123', To: '+15555550199' };
+    const sig = twilio.getExpectedTwilioSignature(authToken, `${PUBLIC_URL}/webhooks/twilio/voice`, params);
+    const t = await build({ validator });
+    const first = await t.post(sig);
+    const second = await t.post(sig);
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(tokenOf(second.body)).toBe(tokenOf(first.body));
+    expect(t.calls.startCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('B1: simultaneous retries share one credential', async () => {
+    const t = await build();
+    const [a, b] = await Promise.all([t.post(), t.post()]);
+    expect(tokenOf(a.body)).toBe(tokenOf(b.body));
+    expect(t.calls.startCall).toHaveBeenCalledTimes(1);
+    expect(t.liveAgent.resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it('B1: a live-agent switch between retries does not change the pinned call', async () => {
+    const t = await build();
+    const first = await t.post();
+    t.switchAgent({ state: 'live', businessId: 'biz_barber_01', businessName: 'Demo Barbershop', agentId: 'agt_barber_01', agentVersionId: 'agv_barber_01_v1', spec: barberSpecV1 });
+    const second = await t.post();
+    expect(tokenOf(second.body)).toBe(tokenOf(first.body));
+    expect(t.liveAgent.resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it('B1: a retry after the stream claimed the token is refused', async () => {
+    const t = await build();
+    const token = tokenOf((await t.post()).body);
+    const ws = await t.app.injectWS('/ws/phone');
+    ws.send(JSON.stringify({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ1', customParameters: { streamToken: token } } }));
+    await vi.waitFor(() => expect(t.openaiSocketFactory).toHaveBeenCalledTimes(1));
+    const retry = await t.post();
+    expect(retry.statusCode).toBe(409);
+    expect(tokenOf(retry.body)).toBeUndefined();
+    expect(t.calls.startCall).toHaveBeenCalledTimes(1);
+    ws.terminate();
+  });
+
+  it('B1: a call already stored for the CallSid gets no new credential', async () => {
+    const t = await build();
+    t.calls.findByProviderCallId.mockResolvedValueOnce({ callId: 'call_test_01', status: 'IN_PROGRESS' });
     const res = await t.post();
-    expect(res.body).toContain('<Say>');
+    expect(res.statusCode).toBe(409);
+    expect(t.calls.startCall).not.toHaveBeenCalled();
+  });
+});
+
+describe('voice plugin: fact snapshot (S9, S10)', () => {
+  it('S9: the snapshot is taken at the webhook and that exact snapshot reaches the toolset', async () => {
+    let current: FactsSnapshot = PIZZA_SNAPSHOT;
+    const t = await build({ facts: async () => current });
+    const token = tokenOf((await t.post()).body);
+    expect(t.facts.snapshot).toHaveBeenCalledWith('biz_pizza_01');
+    // The owner edits hours between the webhook and the stream.
+    current = { ...PIZZA_SNAPSHOT, facts: PIZZA_SNAPSHOT.facts.map((f) => (f.key === 'fri' ? { ...f, value: { open: '11:00', close: '23:00' }, version: 2 } : f)) };
+    const ws = await t.app.injectWS('/ws/phone');
+    ws.send(JSON.stringify({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ1', customParameters: { streamToken: token } } }));
+    await vi.waitFor(() => expect(t.toolsetFactory).toHaveBeenCalled());
+    expect(t.toolsetFactory.mock.calls[0]?.[0]).toMatchObject({ facts: PIZZA_SNAPSHOT });
+    expect(t.facts.snapshot).toHaveBeenCalledTimes(1);
+    ws.terminate();
+  });
+
+  it('S9: a failed snapshot read refuses the call politely', async () => {
+    const t = await build({ facts: async () => Promise.reject(new Error('db down')) });
+    const res = await t.post();
+    expect(res.body).toContain('cannot take orders or bookings by phone right now');
+    expect(t.calls.startCall).not.toHaveBeenCalled();
+  });
+
+  it('S10: a snapshot with no readable opening hours refuses the call politely', async () => {
+    const noHours: FactsSnapshot = { ...PIZZA_SNAPSHOT, facts: PIZZA_SNAPSHOT.facts.map((f) => (f.kind === 'hours' ? { ...f, value: { open: 'noon' } } : f)) };
+    const t = await build({ facts: async () => noHours });
+    expect((await t.post()).body).toContain('cannot take orders or bookings by phone right now');
     expect(t.calls.startCall).not.toHaveBeenCalled();
   });
 });
@@ -101,7 +197,7 @@ describe('voice plugin: POST /webhooks/twilio/voice', () => {
 describe('voice plugin: /ws/phone', () => {
   it('accepts the minted token over the socket and opens the model session', async () => {
     const t = await build();
-    const token = /value="([^"]+)"/.exec((await t.post()).body)?.[1];
+    const token = tokenOf((await t.post()).body);
     const ws = await t.app.injectWS('/ws/phone');
     ws.send(JSON.stringify({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ1', customParameters: { streamToken: token } } }));
     await vi.waitFor(() => expect(t.openaiSocketFactory).toHaveBeenCalledWith({ model: 'gpt-realtime-2.1' }));
@@ -113,29 +209,23 @@ describe('voice plugin: /ws/phone', () => {
   });
 
   it('works when the plugin registers the WebSocket support itself (localhost socket)', async () => {
-    const calls = fakeCalls();
-    const sockets: FakeSocket[] = [];
-    const { handler } = fakeHandler();
-    app = Fastify();
-    await app.register(voicePlugin, {
-      publicServerUrl: PUBLIC_URL, liveAgent: { resolve: async () => live }, calls, toolsetFactory: () => handler,
-      twilioValidator: { validate: () => true }, openaiSocketFactory: () => { const s = new FakeSocket(); sockets.push(s); return s; },
-      messageChannel: 'surge', logger: fakeLogger().logger,
-    });
-    const address = await app.listen({ port: 0, host: '127.0.0.1' });
-    const res = await app.inject({ method: 'POST', url: '/webhooks/twilio/voice', headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-twilio-signature': 'x' }, payload: FORM });
-    const token = /value="([^"]+)"/.exec(res.body)?.[1];
+    const t = await build({ rootWebsocket: false });
+    const address = await t.app.listen({ port: 0, host: '127.0.0.1' });
+    const token = tokenOf((await t.post()).body);
     const ws = new WebSocket(`${address.replace('http', 'ws')}/ws/phone`);
-    await new Promise<void>((r, j) => { ws.on('open', () => r()); ws.on('error', j); });
+    await new Promise<void>((r, j) => {
+      ws.on('open', () => r());
+      ws.on('error', j);
+    });
     ws.send(JSON.stringify({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ1', customParameters: { streamToken: token } } }));
-    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    await vi.waitFor(() => expect(t.sockets).toHaveLength(1));
     ws.close();
-    await vi.waitFor(() => expect(calls.endCall).toHaveBeenCalledWith('call_test_01', 'dropped'));
+    await vi.waitFor(() => expect(t.calls.endCall).toHaveBeenCalledWith('call_test_01', 'dropped'));
   });
 
-  it('a token is single use', async () => {
+  it('a token is single use across connections', async () => {
     const t = await build();
-    const token = /value="([^"]+)"/.exec((await t.post()).body)?.[1];
+    const token = tokenOf((await t.post()).body);
     const first = await t.app.injectWS('/ws/phone');
     first.send(JSON.stringify({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ1', customParameters: { streamToken: token } } }));
     await vi.waitFor(() => expect(t.openaiSocketFactory).toHaveBeenCalledTimes(1));

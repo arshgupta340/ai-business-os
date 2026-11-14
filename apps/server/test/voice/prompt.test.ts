@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { barberSpecV1, pizzaSpecV2 } from '@abos/contracts/fixtures';
-import { buildInstructions, channelWord, orderWaitScript } from '../../src/voice/prompt';
+import { buildInstructions, channelWord, decisionInstruction, orderWaitScript, pendingGoodbyeInstruction } from '../../src/voice/prompt';
 import { specWith } from './helpers';
 
 const pizza = { businessName: 'Demo Pizza Co.', messageChannel: 'surge' as const };
@@ -27,6 +27,20 @@ describe('voice prompt', () => {
     expect(wait.consented).toContain('by text message to the number ending in {last4}');
     expect(wait.declined).toContain('shown to you at the counter');
     expect(text).toContain('Never say the order is placed');
+  });
+
+  it('S12: the wait script offers to stay or hang up, and the server messages carry the FLOWS 3.1 wording', () => {
+    expect(orderWaitScript('surge').consented).toContain('stay on the line for a minute');
+    expect(pendingGoodbyeInstruction('restaurant_order_taker', 'surge', 'Demo Pizza Co.')).toContain('Nothing is charged unless you pay on that link. Thanks for calling Demo Pizza Co. Goodbye.');
+    expect(decisionInstruction('restaurant_order_taker', { kind: 'approved', messageSent: true }, 'surge')).toContain('has been sent by text message');
+    expect(decisionInstruction('restaurant_order_taker', { kind: 'approved', messageSent: false }, 'surge')).toContain('should reach you shortly');
+    expect(decisionInstruction('restaurant_order_taker', { kind: 'rejected' }, 'surge')).toContain('Nothing has been charged');
+  });
+
+  it('S10, S11: explains the read-back step and the fail-closed answer', () => {
+    const text = buildInstructions(pizzaSpecV2, pizza);
+    expect(text).toContain('missing field ending in readBack');
+    expect(text).toContain('you cannot take this right now and do not propose anything');
   });
 
   it('carries the guardrails', () => {
@@ -57,7 +71,7 @@ describe('voice prompt', () => {
   });
 
   it('stays short for latency', () => {
-    expect(buildInstructions(pizzaSpecV2, pizza).length).toBeLessThan(3500);
+    expect(buildInstructions(pizzaSpecV2, pizza).length).toBeLessThan(4500);
     expect(channelWord('android_gateway')).toBe('text message');
     expect(channelWord('qr_only')).toBe('message');
   });

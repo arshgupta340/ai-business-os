@@ -2,6 +2,7 @@
 // Kept short for latency. Safety does not depend on it: the tool allowlist and the approval
 // engine do. The prompt keeps the call polite, on topic and honest about what has happened.
 import type { AgentSpec, MessageChannelSetting } from '@abos/contracts';
+import type { CallDecision } from './types';
 
 export type InstructionFacts = {
   businessName: string;
@@ -29,13 +30,50 @@ function openingLine(spec: AgentSpec, businessName: string, offer: string): stri
   return `Hi, thanks for calling ${sentence(businessName)} ${DISCLOSURE}. ${offer}`;
 }
 
+/** The read-back step the proposal tools enforce (READBACK_MIN_MS in tools/real). */
+const READBACK_LINE =
+  'If a proposal tool returns a missing field ending in readBack, read the number back digit by digit, wait for a clear yes, then call the same tool again with exactly the same details. Never repeat the call without that read-back.';
+const CANNOT_TAKE_LINE =
+  'If a tool says opening hours are not available, or that information is not available right now, tell the caller you cannot take this right now and do not propose anything.';
+
+/**
+ * Server status messages the relay injects (FLOWS 3.1). They carry only fixed wording chosen by the
+ * server from a verified decision; the model speaks them in its own voice.
+ */
+export function decisionInstruction(template: AgentSpec['template'], decision: CallDecision, channel: MessageChannelSetting): string {
+  const word = channelWord(channel);
+  if (template === 'appointment_booker') {
+    if (decision.kind === 'approved') return 'Server status: the shop approved the booking. Tell the caller the shop has approved it and a confirmation will follow. Do not say anything else is done.';
+    if (decision.kind === 'rejected') return 'Server status: the shop rejected the booking. Say: "I am sorry, the shop is not able to take this booking right now. You are welcome to call back."';
+    return 'Server status: the booking request expired. Say the shop did not review it in time and nothing was booked.';
+  }
+  if (decision.kind === 'approved' && decision.messageSent) {
+    return `Server status: approved and the link was sent. Say: "The shop has approved your order, and the payment link has been sent by ${word} to the number ending in {last4}. Once you pay on that link, your order will be ready for pickup at {pickupAt}. Is there anything else I can help with?"`;
+  }
+  if (decision.kind === 'approved') {
+    return 'Server status: approved, link not yet sent. Say: "The shop has approved your order. The payment link should reach you shortly, and the shop can also show it to you. Your order is not paid until you complete that link."';
+  }
+  if (decision.kind === 'rejected') {
+    return 'Server status: rejected. Say: "I am sorry, the shop is not able to take this order right now. Nothing has been charged. You are welcome to call back or order in person."';
+  }
+  return 'Server status: the approval expired. Say the shop did not review the order in time, nothing was charged, and they are welcome to call back.';
+}
+
+/** FLOWS 3.1 "still pending after 90 seconds": the goodbye, after which the server ends the call. */
+export function pendingGoodbyeInstruction(template: AgentSpec['template'], channel: MessageChannelSetting, businessName: string): string {
+  if (template === 'appointment_booker') {
+    return `Server status: still pending. Say: "The shop will review your booking request and confirm it once they approve it. Your appointment is not booked until then. Thanks for calling ${sentence(businessName)} Goodbye." Then stop.`;
+  }
+  return `Server status: still pending. Say: "No problem. The shop will review your order, and if they approve it, the payment link will come by ${channelWord(channel)} to the number ending in {last4}. Nothing is charged unless you pay on that link. Thanks for calling ${sentence(businessName)} Goodbye." Then stop.`;
+}
+
 /** The order wait script (FLOWS 3.1), with and without message consent. */
 export function orderWaitScript(channel: MessageChannelSetting): { consented: string; declined: string } {
   const base = 'Thank you, {name}. I have sent your order to the shop for approval. Your total is {total}.';
-  const notPlaced = 'Your order is not placed until you pay on that link.';
+  const notPlaced = 'Your order is not placed until you pay on that link. You can stay on the line for a minute while the shop reviews it, or hang up and watch for the message.';
   return {
     consented: `${base} Once the shop approves it, we will send the payment link by ${channelWord(channel)} to the number ending in {last4}. ${notPlaced}`,
-    declined: `${base} Once the shop approves it, the payment link will be shown to you at the counter. ${notPlaced}`,
+    declined: `${base} Once the shop approves it, the payment link will be shown to you at the counter. Your order is not placed until you pay on that link.`,
   };
 }
 
@@ -72,6 +110,8 @@ export function buildInstructions(spec: AgentSpec, facts: InstructionFacts): str
     }
     lines.push(
       'Before proposing, read back every item, the total, the name, the pickup time and the number if there is one, then ask: "Shall I send this to the shop for approval?" Call propose_order only after a yes.',
+      READBACK_LINE,
+      CANNOT_TAKE_LINE,
       `After propose_order succeeds, say: "${canMessage ? wait.consented : wait.declined}"${canMessage ? ` If the caller declined messages, say instead: "${wait.declined}"` : ''}`,
       'Never say the order is placed, confirmed by the kitchen, or paid. For "is my order done?", call get_order_status and say what it returns in plain words.',
     );
@@ -91,6 +131,8 @@ export function buildInstructions(spec: AgentSpec, facts: InstructionFacts): str
     }
     lines.push(
       'Read back the service, time, name and number if there is one, then ask: "Shall I send this to the shop for approval?" Call propose_booking only after a yes. If the slot is taken, offer the alternatives it returns.',
+      READBACK_LINE,
+      CANNOT_TAKE_LINE,
       `After propose_booking succeeds, say: "${canMessage ? wait.consented : wait.declined}"${canMessage ? ` If the caller declined messages, say instead: "${wait.declined}"` : ''}`,
       'Never say the appointment is booked unless a tool says so.',
     );

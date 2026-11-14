@@ -1,15 +1,26 @@
 // The phone voice worker as a Fastify plugin (FLOWS B1 to B4, B30). Register it with one line:
-//   await app.register(voicePlugin, { publicServerUrl, liveAgent, calls, toolsetFactory, twilioValidator, openaiSocketFactory, messageChannel })
+//   await app.register(voicePlugin, { publicServerUrl, liveAgent, facts, calls, events, toolsetFactory, twilioValidator, openaiSocketFactory, messageChannel })
 // It owns POST /webhooks/twilio/voice and the /ws/phone Media Stream socket.
 import formbody from '@fastify/formbody';
 import websocket from '@fastify/websocket';
 import type { FastifyPluginAsync } from 'fastify';
 import twilio from 'twilio';
-import { STREAM_TOKEN_TTL_MS } from '@abos/contracts';
+import { HoursValueSchema, STREAM_TOKEN_TTL_MS, type WebhookRejectReason } from '@abos/contracts';
 import { VOICE_WEBHOOK_PATH, WS_PATH } from './constants';
-import { CALL_SETUP_FAILED_MESSAGE, NOT_TAKING_CALLS_MESSAGE, StreamTokenStore, buildConnectTwiml, buildRejectTwiml, buildSayTwiml, last4, redact } from './logic';
-import { adaptWs, checkSessionCapabilities, runPhoneRelay } from './relay';
-import type { PinnedCall, TwilioRequestValidator, VoiceLogger, VoicePluginOptions } from './types';
+import {
+  CALL_SETUP_FAILED_MESSAGE,
+  CANNOT_TAKE_ORDERS_MESSAGE,
+  NOT_TAKING_CALLS_MESSAGE,
+  StreamTokenStore,
+  buildConnectTwiml,
+  buildRejectTwiml,
+  buildSayTwiml,
+  errorInfo,
+  last4,
+  safeLogger,
+} from './logic';
+import { adaptWs, checkSessionCapabilities, runPhoneRelay, withDeadline } from './relay';
+import type { FactsSnapshot, PinnedCall, TwilioRequestValidator, VoicePluginOptions } from './types';
 
 export type * from './types';
 export { buildInstructions } from './prompt';
@@ -28,18 +39,89 @@ function formParams(body: unknown): Record<string, string> {
   return out;
 }
 
+/** True when the snapshot holds at least one readable opening-hours fact. */
+function hasReadableHours(snapshot: FactsSnapshot): boolean {
+  return snapshot.facts.some((f) => f.kind === 'hours' && HoursValueSchema.safeParse(f.value).success);
+}
+
+type Reply = { status: number; body: string };
+
 export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, opts) => {
   if (!app.hasContentTypeParser('application/x-www-form-urlencoded')) await app.register(formbody);
   if (!app.hasDecorator('websocketServer')) await app.register(websocket);
 
-  const logger: VoiceLogger = opts.logger ?? app.log;
-  const now = opts.now ?? Date.now;
   const secrets = opts.redactSecrets ?? [];
+  const logger = safeLogger(opts.logger ?? app.log, secrets);
+  const now = opts.now ?? Date.now;
+  const cleanupMs = opts.limits?.cleanupTimeoutMs ?? 5000;
   const publicUrl = opts.publicServerUrl.replace(/\/+$/, '');
   const webhookUrl = `${publicUrl}${VOICE_WEBHOOK_PATH}`;
   const tokens = new StreamTokenStore<PinnedCall>(opts.tokenTtlMs ?? STREAM_TOKEN_TTL_MS);
+  // Simultaneous deliveries of one CallSid share one result.
+  const inflight = new Map<string, Promise<Reply>>();
 
-  const say = (message: string) => buildSayTwiml(message);
+  const ok = (body: string): Reply => ({ status: 200, body });
+  const refuseReplay = (): Reply => ({ status: 409, body: buildRejectTwiml() });
+
+  const rejected = (reason: WebhookRejectReason) => {
+    void withDeadline(opts.events.webhookRejected({ businessId: opts.twilioBusinessId, payload: { provider: 'twilio', reason } }), cleanupMs, 'failed' as const).then((r) => {
+      if (r === 'failed') logger.error({}, 'voice: could not write webhook.rejected');
+    });
+  };
+
+  /** B2 and B3 for one CallSid. Never mints a second credential for a call. */
+  async function admit(providerCallId: string, to: string, from: string | undefined): Promise<Reply> {
+    const existing = tokens.lookup(providerCallId, now());
+    if (existing.kind === 'pending') return ok(buildConnectTwiml(publicUrl, existing.token));
+    if (existing.kind === 'refused') {
+      logger.warn({ state: existing.state }, 'voice: repeated webhook for a call whose stream is used or ended; refused');
+      return refuseReplay();
+    }
+    // A call row from an earlier delivery (another process, or a restart) cannot get a new credential.
+    const stored = await opts.calls.findByProviderCallId(providerCallId);
+    if (stored !== null) {
+      logger.warn({ callId: stored.callId, status: stored.status }, 'voice: repeated webhook for a stored call; refused');
+      return refuseReplay();
+    }
+
+    const resolution = await opts.liveAgent.resolve(to);
+    if (resolution.state !== 'live' || resolution.spec.status !== 'live') {
+      logger.info({ state: resolution.state }, 'voice: no live agent answers this number; refused politely');
+      return ok(buildSayTwiml(NOT_TAKING_CALLS_MESSAGE));
+    }
+    const capCheck = checkSessionCapabilities(resolution.spec);
+    if (!capCheck.ok) {
+      logger.error({ agentVersionId: resolution.agentVersionId, notAllowed: capCheck.notAllowed }, 'voice: live agent has a capability that is not allowed; refused');
+      return ok(buildSayTwiml(CALL_SETUP_FAILED_MESSAGE));
+    }
+    // FLOWS B2: the fact snapshot is taken now, when the version is pinned, and travels with the call.
+    let facts: FactsSnapshot;
+    try {
+      facts = structuredClone(await opts.facts.snapshot(resolution.businessId));
+    } catch (err) {
+      logger.error({ ...errorInfo(err) }, 'voice: could not read the fact snapshot; refused');
+      return ok(buildSayTwiml(CANNOT_TAKE_ORDERS_MESSAGE));
+    }
+    if (resolution.spec.template !== 'custom' && !hasReadableHours(facts)) {
+      logger.error({ agentVersionId: resolution.agentVersionId }, 'voice: no readable opening hours; refused');
+      return ok(buildSayTwiml(CANNOT_TAKE_ORDERS_MESSAGE));
+    }
+
+    const { callId } = await opts.calls.startCall({
+      businessId: resolution.businessId,
+      agentId: resolution.agentId,
+      agentVersionId: resolution.agentVersionId,
+      providerCallId,
+      callerLast4: last4(from),
+    });
+    const token = tokens.mint(
+      { callId, providerCallId, businessId: resolution.businessId, businessName: resolution.businessName, agentId: resolution.agentId, agentVersionId: resolution.agentVersionId, spec: resolution.spec, facts },
+      now(),
+    );
+    if (token === null) return refuseReplay();
+    logger.info({ callId, agentVersionId: resolution.agentVersionId, callerLast4: last4(from) }, 'voice: call started; stream credential minted');
+    return ok(buildConnectTwiml(publicUrl, token));
+  }
 
   // B1 to B3.
   app.post(VOICE_WEBHOOK_PATH, async (req, reply) => {
@@ -53,52 +135,28 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
     }
     if (!valid) {
       logger.warn({ path: VOICE_WEBHOOK_PATH }, 'voice: webhook rejected, bad or missing X-Twilio-Signature');
+      rejected('signature_invalid');
       return reply.code(403).type('text/xml').send(buildRejectTwiml());
     }
 
     const providerCallId = params.CallSid;
     const to = params.To;
     if (providerCallId === undefined || providerCallId === '' || to === undefined || to === '') {
+      rejected('malformed');
       return reply.code(400).type('text/xml').send(buildRejectTwiml());
     }
 
-    let resolution: Awaited<ReturnType<typeof opts.liveAgent.resolve>>;
-    try {
-      resolution = await opts.liveAgent.resolve(to);
-    } catch (err) {
-      logger.error({ err: redact(String(err), secrets) }, 'voice: could not read the live agent');
-      return reply.type('text/xml').send(say(CALL_SETUP_FAILED_MESSAGE));
+    let pending = inflight.get(providerCallId);
+    if (pending === undefined) {
+      pending = admit(providerCallId, to, params.From).catch((err: unknown) => {
+        logger.error({ ...errorInfo(err) }, 'voice: could not admit the call');
+        return ok(buildSayTwiml(CALL_SETUP_FAILED_MESSAGE));
+      });
+      inflight.set(providerCallId, pending);
+      void pending.finally(() => inflight.delete(providerCallId));
     }
-    if (resolution.state !== 'live' || resolution.spec.status !== 'live') {
-      logger.info({ state: resolution.state }, 'voice: no live agent answers this number; refused politely');
-      return reply.type('text/xml').send(say(NOT_TAKING_CALLS_MESSAGE));
-    }
-    const capCheck = checkSessionCapabilities(resolution.spec);
-    if (!capCheck.ok) {
-      logger.error({ agentVersionId: resolution.agentVersionId, unknown: capCheck.unknown, notAllowed: capCheck.notAllowed }, 'voice: live agent has a capability that is not allowed; refused');
-      return reply.type('text/xml').send(say(CALL_SETUP_FAILED_MESSAGE));
-    }
-
-    let callId: string;
-    try {
-      ({ callId } = await opts.calls.startCall({
-        businessId: resolution.businessId,
-        agentId: resolution.agentId,
-        agentVersionId: resolution.agentVersionId,
-        providerCallId,
-        callerLast4: last4(params.From),
-      }));
-    } catch (err) {
-      logger.error({ err: redact(String(err), secrets) }, 'voice: could not start the call');
-      return reply.type('text/xml').send(say(CALL_SETUP_FAILED_MESSAGE));
-    }
-
-    const token = tokens.mint(
-      { callId, providerCallId, businessId: resolution.businessId, businessName: resolution.businessName, agentId: resolution.agentId, agentVersionId: resolution.agentVersionId, spec: resolution.spec },
-      now(),
-    );
-    logger.info({ callId, agentVersionId: resolution.agentVersionId, callerLast4: last4(params.From) }, 'voice: call started; stream token minted');
-    return reply.type('text/xml').send(buildConnectTwiml(publicUrl, token));
+    const r = await pending;
+    return reply.code(r.status).type('text/xml').send(r.body);
   });
 
   // B4 to B30.
@@ -107,14 +165,17 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
       phone: adaptWs(socket),
       tokens,
       calls: opts.calls,
+      events: opts.events,
+      decisions: opts.decisions,
       toolsetFactory: opts.toolsetFactory,
       openaiSocketFactory: opts.openaiSocketFactory,
       messageChannel: opts.messageChannel,
-      logger,
+      logger: opts.logger ?? app.log,
       model: opts.model,
       voice: opts.voice,
       redactSecrets: secrets,
       now,
+      limits: opts.limits,
     });
   });
 };

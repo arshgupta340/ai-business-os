@@ -62,8 +62,8 @@ type OrderInput = {
   proposedAt: string;
   updatedAt: string;
   contactName: string;
-  recipient: string;
-  consentAt: string;
+  /** Absent when the caller declined messages: no recipient, and the approval channel is qr_only. */
+  consent?: { recipient: string; consentAt: string };
   pickupAt: string;
   square?: { checkout: boolean; paymentId?: string };
 };
@@ -82,7 +82,10 @@ function order(o: OrderInput): Order {
     quote,
     totalMinor: quote.totalMinor,
     currency: quote.currency,
-    contact: { name: o.contactName, messageRecipient: o.recipient, messageConsent: true, consentAt: o.consentAt },
+    contact:
+      o.consent === undefined
+        ? { name: o.contactName, messageConsent: false }
+        : { name: o.contactName, messageRecipient: o.consent.recipient, messageConsent: true, consentAt: o.consent.consentAt },
     fulfillment: { type: 'pickup', pickupAt: o.pickupAt },
     approvalId: `apv_demo_${o.n}`,
     createdAt: o.proposedAt,
@@ -104,7 +107,7 @@ export const orderFulfilled = order({
   n: '01', status: 'FULFILLMENT_READY',
   cart: { lines: [line(SQ.itemMargherita, SQ.varMargheritaLarge, 1, [SQ.modMushrooms]), line(SQ.itemPepperoni, SQ.varPepperoniLarge, 1)] },
   quotedAt: '2026-11-14T19:01:35Z', proposedAt: '2026-11-14T19:03:05Z', updatedAt: '2026-11-14T19:06:31Z',
-  contactName: 'Maya', recipient: '+15555550123', consentAt: '2026-11-14T19:02:50Z', pickupAt: '2026-11-14T19:30:00Z',
+  contactName: 'Maya', consent: { recipient: '+15555550123', consentAt: '2026-11-14T19:02:50Z' }, pickupAt: '2026-11-14T19:30:00Z',
   square: { checkout: true, paymentId: 'SQ_PAYMENT_DEMO_01' },
 });
 
@@ -113,7 +116,7 @@ export const orderPaid = order({
   n: '02', status: 'PAID_VERIFIED',
   cart: { lines: [line(SQ.itemPepperoni, SQ.varPepperoniMedium, 1, [SQ.modOlives]), line(SQ.itemMargherita, SQ.varMargheritaMedium, 1)] },
   quotedAt: '2026-11-14T19:21:00Z', proposedAt: '2026-11-14T19:22:00Z', updatedAt: '2026-11-14T19:25:00Z',
-  contactName: 'Jordan', recipient: '+15555550124', consentAt: '2026-11-14T19:21:40Z', pickupAt: '2026-11-14T19:45:00Z',
+  contactName: 'Jordan', consent: { recipient: '+15555550124', consentAt: '2026-11-14T19:21:40Z' }, pickupAt: '2026-11-14T19:45:00Z',
   square: { checkout: true, paymentId: 'SQ_PAYMENT_DEMO_02' },
 });
 
@@ -122,7 +125,7 @@ export const orderPaymentPending = order({
   n: '03', status: 'PAYMENT_PENDING',
   cart: { lines: [line(SQ.itemMargherita, SQ.varMargheritaSmall, 2, [SQ.modExtraCheese])] },
   quotedAt: '2026-11-14T19:41:30Z', proposedAt: '2026-11-14T19:42:30Z', updatedAt: '2026-11-14T19:43:36Z',
-  contactName: 'Priya', recipient: '+15555550125', consentAt: '2026-11-14T19:42:10Z', pickupAt: '2026-11-14T20:15:00Z',
+  contactName: 'Priya', consent: { recipient: '+15555550125', consentAt: '2026-11-14T19:42:10Z' }, pickupAt: '2026-11-14T20:15:00Z',
   square: { checkout: true },
 });
 
@@ -131,21 +134,21 @@ export const orderAwaitingApproval = order({
   n: '04', status: 'AWAITING_OWNER_APPROVAL',
   cart: { lines: [line(SQ.itemPepperoni, SQ.varPepperoniLarge, 1, [SQ.modExtraCheese]), line(SQ.itemPepperoni, SQ.varPepperoniLarge, 1)] },
   quotedAt: '2026-11-14T20:24:00Z', proposedAt: '2026-11-14T20:25:00Z', updatedAt: '2026-11-14T20:25:00Z',
-  contactName: 'Sam', recipient: '+15555550126', consentAt: '2026-11-14T20:24:40Z', pickupAt: '2026-11-14T21:00:00Z',
+  contactName: 'Sam', consent: { recipient: '+15555550126', consentAt: '2026-11-14T20:24:40Z' }, pickupAt: '2026-11-14T21:00:00Z',
 });
 
 export const orderRejected = order({
   n: '05', status: 'REJECTED',
   cart: { lines: [line(SQ.itemMargherita, SQ.varMargheritaMedium, 1)] },
   quotedAt: '2026-11-14T19:51:00Z', proposedAt: '2026-11-14T19:52:00Z', updatedAt: '2026-11-14T19:53:00Z',
-  contactName: 'Lee', recipient: '+15555550127', consentAt: '2026-11-14T19:51:40Z', pickupAt: '2026-11-14T20:30:00Z',
+  contactName: 'Lee', consent: { recipient: '+15555550127', consentAt: '2026-11-14T19:51:40Z' }, pickupAt: '2026-11-14T20:30:00Z',
 });
 
 export const orderApprovalExpired = order({
   n: '06', status: 'APPROVAL_EXPIRED',
   cart: { lines: [line(SQ.itemMargherita, SQ.varMargheritaLarge, 1)] },
   quotedAt: '2026-11-14T19:12:00Z', proposedAt: '2026-11-14T19:13:00Z', updatedAt: addMs('2026-11-14T19:13:00Z', APPROVAL_EXPIRY_MS),
-  contactName: 'Alex', recipient: '+15555550128', consentAt: '2026-11-14T19:12:40Z', pickupAt: '2026-11-14T19:45:00Z',
+  contactName: 'Alex', consent: { recipient: '+15555550128', consentAt: '2026-11-14T19:12:40Z' }, pickupAt: '2026-11-14T19:45:00Z',
 });
 
 /** The declined sandbox card (AC-12). */
@@ -153,17 +156,21 @@ export const orderPaymentFailed = order({
   n: '07', status: 'PAYMENT_FAILED',
   cart: { lines: [line(SQ.itemPepperoni, SQ.varPepperoniSmall, 1, [SQ.modMushrooms, SQ.modOlives])] },
   quotedAt: '2026-11-14T20:01:00Z', proposedAt: '2026-11-14T20:02:00Z', updatedAt: '2026-11-14T20:05:00Z',
-  contactName: 'Casey', recipient: '+15555550129', consentAt: '2026-11-14T20:01:40Z', pickupAt: '2026-11-14T20:30:00Z',
+  contactName: 'Casey', consent: { recipient: '+15555550129', consentAt: '2026-11-14T20:01:40Z' }, pickupAt: '2026-11-14T20:30:00Z',
   square: { checkout: true },
 });
 
-/** A caller who declined messages can still place an order through the dashboard QR code. */
-export const orderQrOnly: Order = {
-  ...orderAwaitingApproval,
-  id: 'ord_demo_qr',
-  approvalId: 'apv_demo_qr',
-  contact: { name: 'Sam', messageConsent: false },
-};
+/**
+ * A caller who declined messages (SPEC 2.9 "Customer who declines messages"): no recipient, and the
+ * approval channel is qr_only, so the checkout link is shown as a QR code at the counter. It has its own
+ * call, cart and quote, because the orders table allows one order per (businessId, cartHash, callId).
+ */
+export const orderQrOnly = order({
+  n: 'qr', status: 'AWAITING_OWNER_APPROVAL',
+  cart: { lines: [line(SQ.itemMargherita, SQ.varMargheritaMedium, 1, [SQ.modOlives]), line(SQ.itemPepperoni, SQ.varPepperoniSmall, 1)] },
+  quotedAt: '2026-11-14T20:26:30Z', proposedAt: '2026-11-14T20:27:30Z', updatedAt: '2026-11-14T20:27:30Z',
+  contactName: 'Robin', pickupAt: '2026-11-14T21:15:00Z',
+});
 
 export const orders: Order[] = [
   orderQrOnly,

@@ -146,13 +146,14 @@ function dispatch(d: DispatchInput): MessageDispatch {
   return row;
 }
 
+// Only whatsapp_sandbox can reach DELIVERED; these are all surge, so SENT is their last state.
 export const messageDispatches: MessageDispatch[] = [
   dispatch({ id: 'msg_demo_01', executionId: 'exe_demo_01_1', subjectId: 'ord_demo_01', channel: 'surge', recipient: '+15555550123',
-    template: 'checkout_link', status: 'DELIVERED', providerMessageId: 'surge_demo_01', deliveredAfterMs: 4000 }),
+    template: 'checkout_link', status: 'SENT', providerMessageId: 'surge_demo_01' }),
   dispatch({ id: 'msg_demo_03', executionId: 'exe_demo_03_1', subjectId: 'ord_demo_03', channel: 'surge', recipient: '+15555550125',
     template: 'checkout_link', status: 'SENT', providerMessageId: 'surge_demo_03' }),
   dispatch({ id: 'msg_demo_07', executionId: 'exe_demo_07_1', subjectId: 'ord_demo_07', channel: 'surge', recipient: '+15555550129',
-    template: 'checkout_link', status: 'DELIVERED', providerMessageId: 'surge_demo_07', deliveredAfterMs: 3000 }),
+    template: 'checkout_link', status: 'SENT', providerMessageId: 'surge_demo_07' }),
   dispatch({ id: 'msg_demo_b02', executionId: 'exe_demo_b02_1', subjectId: 'bkg_demo_b02', channel: 'surge', recipient: '+15555550141',
     template: 'booking_confirmed', status: 'SENT', providerMessageId: 'surge_demo_b02' }),
 ];
