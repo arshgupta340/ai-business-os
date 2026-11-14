@@ -1,6 +1,8 @@
 // The qr_only default-path cases whose output is pinned in qr-only-origin-main.json. That file was
 // generated on 2026-11-14 by running origin/main's (5b1c821) voice prompt and session builder on these
-// exact inputs, so the comparison is with main's output, not with this branch's code.
+// exact inputs, so the comparison is with main's output, not with this branch's code. On 2026-11-14 it was
+// regenerated from the interruption gate's output: the only differences from main's file are the session's
+// audio.input turn_detection and noise_reduction and three new prompt lines (voice/NOTES.md).
 // Fixtures are passed in so the same cases run against main's copy and this branch.
 type Fx = {
   barberFacts: { kind: string; key: string; value: unknown; version: number; status: string }[];

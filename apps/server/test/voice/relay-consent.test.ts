@@ -101,8 +101,12 @@ async function setup(o: Opts = {}) {
   const propose = async (contact: Json = { name: 'Customer', messageConsent: false }, c: Cart = cart, quoteId?: string) =>
     invoke('propose_order', { cart: c, quoteId: quoteId ?? 'qte_consent_1', contact, fulfillment: { type: 'pickup', pickupAt: '2026-11-14T21:00:00Z' } });
   const hangUp = async () => { phone.emit({ event: 'stop' }); await relay.done; };
-  /** Every way out of the window leaves automatic replies on, or the call closed. */
-  const restoredOrClosed = () => !model.isOpen || windowUpdates().at(-1)?.session.audio.input.turn_detection.create_response === true;
+  /**
+   * Every way out of the window restores the call's normal settings, or the call closed. Since the
+   * interruption gate (NOTES.md), the call's normal turn detection has create_response off and the relay
+   * asks for every reply, so "restored" is the window's interrupt_response and transcription undone.
+   */
+  const restoredOrClosed = () => !model.isOpen || (windowUpdates().at(-1)?.session.audio.input.turn_detection.interrupt_response === false && windowUpdates().at(-1)?.session.audio.input.transcription === null);
   const s = { relay, phone, model, calls, events, lines, contexts, reads, cart, cartB, invoke, systemLines, windowUpdates, ack, quoteAndOpen, playOffer, callerSays, press, propose, quoteIdOf, hangUp, restoredOrClosed, createOrderProposal, createBookingProposal };
   return s;
 }
@@ -297,7 +301,8 @@ describe('text step: the answer', () => {
     s.callerSays('item_answer', TRANSCRIPT);
     expect(lastLine(s)).toContain('the caller agreed to one text message');
     expect(lastLine(s)).toContain('ending in 3 7 1 6');
-    expect(s.windowUpdates().at(-1)?.session.audio.input).toMatchObject({ turn_detection: { create_response: true }, transcription: null });
+    // Restored to the call's normal settings (create_response stays off on the whole call since the gate).
+    expect(s.windowUpdates().at(-1)?.session.audio.input).toMatchObject({ turn_detection: { create_response: false, interrupt_response: false }, transcription: null });
     expect((await s.propose()).ok).toBe(true);
     const input = s.createOrderProposal.mock.calls[0]?.[0];
     expect(input).toMatchObject({ messageChannel: 'surge', contact: { messageRecipient: NUMBER, messageConsent: true } });

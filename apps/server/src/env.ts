@@ -60,6 +60,16 @@ const EnvSchema = z.object({
   GOOGLE_SERVICE_ACCOUNT_JSON: z.string().min(1).optional(),
   GOOGLE_CALENDAR_ID: z.string().min(1).optional(),
   GOOGLE_SHEET_ID: z.string().min(1).optional(),
+  // Phone voice tuning (apps/server/src/voice/NOTES.md "Tune on a real call"). Unset: the defaults in
+  // voice/constants.ts DEFAULT_VOICE_TUNING. A change needs a restart, not a code deploy.
+  VOICE_VAD_THRESHOLD: z.coerce.number().min(0).max(1).optional(),
+  VOICE_VAD_PREFIX_PADDING_MS: z.coerce.number().int().min(0).max(1000).optional(),
+  VOICE_VAD_SILENCE_MS: z.coerce.number().int().min(200).max(2000).optional(),
+  VOICE_NOISE_REDUCTION: z.enum(['near_field', 'far_field', 'off']).optional(),
+  VOICE_BARGE_IN_MIN_MS: z.coerce.number().int().min(0).max(2000).optional(),
+  VOICE_GREETING_BARGE_IN_MIN_MS: z.coerce.number().int().min(0).max(3000).optional(),
+  VOICE_SHORT_REPLY_GRACE_MS: z.coerce.number().int().min(0).max(3000).optional(),
+  VOICE_BARGE_IN_TAIL_MS: z.coerce.number().int().min(0).max(150).optional(),
   PORT: z.coerce.number().int().positive().default(4000),
   PUBLIC_SERVER_URL: z.url().optional(),
   // AC-19: this build is sandbox only. Any other value stops the server.
