@@ -30,7 +30,7 @@ describe('publish, pause and rollback on the database', () => {
   afterAll(async () => { await w?.close(); });
 
   const q = (sql: string, params: unknown[]) => w.t.db.query(sql, params).then((r) => r.rows as Record<string, unknown>[]);
-  const call = (url: string, payload?: unknown) => w.app.inject({ method: payload === undefined ? 'GET' : 'POST', url: `${url}?businessId=${PIZZA}`, headers: OWNER, ...(payload === undefined ? {} : { payload }) });
+  const call = (url: string, payload: Record<string, unknown>) => w.app.inject({ method: 'POST', url: `${url}?businessId=${PIZZA}`, headers: OWNER, payload });
 
   it('publish writes the version, the agent row and the phone pointer; pause and rollback too; a restart keeps them', async () => {
     const [before] = await q('select active_version_id from agents where id = $1', [AGENT]);
