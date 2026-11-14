@@ -38,7 +38,14 @@ const EnvSchema = z.object({
   TWILIO_ACCOUNT_SID: z.string().min(1).optional(),
   TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
   TWILIO_PHONE_NUMBER: z.string().regex(/^\+[1-9][0-9]{6,14}$/).optional(),
-  MESSAGE_CHANNEL: z.enum(['surge', 'android_gateway', 'whatsapp_sandbox', 'qr_only']).optional(),
+  MESSAGE_CHANNEL: z.enum(['surge', 'android_gateway', 'whatsapp_sandbox', 'qr_only', 'agentphone']).optional(),
+  // D-12: which provider answers calls. Twilio is the default, so an unset value changes nothing.
+  TELEPHONY_PROVIDER: z.enum(['twilio', 'agentphone']).default('twilio'),
+  // AgentPhone (D-12, docs/notes-agentphone.md). The webhook secret is the one POST /v1/webhooks returned last.
+  AGENTPHONE_API_KEY: z.string().min(1).optional(),
+  AGENTPHONE_WEBHOOK_SECRET: z.string().min(1).optional(),
+  AGENTPHONE_NUMBER_ID: z.string().min(1).optional(),
+  AGENTPHONE_PHONE_NUMBER: z.string().regex(/^\+[1-9][0-9]{6,14}$/).optional(),
   SURGE_API_KEY: z.string().min(1).optional(),
   SURGE_ACCOUNT_ID: z.string().min(1).optional(),
   ANDROID_GATEWAY_URL: z.url().optional(),

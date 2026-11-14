@@ -205,8 +205,17 @@ describe('extraction stores on Postgres', () => {
       const store = dbConflictStore(h.db);
       await store.insert(conflict('cfl_t1', 'item:one', 'fact_up_1'));
       await store.insert(conflict('cfl_t2', 'item:two', 'fact_up_2', { required: false }));
-      // One open conflict per business, kind and key (the table's unique index).
-      await expect(store.insert(conflict('cfl_t1_again', 'item:one', 'fact_up_1'))).rejects.toThrow();
+      // One open conflict per business, kind and key (the table's unique index). A second open one for
+      // the same key, as two extractions racing past findOpen would send, writes nothing and does not fail.
+      await store.insert(conflict('cfl_t1_again', 'item:one', 'fact_up_2'));
+      expect(await rows("select id, candidates->0->>'factId' as draft from fact_conflicts where business_id = 'biz_a' and kind = 'menu_item' and key = 'item:one'")).toEqual([{ id: 'cfl_t1', draft: 'fact_up_1' }]);
+      expect(await store.get('biz_a', 'cfl_t1_again')).toBeUndefined();
+      // The same key in another business is another conflict.
+      await store.insert({ ...conflict('cfl_t1_b', 'item:one', 'fact_b1'), businessId: 'biz_b' });
+      expect((await store.findOpen('biz_b', 'menu_item', 'item:one'))?.id).toBe('cfl_t1_b');
+      await store.resolve('biz_b', 'cfl_t1_b', { resolvedBy: 'usr_b', resolvedAt: NOW() });
+      // A repeated ID is still an error.
+      await expect(store.insert(conflict('cfl_t1', 'item:other', 'fact_up_1'))).rejects.toThrow();
       // The table's own check: at least two candidates.
       await expect(store.insert({ ...conflict('cfl_t_short', 'item:short', 'fact_up_1'), candidates: [{ sourceType: 'upload', value: 1 }] })).rejects.toThrow();
 
@@ -235,6 +244,30 @@ describe('extraction stores on Postgres', () => {
       await store.insert(conflict('cfl_t3', 'item:one', 'fact_up_1'));
       expect((await store.resolve('biz_a', 'cfl_t3', { resolvedBy: 'usr_a', resolvedAt: NOW(), resolvedFactId: 'fact_a1' }))?.resolvedFactId).toBe('fact_a1');
     });
+  });
+
+  it('facts and conflicts come back in the order they were saved, whatever their IDs and the builder clock say', async () => {
+    const files = dbFileStore(h.db);
+    const facts = dbUploadFactStore(h.db);
+    const conflicts = dbConflictStore(h.db);
+    const bytes = Buffer.from('%PDF-1.4 a file whose rows must keep their order');
+    await files.put(file('file_order', bytes), bytes);
+    // One builder timestamp for every row (its clock has whole seconds) and IDs that sort the other way round.
+    const at = '2026-11-14T10:00:00Z';
+    const ids = ['z', 'm', 'a', 'q', 'c', 'x', 'b'];
+    for (const id of ids) await facts.insertDraft(draft(`fact_order_${id}`, 'file_order', { kind: 'hours', key: `day_${id}`, createdAt: at, updatedAt: at }));
+    for (const id of ids) await conflicts.insert(conflict(`cfl_order_${id}`, `day_${id}`, `fact_order_${id}`, { kind: 'hours', required: false, createdAt: at }));
+    const factIds = ids.map((id) => `fact_order_${id}`);
+    const conflictIds = ids.map((id) => `cfl_order_${id}`);
+    expect((await facts.listByFile('biz_a', 'file_order')).map((f) => f.id)).toEqual(factIds);
+    expect((await conflicts.listByFactIds('biz_a', [...factIds].reverse())).map((c) => c.id)).toEqual(conflictIds);
+    expect((await conflicts.listOpen('biz_a')).map((c) => c.id).filter((id) => id.startsWith('cfl_order_'))).toEqual(conflictIds);
+    // A resolve does not move a conflict in its file's list.
+    await conflicts.resolve('biz_a', 'cfl_order_m', { resolvedBy: 'usr_a', resolvedAt: NOW() });
+    expect((await conflicts.listByFactIds('biz_a', factIds)).map((c) => c.id)).toEqual(conflictIds);
+    // The stored time is the database's, not the builder's.
+    const [row] = await rows("select extract(epoch from (clock_timestamp() - created_at))::float as age from business_facts where id = 'fact_order_z'");
+    expect(row!.age as number).toBeLessThan(60);
   });
 
   it('the catalog reader returns the variations of one business only', async () => {
