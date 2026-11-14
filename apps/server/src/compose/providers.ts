@@ -62,6 +62,28 @@ function googleAuth(json: string | undefined, scopes: string[]): JWT | undefined
   }
 }
 
+/** The Calendar scopes the service account is given: events and free/busy, nothing more. */
+export const CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/calendar.freebusy'] as const;
+
+type FreeBusyClient = { freebusy: { query(input: { requestBody: { timeMin: string; timeMax: string; items: { id: string }[] } }): Promise<{ data: unknown }> } };
+
+/**
+ * Review finding 5: the health probe is a free/busy read of the configured calendar for the next hour,
+ * an operation the scopes above allow (calendars.get needs a metadata scope the account is not given).
+ * Connected only when the answer has an entry for the calendar with no errors.
+ */
+export function calendarProbe(client: FreeBusyClient, calendarId: string, now: () => Date): HealthProbe {
+  return async () => {
+    try {
+      const start = now();
+      const res = await client.freebusy.query({ requestBody: { timeMin: start.toISOString(), timeMax: new Date(start.getTime() + 3_600_000).toISOString(), items: [{ id: calendarId }] } });
+      const entry = (res.data as { calendars?: Record<string, { errors?: unknown[] } | undefined> } | undefined)?.calendars?.[calendarId];
+      if (!entry || (Array.isArray(entry.errors) && entry.errors.length > 0)) return { ok: false, detail: 'calendar not readable by the service account' };
+      return { ok: true, detail: 'calendar free/busy readable' };
+    } catch { return { ok: false, detail: 'calendar not readable by the service account' }; }
+  };
+}
+
 export function buildProviders(env: Env, now: () => Date, overrides: Partial<Providers> = {}): Providers {
   const status = {} as Record<ProviderKey, ProviderStatus>;
   // Every probe is a read: list one payment, read calendar or sheet metadata, read the account or models.
@@ -91,17 +113,14 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   } else status.square = missing('SQUARE_ACCESS_TOKEN', 'SQUARE_LOCATION_ID');
 
   let calendarAdapter: CalendarAdapter | undefined;
-  const calendarAuth = googleAuth(env.GOOGLE_SERVICE_ACCOUNT_JSON, ['https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/calendar.freebusy']);
+  const calendarAuth = googleAuth(env.GOOGLE_SERVICE_ACCOUNT_JSON, [...CALENDAR_SCOPES]);
   if (!env.GOOGLE_SERVICE_ACCOUNT_JSON || !env.GOOGLE_CALENDAR_ID) status.google_calendar = missing('GOOGLE_SERVICE_ACCOUNT_JSON', 'GOOGLE_CALENDAR_ID');
   else if (!calendarAuth) status.google_calendar = invalid('GOOGLE_SERVICE_ACCOUNT_JSON');
   else {
     const client = calendar({ version: 'v3', auth: calendarAuth });
     calendarAdapter = createCalendarAdapter({ client, now });
     const calendarId = env.GOOGLE_CALENDAR_ID;
-    probes.google_calendar = async () => {
-      try { await client.calendars.get({ calendarId }); return fixed(true, 'calendar shared'); }
-      catch { return fixed(false, 'calendar not readable by the service account'); }
-    };
+    probes.google_calendar = calendarProbe(client as unknown as FreeBusyClient, calendarId, now);
     status.google_calendar = ok();
   }
 
