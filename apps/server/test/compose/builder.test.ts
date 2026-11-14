@@ -38,6 +38,22 @@ describe('builder stores on Postgres', () => {
     expect(await store.get('biz_a', 'agt_t1')).toMatchObject({ specRevision: 2, draftSpec: { goal: 'Answer more' }, state: 'draft' });
   });
 
+  // Review finding 6: the template column follows the draft, so the summary and call stage agree with it.
+  it('agents: an update that changes the template persists the template column', async () => {
+    const store = dbAgentDraftStore(h.db);
+    const spec = { id: 'agt_t2', businessId: 'biz_a', version: 1, template: 'restaurant_order_taker' as const, name: 'Pizza', channel: 'phone' as const, goal: 'Take orders',
+      knowledgeScopes: [], capabilities: ['business.facts.read' as const], writePolicy: 'owner_approval_each_action_bundle' as const,
+      escalation: 'explain_unsupported_or_offer_callback' as const, status: 'draft' as const, guardrailVersion: 'v1' as const };
+    await store.insert({ id: 'agt_t2', businessId: 'biz_a', name: 'Pizza', template: 'restaurant_order_taker', channel: 'phone', state: 'draft', draftSpec: spec, seeded: false, specRevision: 1, createdAt: NOW, updatedAt: NOW });
+    const a = (await store.get('biz_a', 'agt_t2'))!;
+    await store.update({ ...a, template: 'appointment_booker', draftSpec: { ...spec, template: 'appointment_booker' }, specRevision: 2 });
+    const read = (await store.get('biz_a', 'agt_t2'))!;
+    expect(read.template).toBe('appointment_booker');
+    expect(read.template).toBe((read.draftSpec as { template?: string }).template);
+    expect((await h.db.query('select template from agents where id = $1', ['agt_t2'])).rows[0]).toEqual({ template: 'appointment_booker' });
+    await expect(store.update({ ...read, businessId: 'biz_b' })).rejects.toThrow();
+  });
+
   it('draft facts from chat are stored as drafts and listed by session', async () => {
     const store = dbDraftFactStore(h.db);
     await store.insertDraft({ id: 'fact_chat_1', businessId: 'biz_a', kind: 'policy', key: 'pickup_window', value: { minutes: 20 }, sourceType: 'owner_chat',

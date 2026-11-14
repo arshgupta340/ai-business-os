@@ -237,7 +237,8 @@ describe('core REST with migrated Postgres', () => {
   it('reports integration configuration and sandbox through the contract', async () => {
     const res = await app.inject({ url: '/api/integrations/health?businessId=biz_a', headers });
     const health = ENDPOINTS.getIntegrationsHealth.response.parse(res.json());
-    expect(health.square).toMatchObject({ state: 'disconnected', detail: 'unconfigured', environment: 'sandbox' });
+    expect(health.square).toMatchObject({ state: 'disconnected', environment: 'sandbox' });
+    expect(health.square.detail).toMatch(/missing|unconfigured/);
     expect(res.json().squareEnvironment).toBe('sandbox');
     expect(Object.values(health).every((provider) => provider.lastCheckedAt.endsWith('Z'))).toBe(true);
   });

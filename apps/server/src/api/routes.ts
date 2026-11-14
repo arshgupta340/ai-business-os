@@ -11,10 +11,11 @@ import { AppError } from '../errors';
 import { mapRow } from './rows';
 import { setLiveAgent } from './live-agent';
 import { unavailableCatalog, type CatalogPort, type EnginePorts } from './ports';
+import { createHealthMonitor, type HealthMonitor } from '../compose/health';
 export { setLiveAgent } from './live-agent';
 
-export type ProviderStatusMap = Record<'square' | 'twilio' | 'openai' | 'google_calendar' | 'google_sheets' | 'message_channel', { configured: boolean; detail: string }>;
-export interface ApiDependencies { db: Db; ports: EnginePorts; env: Env; catalog?: CatalogPort; providerStatus?: ProviderStatusMap }
+export type ProviderStatusMap = Record<'square' | 'twilio' | 'openai' | 'google_calendar' | 'google_sheets' | 'message_channel', { configured: boolean; detail: string; noProviderNeeded?: true }>;
+export interface ApiDependencies { db: Db; ports: EnginePorts; env: Env; catalog?: CatalogPort; providerStatus?: ProviderStatusMap; health?: HealthMonitor }
 export const CORE_ENDPOINTS = Object.entries(ENDPOINTS).filter(([name, e]) =>
   e.owner === 'arsh' && e.tier === 'MUST' && name !== 'simCall') as [EndpointName, EndpointDefinition][];
 
@@ -137,25 +138,30 @@ async function catalog(db: Db, businessId: string) {
 /**
  * API 3.11. Reports whether each provider is configured and its client was built at startup
  * (compose/providers.ts). It makes no live provider call, so `connected` means "configured and
- * usable", not "reachable right now"; `refresh=1` is accepted and changes nothing yet.
+ * usable" only after a read-only probe confirmed access (compose/health.ts); `refresh=1` runs the probes.
  */
-function health(env: Env, status?: ProviderStatusMap) {
-  const lastCheckedAt = new Date().toISOString();
+async function health(env: Env, monitor: HealthMonitor, refresh: boolean) {
+  const report = await monitor.read({ refresh });
+  const entry = (k: keyof ProviderStatusMap) => ({ state: report[k].state, detail: report[k].detail, lastCheckedAt: report[k].lastCheckedAt });
+  return {
+    square: { ...entry('square'), environment: 'sandbox' },
+    twilio: entry('twilio'), openai: entry('openai'), google_calendar: entry('google_calendar'), google_sheets: entry('google_sheets'),
+    message_channel: { ...entry('message_channel'), ...(env.MESSAGE_CHANNEL ? { channel: env.MESSAGE_CHANNEL } : {}) },
+  };
+}
+
+/** Configuration from the environment alone, for an app built without the composed provider status. */
+function envStatus(env: Env): ProviderStatusMap {
   const fromEnv: ProviderStatusMap = {
     square: { configured: Boolean(env.SQUARE_ACCESS_TOKEN && env.SQUARE_LOCATION_ID), detail: '' },
     twilio: { configured: Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.TWILIO_PHONE_NUMBER), detail: '' },
     openai: { configured: Boolean(env.OPENAI_API_KEY), detail: '' },
     google_calendar: { configured: Boolean(env.GOOGLE_SERVICE_ACCOUNT_JSON && env.GOOGLE_CALENDAR_ID), detail: '' },
     google_sheets: { configured: Boolean(env.GOOGLE_SERVICE_ACCOUNT_JSON && env.GOOGLE_SHEET_ID), detail: '' },
-    message_channel: { configured: env.MESSAGE_CHANNEL === 'qr_only', detail: '' },
+    message_channel: env.MESSAGE_CHANNEL === 'qr_only' ? { configured: true, detail: 'qr_only sends nothing', noProviderNeeded: true } : { configured: false, detail: 'not checked' },
   };
-  const s = status ?? fromEnv;
-  const entry = (k: keyof ProviderStatusMap) => ({ state: s[k].configured ? 'connected' : 'disconnected', detail: s[k].configured ? 'ok' : 'unconfigured', lastCheckedAt });
-  return {
-    square: { ...entry('square'), environment: 'sandbox' },
-    twilio: entry('twilio'), openai: entry('openai'), google_calendar: entry('google_calendar'), google_sheets: entry('google_sheets'),
-    message_channel: { ...entry('message_channel'), ...(env.MESSAGE_CHANNEL ? { channel: env.MESSAGE_CHANNEL } : {}) },
-  };
+  for (const s of Object.values(fromEnv)) if (!s.detail) s.detail = s.configured ? 'configured' : 'unconfigured';
+  return fromEnv;
 }
 
 /**
@@ -164,17 +170,36 @@ function health(env: Env, status?: ProviderStatusMap) {
  * `orderId` or `bookingId` and requires `callId` for orders. Fill those from the subject at read time,
  * so the audit list stays valid without rewriting append-only rows.
  */
-async function normalizeActivity(db: Db, items: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
-  const out: Record<string, unknown>[] = [];
-  for (const item of items) {
+export async function normalizeActivity(db: Db, items: Record<string, unknown>[]): Promise<Record<string, unknown>[]> {
+  const kindOf = (item: Record<string, unknown>) => {
     const payload = item.payload as Record<string, unknown> | undefined;
-    const kind = item.type === 'order.status_changed' ? 'orders' : item.type === 'booking.status_changed' ? 'bookings' : undefined;
-    if (!kind || !payload || typeof payload.subjectId !== 'string' || payload.orderId !== undefined || payload.bookingId !== undefined) { out.push(item); continue; }
-    const subject = (await db.query(`select call_id from public.${kind} where id = $1 and business_id = $2`, [payload.subjectId, item.businessId])).rows[0] as { call_id?: string | null } | undefined;
-    const { subjectId, ...rest } = payload;
-    out.push({ ...item, payload: { ...rest, ...(kind === 'orders' ? { orderId: subjectId } : { bookingId: subjectId }), ...(subject?.call_id ? { callId: subject.call_id } : {}) } });
+    const kind = item.type === 'order.status_changed' ? 'orders' as const : item.type === 'booking.status_changed' ? 'bookings' as const : undefined;
+    if (!kind || !payload || typeof payload.subjectId !== 'string' || payload.orderId !== undefined || payload.bookingId !== undefined) return undefined;
+    return { kind, payload, subjectId: payload.subjectId, businessId: String(item.businessId) };
+  };
+  // One batched lookup per subject table (review finding 9), keyed by business and subject, so an
+  // event never borrows a call from another business's row.
+  const wanted = { orders: new Map<string, [string, string]>(), bookings: new Map<string, [string, string]>() };
+  for (const item of items) {
+    const k = kindOf(item);
+    if (k) wanted[k.kind].set(`${k.businessId}\u0000${k.subjectId}`, [k.businessId, k.subjectId]);
   }
-  return out;
+  const calls = { orders: new Map<string, string>(), bookings: new Map<string, string>() };
+  for (const kind of ['orders', 'bookings'] as const) {
+    const pairs = [...wanted[kind].values()];
+    if (pairs.length === 0) continue;
+    const rows = (await db.query(`select s.business_id, s.id, s.call_id from public.${kind} s
+      join unnest($1::text[], $2::text[]) as w(business_id, id) on w.business_id = s.business_id and w.id = s.id`,
+    [pairs.map((p) => p[0]), pairs.map((p) => p[1])])).rows as { business_id: string; id: string; call_id: string | null }[];
+    for (const r of rows) if (r.call_id) calls[kind].set(`${r.business_id}\u0000${r.id}`, r.call_id);
+  }
+  return items.map((item) => {
+    const k = kindOf(item);
+    if (!k) return item;
+    const { subjectId, ...rest } = k.payload;
+    const callId = calls[k.kind].get(`${k.businessId}\u0000${k.subjectId}`);
+    return { ...item, payload: { ...rest, ...(k.kind === 'orders' ? { orderId: subjectId } : { bookingId: subjectId }), ...(callId ? { callId } : {}) } };
+  });
 }
 
 type Replay = { fingerprint: string; expiresAt: number; response: Promise<unknown> };
@@ -182,6 +207,7 @@ type Replay = { fingerprint: string; expiresAt: number; response: Promise<unknow
 export async function apiRoutes(app: FastifyInstance, deps: ApiDependencies): Promise<void> {
   const { db, ports, env } = deps;
   const replays = new Map<string, Replay>();
+  const healthMonitor = deps.health ?? createHealthMonitor({ status: deps.providerStatus ?? envStatus(env), probes: {}, now: () => new Date() });
   async function execute(name: EndpointName, request: FastifyRequest, params: Record<string, unknown>, query: Record<string, unknown>, body: unknown): Promise<unknown> {
     const ownerUserId = request.ownerUserId;
     const businessId = request.businessId ?? '';
@@ -257,7 +283,7 @@ export async function apiRoutes(app: FastifyInstance, deps: ApiDependencies): Pr
         const ready = typeof order.checkoutUrl === 'string' && typeof order.squarePaymentLinkId === 'string' && typeof order.squareOrderId === 'string';
         return { orderId: id, ready, environment: 'sandbox', ...(ready ? { checkoutUrl: order.checkoutUrl, qrText: order.checkoutUrl, squarePaymentLinkId: order.squarePaymentLinkId } : {}), ...(message ? { message } : {}) };
       }
-      case 'getIntegrationsHealth': return health(env, deps.providerStatus);
+      case 'getIntegrationsHealth': return health(env, healthMonitor, query.refresh === '1');
       case 'getLiveAgent': {
         if (!env.TWILIO_PHONE_NUMBER) throw new AppError('INTEGRATION_UNAVAILABLE', 'Phone number is not configured.');
         const rows = await db.query(`select l.* from public.live_agent l join public.businesses b on b.id = l.business_id

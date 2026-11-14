@@ -2,7 +2,7 @@
 // provider as not connected, refuses the features that need it, keeps the executor and webhook
 // seams closed, and gives the builder real auth only when tokens can be verified.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ENDPOINTS } from '@abos/contracts';
+import { ApiErrorSchema, ENDPOINTS } from '@abos/contracts';
 import { buildApp } from '../../src/app';
 import { parseEnv } from '../../src/env';
 import { createHarness, headers, verifier } from '../api/harness';
@@ -25,6 +25,12 @@ describe('composition without optional keys', () => {
       for (const url of ['/webhooks/square', '/webhooks/twilio/status']) {
         const res = await app.inject({ method: 'POST', url, payload: { event_id: 'forged' } });
         expect(res.statusCode).toBe(503);
+        // Review finding 7: a valid ApiError envelope whose correlationId matches the header.
+        const body = ApiErrorSchema.parse(res.json());
+        expect(body).toMatchObject({ code: 'INTEGRATION_UNAVAILABLE', retryable: true });
+        expect(body.correlationId).toBe(res.headers['x-correlation-id']);
+        const form = await app.inject({ method: 'POST', url, headers: { 'content-type': 'application/x-www-form-urlencoded' }, payload: 'a=b' });
+        expect(form.statusCode).toBe(503);
       }
       // Builder keeps its own fail-closed default when nothing can verify a token.
       const builder = await app.inject({ method: 'POST', url: '/api/builder/sessions?businessId=biz_a', headers, payload: {} });

@@ -7,7 +7,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { healthRoutes } from './api/health';
 import { apiRoutes } from './api/routes';
 import { registerSimCall } from './api/simcall/index';
-import { createAuthGuard } from './auth/verify';
+import { createAuthGuard, routeAuthPolicyOf, withAuthPolicy, type RouteAuthPolicy } from './auth/verify';
 import { builderPlugin } from './builder/index';
 import { composeServer, type ComposeOptions, type ComposedServer } from './compose/index';
 import type { Env } from './env';
@@ -22,6 +22,8 @@ declare module 'fastify' {
   interface FastifyInstance {
     /** The composed dependencies, for index.ts (jobs) and tests. */
     composed: ComposedServer;
+    /** Every route registered on this app, with its declared auth policy (tests inventory it). */
+    routeInventory(): { method: string; url: string; auth: RouteAuthPolicy | undefined }[];
   }
 }
 
@@ -32,6 +34,11 @@ export type BuildAppOptions = ComposeOptions & { logger?: boolean; webOrigin?: s
 
 export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({ logger: options.logger ?? false });
+  // The route options objects are kept by reference: a plugin's own onRoute hook sets config.auth later.
+  const registered: { method: string | string[]; url: string; config?: unknown }[] = [];
+  app.addHook('onRoute', (route) => { registered.push(route); });
+  app.decorate('routeInventory', () => registered.flatMap((r) => (Array.isArray(r.method) ? r.method : [r.method])
+    .map((method) => ({ method, url: r.url, auth: routeAuthPolicyOf(r.config) }))));
   const composed = composeServer(env, { log: app.log, ...options });
   app.decorate('composed', composed);
   app.addHook('onClose', async () => { await composed.stopJobs(); await composed.close(); });
@@ -94,9 +101,12 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
   app.addHook('preHandler', createAuthGuard(composed.db, composed.verifier));
 
   await app.register(healthRoutes, { env });
-  await app.register(apiRoutes, { db: composed.db, ports: composed.enginePorts, env, catalog: composed.catalogSync, providerStatus: composed.providers.status });
-  registerSimCall(app, { db: composed.db, calls: composed.calls, toolsetFor: composed.toolsetFor, model: composed.agentModel, now: composed.now, newId: composed.newId });
-  await app.register(builderPlugin, composed.builder);
+  await app.register(withAuthPolicy('owner', apiRoutes), { db: composed.db, ports: composed.enginePorts, env, catalog: composed.catalogSync, providerStatus: composed.providers.status, health: composed.health });
+  await app.register(withAuthPolicy('owner', async (scope) => {
+    registerSimCall(scope, { db: composed.db, calls: composed.calls, toolsetFor: composed.toolsetFor, model: composed.agentModel, now: composed.now, newId: composed.newId });
+  }));
+  // The builder authenticates its own routes through BuilderAuth (composed.builder.auth).
+  await app.register(withAuthPolicy('builder', builderPlugin), composed.builder);
 
   // Phone calls (B-15). Off, with a log line naming the missing settings, when a key is absent.
   // When it is off, the voice webhook answers 503 (Twilio retries later) and /ws/phone does not exist.
@@ -113,7 +123,7 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
   }
 
   // GET /api/telemetry (B-30). The global guard has already authenticated the owner.
-  await app.register(telemetryPlugin, composed.telemetry);
+  await app.register(withAuthPolicy('owner', telemetryPlugin), composed.telemetry);
 
   // Provider webhooks (B-13 seam). The default refuses them without reading the body.
   await app.register(composed.webhooksPlugin);

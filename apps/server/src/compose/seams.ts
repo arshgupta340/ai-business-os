@@ -8,6 +8,7 @@
 // To plug a piece in, pass a factory through `buildApp(env, { executor, webhooks })` or set the
 // default in `composeServer` (see the PLUG-IN comments in compose/index.ts).
 import type { FastifyPluginAsync } from 'fastify';
+import { AppError } from '../errors';
 import type { Db } from '../db/index';
 import type { Env } from '../env';
 import type { PolicyEngine } from '../policy/engine';
@@ -57,8 +58,11 @@ export type WebhooksFactory = (deps: SeamDeps) => FastifyPluginAsync;
 
 /** Not wired: refuse provider webhooks without reading them, so nothing unverified changes state. */
 export const notWiredWebhooks: WebhooksFactory = () => async (app) => {
-  const refuse = async (_request: unknown, reply: { code(n: number): { send(body: unknown): unknown } }) =>
-    reply.code(503).send({ code: 'INTEGRATION_UNAVAILABLE', message: 'Webhooks are not wired on this server.', retryable: true });
+  // Own parser scope: the body is never parsed, whatever its content type. The AppError goes through
+  // the app's error handler, so the answer is a full ApiError envelope with the request's correlation ID.
+  app.removeAllContentTypeParsers();
+  app.addContentTypeParser('*', (_request, _payload, done) => done(null, undefined));
+  const refuse = async () => { throw new AppError('INTEGRATION_UNAVAILABLE', 'Webhooks are not wired on this server.'); };
   app.post('/webhooks/square', refuse);
   app.post('/webhooks/twilio/status', refuse);
 };

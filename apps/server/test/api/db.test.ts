@@ -1,5 +1,6 @@
 import { rootCertificates } from 'node:tls';
 import { describe, expect, it, vi } from 'vitest';
+import pg from 'pg';
 import { createDb, createPool, supabaseRootCa, type DbPool } from '../../src/db/index';
 import { parseEnv } from '../../src/env';
 
@@ -68,6 +69,20 @@ describe('database session wrapper', () => {
       expect(ssl.ca.at(-1)).toBe(supabaseRootCa());
       expect(ssl.ca.at(-1)).toContain('BEGIN CERTIFICATE');
       expect(pool.options.connectionString).not.toContain('sslmode');
+    } finally { await pool.end(); }
+  });
+  // Review finding 1: pg reparses the connection string in each Client, and its ssl setting there
+  // overrides the pool's. Check the EFFECTIVE client parameters, not the pool options.
+  it.each(['ssl=0', 'ssl=1', 'ssl=true', 'ssl=false', 'sslmode=disable', 'sslmode=require', 'sslmode=no-verify', 'sslmode=verify-full',
+    'sslrootcert=/tmp/x.crt', 'SSL=0', 'ssl=0&sslmode=disable&uselibpqcompat=true'])('the effective client TLS stays pinned with %s in the URL', async (query) => {
+    const pool = createPool(parseEnv({ DATABASE_URL: `postgresql://test:dummy@localhost/db?${query}` }));
+    try {
+      const client = new pg.Client(pool.options) as unknown as { connectionParameters: { ssl: unknown } };
+      const ssl = client.connectionParameters.ssl as { rejectUnauthorized?: boolean; ca?: string[] };
+      expect(typeof ssl).toBe('object');
+      expect(ssl.rejectUnauthorized).toBe(true);
+      expect(ssl.ca?.at(-1)).toBe(supabaseRootCa());
+      expect(ssl.ca?.length).toBe(rootCertificates.length + 1);
     } finally { await pool.end(); }
   });
 });

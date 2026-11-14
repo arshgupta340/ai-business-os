@@ -12,10 +12,12 @@ import { createMessageAdapter, type MessageAdapter } from '../adapters/message/i
 import { createSheetsAdapter, type ReportingAdapter } from '../adapters/sheets/index';
 import { createSandboxSquareClient, createSquareAdapter, type SquareAdapter } from '../adapters/square/index';
 import type { Env } from '../env';
+import type { HealthProbe } from './health';
 import { createTwilioRequestValidator, createWsOpenAISocketFactory, type OpenAISocketFactory, type TwilioRequestValidator } from '../voice/plugin';
 
 export type ProviderKey = 'square' | 'twilio' | 'openai' | 'google_calendar' | 'google_sheets' | 'message_channel';
-export type ProviderStatus = { configured: boolean; detail: string };
+/** Configuration only. `noProviderNeeded` marks a setting that talks to no provider (qr_only), so no probe is needed. */
+export type ProviderStatus = { configured: boolean; detail: string; noProviderNeeded?: true };
 
 export interface Providers {
   square?: SquareAdapter | undefined;
@@ -32,8 +34,10 @@ export interface Providers {
   messageChannel: MessageChannelSetting;
   twilioValidator?: TwilioRequestValidator | undefined;
   openaiSocketFactory?: OpenAISocketFactory | undefined;
-  /** Why each provider is or is not available. Never holds a value from the environment. */
+  /** Why each provider is or is not configured. Never holds a value from the environment. */
   status: Record<ProviderKey, ProviderStatus>;
+  /** Bounded read-only access checks, run by integration health on refresh=1 (compose/health.ts). */
+  probes?: Partial<Record<ProviderKey, HealthProbe>> | undefined;
 }
 
 const ok = (detail = 'configured'): ProviderStatus => ({ configured: true, detail });
@@ -44,7 +48,9 @@ function googleAuth(json: string | undefined, scopes: string[]): JWT | undefined
   if (!json) return undefined;
   try {
     const parsed = JSON.parse(json) as { client_email?: unknown; private_key?: unknown };
-    if (typeof parsed.client_email !== 'string' || typeof parsed.private_key !== 'string') return undefined;
+    // Review finding 5: empty or malformed fields are not usable credentials.
+    if (typeof parsed.client_email !== 'string' || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(parsed.client_email.trim())) return undefined;
+    if (typeof parsed.private_key !== 'string' || !/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]+-----END [A-Z ]*PRIVATE KEY-----/.test(parsed.private_key)) return undefined;
     return new JWT({ email: parsed.client_email, key: parsed.private_key, scopes });
   } catch {
     return undefined;
@@ -53,6 +59,9 @@ function googleAuth(json: string | undefined, scopes: string[]): JWT | undefined
 
 export function buildProviders(env: Env, now: () => Date, overrides: Partial<Providers> = {}): Providers {
   const status = {} as Record<ProviderKey, ProviderStatus>;
+  // Every probe is a read: list one payment, read calendar or sheet metadata, read the account or models.
+  const probes: Partial<Record<ProviderKey, HealthProbe>> = {};
+  const fixed = (ok: boolean, detail: string) => (ok ? { ok: true as const, detail } : { ok: false as const, detail });
 
   // Square: sandbox only (AGENTS rule 4). env.ts already refuses any other SQUARE_ENVIRONMENT.
   let square: SquareAdapter | undefined;
@@ -61,6 +70,14 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
     const client = createSandboxSquareClient({ accessToken: env.SQUARE_ACCESS_TOKEN });
     square = createSquareAdapter({ client, locationId: env.SQUARE_LOCATION_ID, environment: env.SQUARE_ENVIRONMENT, now });
     squarePaymentStatus = async (paymentId) => (await client.payments.get({ paymentId })).payment?.status ?? undefined;
+    const locationId = env.SQUARE_LOCATION_ID;
+    probes.square = async () => {
+      try {
+        const page = await client.payments.list({ locationId, beginTime: new Date(now().getTime() - 60_000).toISOString(), sortOrder: 'DESC', limit: 1 });
+        for await (const _ of page) break;
+        return fixed(true, 'sandbox reachable');
+      } catch { return fixed(false, 'Square sandbox refused the read'); }
+    };
     status.square = ok('sandbox');
   } else status.square = missing('SQUARE_ACCESS_TOKEN', 'SQUARE_LOCATION_ID');
 
@@ -69,7 +86,13 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   if (!env.GOOGLE_SERVICE_ACCOUNT_JSON || !env.GOOGLE_CALENDAR_ID) status.google_calendar = missing('GOOGLE_SERVICE_ACCOUNT_JSON', 'GOOGLE_CALENDAR_ID');
   else if (!calendarAuth) status.google_calendar = invalid('GOOGLE_SERVICE_ACCOUNT_JSON');
   else {
-    calendarAdapter = createCalendarAdapter({ client: calendar({ version: 'v3', auth: calendarAuth }), now });
+    const client = calendar({ version: 'v3', auth: calendarAuth });
+    calendarAdapter = createCalendarAdapter({ client, now });
+    const calendarId = env.GOOGLE_CALENDAR_ID;
+    probes.google_calendar = async () => {
+      try { await client.calendars.get({ calendarId }); return fixed(true, 'calendar shared'); }
+      catch { return fixed(false, 'calendar not readable by the service account'); }
+    };
     status.google_calendar = ok();
   }
 
@@ -78,7 +101,13 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   if (!env.GOOGLE_SERVICE_ACCOUNT_JSON || !env.GOOGLE_SHEET_ID) status.google_sheets = missing('GOOGLE_SERVICE_ACCOUNT_JSON', 'GOOGLE_SHEET_ID');
   else if (!sheetsAuth) status.google_sheets = invalid('GOOGLE_SERVICE_ACCOUNT_JSON');
   else {
-    sheetsAdapter = createSheetsAdapter({ client: sheets({ version: 'v4', auth: sheetsAuth }) });
+    const client = sheets({ version: 'v4', auth: sheetsAuth });
+    sheetsAdapter = createSheetsAdapter({ client });
+    const spreadsheetId = env.GOOGLE_SHEET_ID;
+    probes.google_sheets = async () => {
+      try { await client.spreadsheets.get({ spreadsheetId, fields: 'spreadsheetId' }); return fixed(true, 'sheet shared'); }
+      catch { return fixed(false, 'sheet not readable by the service account'); }
+    };
     status.google_sheets = ok();
   }
 
@@ -95,6 +124,7 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   const absent = channelKeys[messageChannel].filter(([, v]) => !v).map(([k]) => k);
   if (!env.MESSAGE_CHANNEL) status.message_channel = missing('MESSAGE_CHANNEL');
   else if (absent.length > 0) status.message_channel = missing(...absent);
+  else if (messageChannel === 'qr_only') status.message_channel = { configured: true, detail: 'qr_only sends nothing', noProviderNeeded: true };
   else {
     message = createMessageAdapter({
       channel: messageChannel, fetch: (url, init) => fetch(url, init),
@@ -107,13 +137,31 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
 
   const twilioValidator = env.TWILIO_AUTH_TOKEN ? createTwilioRequestValidator(env.TWILIO_AUTH_TOKEN) : undefined;
   status.twilio = env.TWILIO_AUTH_TOKEN && env.TWILIO_PHONE_NUMBER && env.PUBLIC_SERVER_URL ? ok() : missing('TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER', 'PUBLIC_SERVER_URL');
+  if (status.twilio.configured && env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN) {
+    const sid = env.TWILIO_ACCOUNT_SID; const token = env.TWILIO_AUTH_TOKEN;
+    probes.twilio = async () => {
+      try {
+        const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(sid)}.json`, { method: 'GET', headers: { Authorization: `Basic ${Buffer.from(`${sid}:${token}`).toString('base64')}` }, signal: AbortSignal.timeout(5000) });
+        return fixed(res.ok, res.ok ? 'account readable' : 'Twilio refused the account read');
+      } catch { return fixed(false, 'Twilio unreachable'); }
+    };
+  }
 
   const openaiSocketFactory = env.OPENAI_API_KEY ? createWsOpenAISocketFactory({ apiKey: env.OPENAI_API_KEY }) : undefined;
   status.openai = env.OPENAI_API_KEY ? ok() : missing('OPENAI_API_KEY');
+  if (env.OPENAI_API_KEY) {
+    const key = env.OPENAI_API_KEY;
+    probes.openai = async () => {
+      try {
+        const res = await fetch('https://api.openai.com/v1/models', { method: 'GET', headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(5000) });
+        return fixed(res.ok, res.ok ? 'models readable' : 'OpenAI refused the key');
+      } catch { return fixed(false, 'OpenAI unreachable'); }
+    };
+  }
 
   return {
     square, squareLocationId: env.SQUARE_LOCATION_ID, squarePaymentStatus, calendar: calendarAdapter, calendarId: env.GOOGLE_CALENDAR_ID, sheets: sheetsAdapter, sheetId: env.GOOGLE_SHEET_ID,
-    message, messageChannel, twilioValidator, openaiSocketFactory, status,
+    message, messageChannel, twilioValidator, openaiSocketFactory, status, probes,
     ...overrides,
   };
 }

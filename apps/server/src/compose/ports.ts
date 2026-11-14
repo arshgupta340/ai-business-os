@@ -3,7 +3,7 @@
 // performs an external write: quotes and availability are provider reads, and proposals only
 // store a subject and open an approval request.
 import {
-  AgentSpecSchema, HoursKeySchema, OrderStatusSchema, HoursValueSchema, ReadableFactKindSchema, ServiceOfferingSchema, ToolFailureReasonSchema,
+  SLOT_CONFLICT_MAX_ALTERNATIVES, AgentSpecSchema, HoursKeySchema, OrderStatusSchema, HoursValueSchema, ReadableFactKindSchema, ServiceOfferingSchema, ToolFailureReasonSchema,
   type AvailabilitySlot, type CallEndReason, type CallStage, type CallStatus, type CatalogItem, type HoursKey, type HoursValue,
   type JsonValue, type ServiceOffering, type ToolFailureReason, type ActionExecution, type ActivityEvent,
 } from '@abos/contracts';
@@ -16,7 +16,7 @@ import { PolicyError } from '../policy/types';
 import type { AvailabilityPort, CatalogPort, FactsPort, FactsSnapshot, OrderStatusPort, ProposalPort, QuotePort } from '../tools/real/types';
 import type { CallsPort, LiveAgentPort, LiveAgentResolution, VoiceEventsPort } from '../voice/types';
 import { initialStage } from '../voice/relay';
-import { weekdayOf } from '../adapters/calendar/slots';
+import { computeSlots, dayWindow, weekdayOf } from '../adapters/calendar/slots';
 import type { Providers } from './providers';
 
 type Row = Record<string, unknown>;
@@ -78,8 +78,10 @@ export function dbFactsPort(db: Db): FactsPort {
 
 type BookingContext = { service: ServiceOffering; timezone: string; hours: Partial<Record<HoursKey, HoursValue>>; minNoticeMinutes: number; calendarId: string };
 
-async function bookingContext(facts: FactsPort, businessId: string, serviceId: string, calendarId: string | undefined, snapshot?: FactsSnapshot): Promise<BookingContext | null> {
-  const s = snapshot ?? await facts.readVerified({ businessId });
+/** The call's pinned facts. Booking ports read service, hours, notice and timezone only from here (AC-16). */
+export type PinnedFacts = (businessId: string) => Promise<FactsSnapshot>;
+
+function bookingContext(s: FactsSnapshot, businessId: string, serviceId: string, calendarId: string | undefined): BookingContext | null {
   const service = s.facts.filter((f) => f.kind === 'service').map((f) => ServiceOfferingSchema.safeParse(f.value)).flatMap((p) => p.success ? [p.data] : [])
     .find((x) => x.id === serviceId && x.businessId === businessId);
   if (!service) return null;
@@ -99,15 +101,44 @@ async function bookingContext(facts: FactsPort, businessId: string, serviceId: s
 function localDate(iso: string, timezone: string): string {
   return new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(iso));
 }
+function localTime(ms: number, timezone: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: timezone, hourCycle: 'h23', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date(ms));
+  return `${parts.find((p) => p.type === 'hour')?.value ?? '00'}:${parts.find((p) => p.type === 'minute')?.value ?? '00'}`;
+}
 
-export function calendarAvailabilityPort(providers: Providers): AvailabilityPort {
+/**
+ * The exact-slot recheck (FLOWS C5, review finding 3). First the local rules from the pinned facts: the
+ * start is on the grid, inside the hours, past the notice, and the whole service fits. Then free/busy
+ * for exactly that occupied interval (service plus buffer): the adapter is asked for one slot with the
+ * hours of that day narrowed to the requested service window, so only the requested start can come back.
+ */
+export async function slotIsFree(providers: Providers, ctx: BookingContext, startMs: number, now: Date): Promise<'free' | 'taken' | 'invalid' | 'unavailable'> {
+  if (!providers.calendar) return 'unavailable';
+  const date = localDate(new Date(startMs).toISOString(), ctx.timezone);
+  const query = { calendarId: ctx.calendarId, timezone: ctx.timezone, serviceId: ctx.service.id, date, hours: ctx.hours,
+    serviceDurationMinutes: ctx.service.durationMinutes, bufferMinutes: ctx.service.bufferMinutes ?? 0, minNoticeMinutes: ctx.minNoticeMinutes, maxSlots: 1 };
+  try {
+    // Local rules, with no provider call: everything before the requested start counts as busy.
+    const dayStart = Date.parse(dayWindow(date, ctx.timezone).startUtc);
+    const first = computeSlots(query, startMs > dayStart ? [{ start: new Date(dayStart).toISOString(), end: new Date(startMs).toISOString() }] : [], now)[0];
+    if (!first || Date.parse(first.startUtc) !== startMs) return 'invalid';
+  } catch { return 'invalid'; }
+  const end = startMs + ctx.service.durationMinutes * 60_000;
+  const narrowed = { ...query, hours: { [weekdayOf(date)]: { open: localTime(startMs, ctx.timezone), close: localTime(end, ctx.timezone) } } };
+  const r = await providers.calendar.getAvailability(narrowed);
+  if (!r.ok) return 'unavailable';
+  return r.slots.some((s) => Date.parse(s.startUtc) === startMs) ? 'free' : 'taken';
+}
+
+export function calendarAvailabilityPort(providers: Providers, pinned: PinnedFacts): AvailabilityPort {
   return {
-    // The toolset passes the call's pinned service, that date's pinned hours and the time zone, so this
-    // never reads facts again. Minimum notice is re-checked by the proposal port (bookingContext).
-    async freeSlots({ businessId: _businessId, service, date, hours, timezone, maxSlots }) {
+    // The toolset passes the pinned service, that date's pinned hours and the time zone; the minimum
+    // notice comes from the same pinned snapshot. No fact is read again.
+    async freeSlots({ businessId, service, date, hours, timezone, maxSlots }) {
       if (!providers.calendar || !providers.calendarId) throw new AppError('INTEGRATION_UNAVAILABLE', 'Google Calendar is not configured.', undefined, undefined, { provider: 'google_calendar' });
+      const ctx = bookingContext(await pinned(businessId), businessId, service.id, providers.calendarId);
       const r = await providers.calendar.getAvailability({ calendarId: providers.calendarId, timezone, serviceId: service.id, date, hours: { [weekdayOf(date)]: hours },
-        serviceDurationMinutes: service.durationMinutes, bufferMinutes: service.bufferMinutes ?? 0, minNoticeMinutes: 0, maxSlots });
+        serviceDurationMinutes: service.durationMinutes, bufferMinutes: service.bufferMinutes ?? 0, minNoticeMinutes: ctx?.minNoticeMinutes ?? 0, maxSlots });
       if (!r.ok) throw new AppError('INTEGRATION_UNAVAILABLE', 'Google Calendar free/busy failed.', undefined, undefined, { provider: 'google_calendar' });
       return r.slots;
     },
@@ -140,7 +171,7 @@ function toolReason(error: unknown): ToolFailureReason {
   return 'INTEGRATION_UNAVAILABLE';
 }
 
-export function engineProposalPort(engine: PolicyEngine, facts: FactsPort, providers: Providers): ProposalPort {
+export function engineProposalPort(engine: PolicyEngine, pinned: PinnedFacts, providers: Providers, now: () => Date = () => new Date()): ProposalPort {
   return {
     async createOrderProposal(input) {
       try {
@@ -155,18 +186,23 @@ export function engineProposalPort(engine: PolicyEngine, facts: FactsPort, provi
     },
     async createBookingProposal(input) {
       try {
-        const ctx = await bookingContext(facts, input.businessId, input.serviceId, providers.calendarId);
+        const ctx = bookingContext(await pinned(input.businessId), input.businessId, input.serviceId, providers.calendarId);
         if (!ctx) return { ok: false, reason: 'NOT_FOUND', message: 'No such service.' };
         if (!providers.calendar) return { ok: false, reason: 'INTEGRATION_UNAVAILABLE' };
         const start = Date.parse(input.startUtc);
         const slot: AvailabilitySlot = { serviceId: ctx.service.id, startUtc: new Date(start).toISOString(),
           endUtc: new Date(start + ctx.service.durationMinutes * 60_000).toISOString(), timezone: ctx.timezone };
-        // Re-check the slot before it is proposed (FLOWS C5). The insert re-checks again after approval.
-        const r = await providers.calendar.getAvailability({ calendarId: ctx.calendarId, timezone: ctx.timezone, serviceId: ctx.service.id,
-          date: localDate(slot.startUtc, ctx.timezone), hours: ctx.hours, serviceDurationMinutes: ctx.service.durationMinutes,
-          bufferMinutes: ctx.service.bufferMinutes ?? 0, minNoticeMinutes: ctx.minNoticeMinutes, maxSlots: 5 });
-        if (!r.ok) return { ok: false, reason: 'INTEGRATION_UNAVAILABLE' };
-        if (!r.slots.some((s) => Date.parse(s.startUtc) === start)) return { ok: false, reason: 'SLOT_CONFLICT', alternatives: r.slots.slice(0, 3) };
+        // Re-check exactly this slot before it is proposed (FLOWS C5). The insert re-checks again after approval.
+        const check = await slotIsFree(providers, ctx, start, now());
+        if (check === 'unavailable') return { ok: false, reason: 'INTEGRATION_UNAVAILABLE' };
+        if (check === 'invalid') return { ok: false, reason: 'VALIDATION_FAILED', message: 'That time is not a bookable slot.' };
+        if (check === 'taken') {
+          // Only on a conflict: the capped list of alternatives for that day.
+          const alt = await providers.calendar.getAvailability({ calendarId: ctx.calendarId, timezone: ctx.timezone, serviceId: ctx.service.id,
+            date: localDate(slot.startUtc, ctx.timezone), hours: ctx.hours, serviceDurationMinutes: ctx.service.durationMinutes,
+            bufferMinutes: ctx.service.bufferMinutes ?? 0, minNoticeMinutes: ctx.minNoticeMinutes, maxSlots: SLOT_CONFLICT_MAX_ALTERNATIVES });
+          return { ok: false, reason: 'SLOT_CONFLICT', alternatives: alt.ok ? alt.slots.slice(0, SLOT_CONFLICT_MAX_ALTERNATIVES) : [] };
+        }
         const { booking, approval } = await engine.createBookingProposal({
           businessId: input.businessId, callId: input.callId, agentVersionId: input.agentVersionId, serviceId: ctx.service.id,
           serviceName: ctx.service.name, startUtc: slot.startUtc, endUtc: slot.endUtc, timezone: ctx.timezone, calendarId: ctx.calendarId,

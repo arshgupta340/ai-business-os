@@ -159,9 +159,9 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
           supersedes_id, verified_at, verified_by, created_at, updated_at)
           values ($1,$2,$3,$4,$5::jsonb,'owner_ui','verified',1,$6,$7,$8,$9,$8,$8)`,
         [newId, a.businessId, p.kind, p.key, JSON.stringify(p.after), p.fromVersion + 1, p.subjectId, at, a.decidedBy]);
-        // An owner-confirmed value for a key settles every open conflict on that key.
-        await tx.query(`update public.fact_conflicts set state='resolved', resolved_fact_id=$4, resolved_by=$5, resolved_at=$6
-          where business_id=$1 and kind=$2 and key=$3 and state='open'`, [a.businessId, p.kind, p.key, newId, a.decidedBy, at]);
+        // No conflict is resolved here (review finding 2). The approval does not carry a selected conflict,
+        // so resolving by kind and key would settle conflicts the owner never saw. Resolving the one the
+        // owner selected needs that conflict bound into the signed material (contract and 0005 change).
         await event(tx, at, a.businessId, a.id, 'fact.changed', { factId: newId, kind: p.kind, key: p.key, fromVersion: p.fromVersion, toVersion: p.fromVersion + 1, sourceType: 'owner_ui' }, 'owner');
         await finishExecution(tx, { businessId: a.businessId, executionId: claimed.id, workerId, attempt: claimed.attempts, status: 'SUCCEEDED' });
         await event(tx, at, a.businessId, a.id, 'execution.succeeded', { executionId: claimed.id, actionType: 'local.fact.update' });

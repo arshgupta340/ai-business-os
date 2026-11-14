@@ -65,9 +65,13 @@ export function databaseTls(): { rejectUnauthorized: true; ca: string[] } {
 
 export function createPool(env: Env): Pool {
   if (!env.DATABASE_URL) throw new AppError('INTEGRATION_UNAVAILABLE', 'Database is not configured.');
-  // Do not let URL sslmode parameters replace the verified TLS configuration.
+  // pg reparses the connection string in every Client and lets any ssl* parameter there override the
+  // pool's TLS object (ssl=0 turns TLS off). Drop every TLS-related parameter, whatever its case.
   const url = new URL(env.DATABASE_URL);
-  for (const key of ['sslmode', 'sslcert', 'sslkey', 'sslrootcert']) url.searchParams.delete(key);
+  for (const key of [...url.searchParams.keys()]) {
+    const k = key.toLowerCase();
+    if (k.startsWith('ssl') || k === 'uselibpqcompat') url.searchParams.delete(key);
+  }
   const pool = new Pool({ connectionString: url.toString(), ssl: databaseTls(), max: 5, connectionTimeoutMillis: 10_000 });
   // An idle client error (for example the pooler closing a connection) must not crash the process.
   pool.on('error', () => undefined);

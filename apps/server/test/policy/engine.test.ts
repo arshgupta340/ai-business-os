@@ -259,15 +259,24 @@ describe('bookings and facts', () => {
     await engine.proposeFactEdit({ businessId: ids.businessId, ownerUserId: ids.ownerUserId, kind: 'policy', key: 'pickup', value: 'b' });
     await expect(engine.proposeFactEdit({ businessId: ids.businessId, ownerUserId: ids.ownerUserId, kind: 'policy', key: 'pickup', value: 'c' })).rejects.toMatchObject({ code: 'INVALID_STATE' });
   });
-  it('resolves the open conflict on that key when the edit is confirmed', async () => {
+  // Review finding 2: the selected conflict is not bound into the signed approval, so confirming an
+  // edit must resolve no conflict, not even one created after the proposal on the same key.
+  it('a confirmed edit resolves no conflict, including one the owner never saw', async () => {
     await verifiedFact('policy', 'returns', 'old');
-    const conflictId = newId('cfl_');
-    await t.insert('fact_conflicts', { id: conflictId, business_id: ids.businessId, kind: 'policy', key: 'returns', candidates: JSON.stringify([{ sourceType: 'seed', value: 'old' }, { sourceType: 'upload', value: 'new' }]) });
-    const { approval } = await engine.proposeFactEdit({ businessId: ids.businessId, ownerUserId: ids.ownerUserId, kind: 'policy', key: 'returns', value: 'new', resolvesConflictId: conflictId });
+    const { approval } = await engine.proposeFactEdit({ businessId: ids.businessId, ownerUserId: ids.ownerUserId, kind: 'policy', key: 'returns', value: 'new' });
+    const unseen = newId('cfl_');
+    await t.insert('fact_conflicts', { id: unseen, business_id: ids.businessId, kind: 'policy', key: 'returns', candidates: JSON.stringify([{ sourceType: 'seed', value: 'old' }, { sourceType: 'upload', value: 'newer' }]) });
     await engine.decide(decision(approval));
-    const row = (await t.db.query('select state, resolved_fact_id from fact_conflicts where id=$1', [conflictId])).rows[0] as { state: string; resolved_fact_id: string };
-    expect(row.state).toBe('resolved');
-    expect((await t.db.query('select status from business_facts where id=$1', [row.resolved_fact_id])).rows[0]).toEqual({ status: 'verified' });
+    expect((await t.db.query('select state, resolved_fact_id from fact_conflicts where id=$1', [unseen])).rows[0]).toEqual({ state: 'open', resolved_fact_id: null });
+    expect((await t.db.query("select value from business_facts where business_id=$1 and kind='policy' and key='returns' and status='verified'", [ids.businessId])).rows[0]).toEqual({ value: 'new' });
+  });
+  it('a selected conflict is checked at proposal time but stays open after confirmation (no signed binding yet)', async () => {
+    await verifiedFact('policy', 'refunds', 'old');
+    const conflictId = newId('cfl_');
+    await t.insert('fact_conflicts', { id: conflictId, business_id: ids.businessId, kind: 'policy', key: 'refunds', candidates: JSON.stringify([{ sourceType: 'seed', value: 'old' }, { sourceType: 'upload', value: 'new' }]) });
+    const { approval } = await engine.proposeFactEdit({ businessId: ids.businessId, ownerUserId: ids.ownerUserId, kind: 'policy', key: 'refunds', value: 'new', resolvesConflictId: conflictId });
+    await engine.decide(decision(approval));
+    expect((await t.db.query('select state from fact_conflicts where id=$1', [conflictId])).rows[0]).toEqual({ state: 'open' });
   });
 });
 

@@ -34,6 +34,7 @@ import { buildProviders, type Providers } from './providers';
 import { createDbExecutor } from './executor';
 import { createInterimDb } from './interim-db';
 import { createDbWebhooks, type DbWebhooks } from './webhooks';
+import { createHealthMonitor, type HealthMonitor } from './health';
 import { createTelemetry, type TelemetryPluginOptions } from '../telemetry/index';
 import { mapRow } from '../api/rows';
 import { createProposeFactFromChat, dbAgentDraftStore, dbBuilderSessionStore, dbBusinessKnowledge, dbDraftFactStore, dbLiveAgentReader, type ProposeFactFromChat } from './builder';
@@ -59,6 +60,8 @@ export interface ComposeOptions {
   // PLUG-IN B-13: pass the webhooks plugin factory here, or replace `notWiredWebhooks` below.
   webhooks?: WebhooksFactory;
   log?: SeamDeps['log'];
+  /** Bound on each integration health probe (tests use a short one). */
+  healthProbeTimeoutMs?: number;
 }
 
 export interface ComposedServer {
@@ -86,6 +89,8 @@ export interface ComposedServer {
   /** The database webhooks wiring, when it is the one in use (jobs, recovery, reconciliation). */
   webhooks: DbWebhooks | undefined;
   interim: InterimDb;
+  /** Integration health: configuration plus cached read-only probe results (API 3.11). */
+  health: HealthMonitor;
   /** GET /api/telemetry (B-30) and the recorder modules may record into. */
   telemetry: TelemetryPluginOptions;
   /** Background jobs: the approval expiry sweep (API 3.7) and the executor loop. */
@@ -118,12 +123,23 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     catalog: dbCatalogPort(db),
     facts,
     quotes: squareQuotePort(db, providers),
-    proposals: engineProposalPort(engine, facts, providers),
+    proposals: engineProposalPort(engine, (businessId) => facts.readVerified({ businessId }), providers, now),
     orderStatus: dbOrderStatusPort(db),
-    availability: calendarAvailabilityPort(providers),
+    availability: calendarAvailabilityPort(providers, (businessId) => facts.readVerified({ businessId })),
   };
-  const toolsetFor: ComposedServer['toolsetFor'] = (ctx) => createRealToolset({ businessId: ctx.businessId, messageChannel, ports: toolsetPorts, capabilities: ctx.capabilities, now,
-    ...(ctx.facts ? { factsSnapshot: ctx.facts } : {}) });
+  // One pinned snapshot per call (AC-16, review finding 4): the toolset's own fact reads, availability
+  // and the booking proposal all read the same facts, taken once, however the owner edits them mid-call.
+  const toolsetFor: ComposedServer['toolsetFor'] = (ctx) => {
+    let snapshot: Promise<FactsSnapshot> | undefined = ctx.facts ? Promise.resolve(ctx.facts) : undefined;
+    const pinned = (businessId: string) => {
+      if (businessId !== ctx.businessId) return Promise.reject(new AppError('FORBIDDEN_BUSINESS', 'Another business.'));
+      snapshot ??= facts.readVerified({ businessId });
+      return snapshot;
+    };
+    const ports: RealToolsetPorts = { ...toolsetPorts, facts: { readVerified: ({ businessId }) => pinned(businessId) },
+      proposals: engineProposalPort(engine, pinned, providers, now), availability: calendarAvailabilityPort(providers, pinned) };
+    return createRealToolset({ businessId: ctx.businessId, messageChannel, ports, capabilities: ctx.capabilities, now, ...(ctx.facts ? { factsSnapshot: ctx.facts } : {}) });
+  };
   const calls = dbCallsPort(db, newId);
 
   const interim = options.interim ?? createInterimDb(db, { newId, now });
@@ -194,6 +210,8 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   // Health reports the phone path as off, with the settings that keep it off (names only, never values).
   if (!voice.ok) providers.status.twilio = { configured: false, detail: `phone voice off: missing ${voiceMissing.join(', ')}` };
 
+  const health = createHealthMonitor({ status: providers.status, probes: providers.probes ?? {}, now, ...(options.healthProbeTimeoutMs ? { timeoutMs: options.healthProbeTimeoutMs } : {}) });
+
   // Telemetry (B-30): one in-memory recorder; approval_time is derived from activity events.
   const telemetry = createTelemetry({ now: () => now().getTime() });
   const telemetryOptions: TelemetryPluginOptions = {
@@ -215,7 +233,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
 
   let sweep: ReturnType<typeof setInterval> | undefined;
   return {
-    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, interim, telemetry: telemetryOptions, now, newId,
+    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, interim, telemetry: telemetryOptions, health, now, newId,
     async close() { if (pool) await pool.end(); },
     startJobs() {
       if (!hasDb || sweep) return;

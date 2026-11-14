@@ -131,8 +131,15 @@ export type FakeSquare = ReturnType<typeof fakeSquareClient>;
 export function fakeCalendarClient() {
   const writes: string[] = [];
   const events = new Map<string, InsertEventRequest['requestBody']>();
+  /** Extra busy periods a test adds (someone else's appointment). */
+  const busy: { start: string; end: string }[] = [];
+  const queries: { timeMin: string; timeMax: string }[] = [];
   const client: GoogleCalendarClient = {
-    freebusy: { async query(input) { return { data: { calendars: Object.fromEntries(input.requestBody.items.map((i) => [i.id, { busy: [] }])) } }; } },
+    freebusy: { async query(input) {
+      queries.push({ timeMin: input.requestBody.timeMin, timeMax: input.requestBody.timeMax });
+      const blocks = [...busy, ...[...events.values()].map((e) => ({ start: e.start.dateTime, end: e.end.dateTime }))];
+      return { data: { calendars: Object.fromEntries(input.requestBody.items.map((i) => [i.id, { busy: blocks }])) } };
+    } },
     events: {
       async list() { return { data: { items: [...events.values()].map((e): GoogleEvent => ({ id: e.id, status: 'confirmed', htmlLink: `https://calendar.example.test/${e.id}` })) } }; },
       async get({ eventId }) {
@@ -148,7 +155,7 @@ export function fakeCalendarClient() {
       async delete() { writes.push('events.delete'); throw new Error('e2e: Calendar delete is not expected'); },
     },
   };
-  return { client, writes, events };
+  return { client, writes, events, busy, queries };
 }
 
 /** Message channel stand-in. Every send is an external write. */
@@ -200,6 +207,7 @@ export type World = {
   /** Square write calls (CreatePaymentLink). */
   squareWrites: string[];
   calendarWrites: string[];
+  calendar: ReturnType<typeof fakeCalendarClient>;
   messages: ReturnType<typeof fakeMessages>;
   sheets: ReturnType<typeof fakeSheets>;
   /** Message sends (external writes). */
@@ -252,7 +260,7 @@ export async function createWorld(extra: BuildAppOptions = {}, envExtra: Record<
     ...extra,
   });
   return {
-    t, app, model, square, squareWrites: square.writes, calendarWrites: cal.writes, messages, sheets, clock,
+    t, app, model, square, squareWrites: square.writes, calendarWrites: cal.writes, calendar: cal, messages, sheets, clock,
     get messageSends() { return messages.sent.length; },
     async settle() {
       // The executor drains after each approve; webhook jobs run after each response. Both may chain.

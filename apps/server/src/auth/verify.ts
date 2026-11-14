@@ -1,5 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import type { FastifyRequest } from 'fastify';
+import type { FastifyPluginAsync, FastifyPluginOptions, FastifyRequest } from 'fastify';
 import { ENDPOINTS, type EndpointDefinition } from '@abos/contracts';
 import type { Db } from '../db/index';
 import type { Env } from '../env';
@@ -29,20 +29,54 @@ declare module 'fastify' {
   }
 }
 
-// Builder routes (owner "saina", D-07) authenticate through the builder's own BuilderAuth seam,
-// which the composition root fills with `createBuilderAuth` below. Guarding them here as well
-// would bypass that seam and break the builder's fail-closed default when auth is not configured.
-const definitions = (Object.values(ENDPOINTS) as EndpointDefinition[]).filter((e) => e.owner !== 'saina');
+/**
+ * Auth policy of a route, declared where the route is registered (route `config.auth`, set by
+ * `withAuthPolicy` around a plugin). Review finding 8: every /api route is authenticated unless it
+ * declares otherwise, whatever ENDPOINTS says about who wrote it.
+ *   owner:   this guard authenticates the owner and scopes the business.
+ *   builder: delegated to the builder plugin's own BuilderAuth seam (filled with createBuilderAuth
+ *            below); guarding here too would bypass its fail-closed default when auth is unset.
+ *   public:  no authentication (none is declared today).
+ */
+export type RouteAuthPolicy = 'owner' | 'builder' | 'public';
+export const ROUTE_AUTH_POLICIES: readonly RouteAuthPolicy[] = ['owner', 'builder', 'public'];
+
+/** Wraps a plugin so every route it registers carries `policy`, unless the route declared its own. */
+export function withAuthPolicy<O extends FastifyPluginOptions>(policy: RouteAuthPolicy, plugin: FastifyPluginAsync<O>): FastifyPluginAsync<O> {
+  return async (scope, options) => {
+    scope.addHook('onRoute', (route) => {
+      const config = (route.config ?? {}) as Record<string, unknown>;
+      if (config.auth === undefined) route.config = { ...config, auth: policy } as typeof route.config;
+    });
+    await scope.register(plugin as FastifyPluginAsync<FastifyPluginOptions>, options);
+  };
+}
+
+export function routeAuthPolicyOf(config: unknown): RouteAuthPolicy | undefined {
+  const auth = (config as { auth?: unknown } | undefined)?.auth;
+  return ROUTE_AUTH_POLICIES.includes(auth as RouteAuthPolicy) ? auth as RouteAuthPolicy : undefined;
+}
+export function routeAuthPolicy(request: FastifyRequest): RouteAuthPolicy | undefined {
+  return routeAuthPolicyOf(request.routeOptions.config);
+}
+
+const definitions = Object.values(ENDPOINTS) as EndpointDefinition[];
 const record = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === 'object' ? value as Record<string, unknown> : {};
 
-/** Authenticates every contract route Arsh owns. Builder routes use `createBuilderAuth`. */
+/**
+ * Authenticates every /api route except those that declare `builder` or `public`. Routes outside
+ * /api (health, provider webhooks with their own signatures, the phone socket) are not owner routes.
+ */
 export function createAuthGuard(db: Db, verifier: TokenVerifier) {
   return async (request: FastifyRequest): Promise<void> => {
+    const url = request.routeOptions.url;
+    if (typeof url !== 'string' || !(url === '/api' || url.startsWith('/api/'))) return;
+    const policy = routeAuthPolicy(request);
+    if (policy === 'builder' || policy === 'public') return;
     // Fastify also registers HEAD handlers for GET routes.
     const method = request.method === 'HEAD' ? 'GET' : request.method;
-    const endpoint = definitions.find((e) => e.method === method && e.path === request.routeOptions.url);
-    if (!endpoint) return;
+    const endpoint = definitions.find((e) => e.method === method && e.path === url);
     const bearer = /^Bearer ([^\s]+)$/i.exec(request.headers.authorization ?? '');
     if (!bearer?.[1]) throw new AppError('UNAUTHENTICATED', 'A bearer access token is required.');
     let authUserId: string;
@@ -56,7 +90,7 @@ export function createAuthGuard(db: Db, verifier: TokenVerifier) {
     request.ownerUserId = user.id;
     const params = record(request.params);
     const query = record(request.query);
-    const businessId = endpoint.path.startsWith('/api/businesses/:id') ? params.id : query.businessId;
+    const businessId = url.startsWith('/api/businesses/:id') ? params.id : query.businessId;
     if (typeof businessId === 'string') {
       const owned = await db.query('select id from public.businesses where id = $1 and owner_id = $2', [businessId, user.id]);
       if (!owned.rows.length) throw new AppError('FORBIDDEN_BUSINESS', 'This business is not owned by you.');
