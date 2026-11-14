@@ -244,7 +244,7 @@ These settle names and numbers that more than one doc uses.
 | Live agent shape | `LiveAgent` is `{ phoneNumber, businessId, agentId, agentVersionId, updatedAt }`. |
 | Refusal event | The `guardrail.refused` payload names the rule that fired in the field `rule`. |
 | QR-only channel | When `MESSAGE_CHANNEL` is `qr_only`, the message step's execution is `SKIPPED` and no `message_dispatches` row is created. `message_dispatches.channel` is `surge`, `android_gateway` or `whatsapp_sandbox` only. Nothing is ever marked sent that was not sent. |
-| Order approval payload | The hashed material fields are `businessId`, `subjectId`, `agentVersionId`, `cartHash`, `totalMinor`, `currency`, `pickupAt`, `messageRecipient`, `messageChannel`, `actionBundle`, `expiresAt`. The full quote and contact are shown to the owner but are not separately hashed. `callId` is not a material field. |
+| Order approval payload | The hashed material fields are `businessId`, `subjectId`, `agentVersionId`, `cartHash`, `totalMinor`, `currency`, `pickupAt`, `messageRecipient`, `messageChannel`, `actionBundle`, `expiresAt`. The full quote and contact are shown to the owner but are not separately hashed. `callId` is not a material field. The payload holds exactly these fields and nothing else, so `payloadHash` is the SHA-256 of the canonical JSON of the whole payload. It carries no `messageConsent`: a payload with channel `qr_only` and no `messageRecipient` means the customer declined messages. |
 | Catalog shape | The table `catalog_items` has one row per sellable variation. The API and the tools group rows into items, each with a `variations` array. |
 | Fact kinds | `hours`, `policy`, `service`, `contact`, `faq`, `menu_item`. A `menu_item` fact comes only from an upload, stays `draft`, and exists to be compared with `catalog_items`. It is never a price source. |
 | Hours keys | One `hours` fact per weekday, with keys `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`. |
@@ -344,6 +344,8 @@ Names only. Values live in `.env.local` and in the host's secret store. They are
 | `MESSAGE_CHANNEL` (`surge`, `android_gateway`, `whatsapp_sandbox`, `qr_only`), plus that channel's own keys | server |
 | `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_CALENDAR_ID`, `GOOGLE_SHEET_ID` | server |
 | `PUBLIC_SERVER_URL`, `PORT` | server |
+| `WEB_ORIGIN` (the web app address allowed by CORS), `NODE_ENV` (`production` on any deployed server) | server |
+| `BUILDER_DEV_AUTH` (local development only: `1` treats any bearer token as the seeded owner; refused when `NODE_ENV` is `production`) | server |
 
 The server refuses to start if `SQUARE_ENVIRONMENT` is not `sandbox` (AC-19).
 

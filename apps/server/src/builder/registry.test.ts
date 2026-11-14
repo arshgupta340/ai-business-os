@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { ToolNameSchema } from './pending-contracts';
-import type { CapabilityId } from './pending-contracts';
+import { CAPABILITIES, CAPABILITY_LIST, TOOL_CAPABILITY as PACKAGE_TOOL_CAPABILITY, ToolNameSchema, type CapabilityId } from '@abos/contracts';
 import {
+  assertToolsReadOrPropose,
   CAPABILITY_REGISTRY,
   CAPABILITY_RULES,
   fitCapabilitySet,
@@ -32,6 +32,20 @@ describe('capability registry', () => {
     }
     const writeIds = CAPABILITY_REGISTRY.filter((c) => c.effect === 'write' || c.effect === 'external_message').map((c) => c.id);
     expect(Object.values(TOOL_CAPABILITY).some((id) => writeIds.includes(id))).toBe(false);
+  });
+
+  it('takes the registry rows and the tool map from the package', () => {
+    expect(TOOL_CAPABILITY).toBe(PACKAGE_TOOL_CAPABILITY);
+    expect(CAPABILITY_REGISTRY).toBe(CAPABILITY_LIST);
+    expect(getCapability('order.propose')).toBe(CAPABILITIES['order.propose']);
+    expect(getCapability('payment.refund.issue')).toBeUndefined();
+  });
+
+  it('the load-time check fails when a tool maps to a write, a message or an unknown capability', () => {
+    expect(() => assertToolsReadOrPropose(TOOL_CAPABILITY)).not.toThrow();
+    expect(() => assertToolsReadOrPropose({ ...TOOL_CAPABILITY, propose_order: 'order.checkout.prepare' })).toThrow(/propose_order maps to order.checkout.prepare with effect write/);
+    expect(() => assertToolsReadOrPropose({ send_link: 'message.checkout.send' })).toThrow(/effect external_message/);
+    expect(() => assertToolsReadOrPropose({ refund: 'payment.refund.issue' })).toThrow(/effect undefined/);
   });
 
   it('strips an unregistered capability and reports it', () => {

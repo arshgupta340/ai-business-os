@@ -28,7 +28,7 @@ export function webp(text: string): Buffer {
   return Buffer.concat([Buffer.from('RIFF', 'latin1'), size, body]);
 }
 
-export const HOURS_CSV = 'Opening hours,,\nday,open,close\nmon,11:00,22:00\ntue,11:00,22:00\nwed,11:00,22:00\nthu,11:00,22:00\nfri,11:00,23:00\nsat,11:00,22:00\nsun,12:00,21:00\n';
+export const HOURS_CSV = 'Opening hours,,\nday,open,close\nmon,11:00,21:00\ntue,11:00,21:00\nwed,11:00,21:00\nthu,11:00,21:00\nfri,11:00,23:00\nsat,11:00,22:00\nsun,12:00,20:00\n';
 
 export async function xlsx(rows: string[][]): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();

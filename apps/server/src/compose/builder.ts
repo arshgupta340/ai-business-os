@@ -5,7 +5,7 @@
 import type { AgentRecord, AgentDraftStore, BuilderSessionRecord, BuilderSessionStore, DraftFactStore } from '../builder/session/stores';
 import type { BusinessContext, BusinessKnowledge } from '../builder/session/knowledge';
 import type { LiveAgentReader } from '../builder/agents';
-import type { BusinessFact } from '../builder/pending-contracts';
+import type { BusinessFact } from '@abos/contracts';
 import type { Db } from '../db/index';
 import { mapRow } from '../api/rows';
 import type { PolicyEngine } from '../policy/engine';
@@ -88,7 +88,7 @@ export function dbAgentDraftStore(db: Db): AgentDraftStore {
 
 function factFromRow(r: Row): BusinessFact {
   const m = mapRow(r);
-  return { ...(m as unknown as BusinessFact), value: r.value, createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
+  return { ...(m as unknown as BusinessFact), value: r.value as BusinessFact['value'], createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
     ...(r.verified_at ? { verifiedAt: iso(r.verified_at) } : {}) };
 }
 

@@ -8,17 +8,14 @@
 import {useEffect, type ReactNode} from 'react';
 import {useRouter} from 'next/navigation';
 import {AppShell} from '@astryxdesign/core/AppShell';
-import {HStack} from '@astryxdesign/core/HStack';
 import {TopNav, TopNavHeading} from '@astryxdesign/core/TopNav';
 import {LoadingState} from '@/components/LoadingState';
 import {useAuth} from '@/lib/session/auth';
 import {ApprovalsBadgeSync} from './ApprovalsBadgeSync';
-import {BusinessSelector} from './BusinessSelector';
-import {ConnectionHealth} from './ConnectionHealth';
-import {OwnerControls} from './OwnerControls';
 import {SandboxBanner} from './SandboxBanner';
 import {ShellBadgesProvider, useShellBadges} from './ShellBadgesContext';
 import {Sidebar} from './Sidebar';
+import {TopBarEndContent, TopBarStartContent} from './TopBarContent';
 
 export const APP_NAME = 'AI Business OS';
 
@@ -42,13 +39,10 @@ function ShellFrame({children}: {children: ReactNode}) {
         <TopNav
           label="Main navigation"
           heading={<TopNavHeading heading={APP_NAME} headingHref="/overview" />}
-          startContent={<BusinessSelector />}
-          endContent={
-            <HStack gap={3} vAlign="center">
-              <ConnectionHealth />
-              <OwnerControls />
-            </HStack>
-          }
+          // Below the md breakpoint the bar shows the app name and the menu
+          // toggle; the selector, health and sign out move into the menu.
+          startContent={<TopBarStartContent />}
+          endContent={<TopBarEndContent />}
         />
       }
       sideNav={<Sidebar pendingApprovalsCount={pendingApprovalsCount} />}>

@@ -1,9 +1,9 @@
-import type { AgentRunRequest, AgentRunResponse, AgentTemplate, ToolContext, ToolTraceEntry } from '../pending-contracts';
-import { permissionSummary, validateCapabilitySet, type PermissionSummary } from '../registry';
+import type { AgentRunRequest, AgentRunResponse, AgentTemplate, PreviewResponse, ToolContext, ToolTraceEntry } from '@abos/contracts';
+import { permissionSummary, validateCapabilitySet } from '../registry';
 import type { BusinessKnowledge } from '../session/knowledge';
 import type { AgentDraftStore, AgentRecord } from '../session/stores';
 import { apiError, newId } from '../util';
-import type { MockToolset } from './mock-toolset';
+import type { SessionToolset } from './session-toolset';
 import { AGENT_SCRIPTS } from './recorded-agent-model';
 import { RunnerModelUnavailable, type MockTextRunner } from './text-runner';
 
@@ -41,26 +41,17 @@ export const PREVIEW_SCENARIOS: Record<AgentTemplate, Record<string, string[]>> 
   },
 };
 
-export interface PreviewExample {
-  scenario: string;
-  transcript: { role: 'caller' | 'agent'; text: string }[];
-  toolTrace: ToolTraceEntry[];
-  guardrail?: AgentRunResponse['guardrail'];
-}
-
-export interface PreviewResponse {
-  agentId: string;
-  specRevision: number;
-  permissions: PermissionSummary;
-  examples: PreviewExample[];
-}
+// A preview example as the contract has it (API.md 3.4), plus the guardrail
+// refusal of that scenario when one fired. The contract's example has no
+// guardrail field; it is an extra field on the wire (see docs/notes-saina.md).
+export type PreviewExample = PreviewResponse['examples'][number] & { guardrail?: AgentRunResponse['guardrail'] };
 
 export interface AgentRunServiceDeps {
   agents: AgentDraftStore;
   knowledge: BusinessKnowledge;
   runner: MockTextRunner;
   // Only used to drop a finished test session's mock state.
-  toolset: Partial<Pick<MockToolset, 'reset'>>;
+  toolset: Partial<Pick<SessionToolset, 'reset'>>;
 }
 
 export class AgentRunService {
@@ -96,7 +87,7 @@ export class AgentRunService {
     return { testSessionId: session.id, reply: result.reply, toolTrace: result.toolTrace, ...(result.guardrail ? { guardrail: result.guardrail } : {}) };
   }
 
-  async preview(businessId: string, agentId: string, scenarios: string[] | undefined, correlationId: string): Promise<PreviewResponse> {
+  async preview(businessId: string, agentId: string, scenarios: string[] | undefined, correlationId: string): Promise<PreviewResponse & { examples: PreviewExample[] }> {
     const agent = await this.loadAgent(businessId, agentId);
     const available = PREVIEW_SCENARIOS[agent.draftSpec.template];
     const names = scenarios && scenarios.length > 0 ? scenarios : Object.keys(available);
@@ -176,8 +167,10 @@ export class AgentRunService {
   }
 }
 
-// A draft has no agent_versions row yet. The ToolContext still needs a value,
-// so a test run uses this marker, which is never a real agv_ ID.
-function draftVersionRef(agent: AgentRecord): string {
-  return `draft:${agent.id}`;
+// A draft has no agent_versions row yet, but ToolContext.agentVersionId must
+// be an agv_ ID (the package's ToolContextSchema). A test run uses
+// `agv_draft_` plus the agent's ID suffix. No version row ever has this ID:
+// published versions get a random agv_ ID (publish/service.ts).
+export function draftVersionRef(agent: Pick<AgentRecord, 'id'>): string {
+  return `agv_draft_${agent.id.replace(/^agt_/, '')}`;
 }

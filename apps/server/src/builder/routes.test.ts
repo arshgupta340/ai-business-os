@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../app';
 import { parseEnv } from '../env';
-import { AgentSpecSchema } from './pending-contracts';
+import { AgentSpecSchema } from '@abos/contracts';
 import { AGENT_SCRIPTS } from './runner/recorded-agent-model';
 import { RECORDED_SCRIPTS } from './session/recorded-builder-model';
 
@@ -40,7 +40,7 @@ async function post(url: string, payload: unknown = {}) {
 async function buildAgent(query: string, script: readonly string[]) {
   const session = (await post(`/api/builder/sessions?${query}`)).json();
   let last;
-  for (const text of script) last = (await post(`/api/builder/sessions/${session.id}/messages?${query}`, { text })).json();
+  for (const text of script) last = (await post(`/api/builder/sessions/${session.id}/messages?${query}`, { text, inputMode: 'text' })).json();
   const created = await post(`/api/agents?${query}`, { builderSessionId: session.id });
   return { session, last, created };
 }
@@ -124,7 +124,7 @@ describe('builder routes: Flow A on recorded responses', () => {
 
   it('unsupported request is answered, reported and kept out of the spec', async () => {
     const session = (await post(`/api/builder/sessions?${PIZZA}`)).json();
-    await post(`/api/builder/sessions/${session.id}/messages?${PIZZA}`, { text: RECORDED_SCRIPTS.pizza[0] });
+    await post(`/api/builder/sessions/${session.id}/messages?${PIZZA}`, { text: RECORDED_SCRIPTS.pizza[0], inputMode: 'text' });
     const turn = (await post(`/api/builder/sessions/${session.id}/messages?${PIZZA}`, { text: RECORDED_SCRIPTS.unsupported[0], inputMode: 'voice' })).json();
     expect(turn.unsupportedRequests).toContain('send marketing texts');
     expect(turn.draftSpec.capabilities).not.toContain('marketing.sms.broadcast');

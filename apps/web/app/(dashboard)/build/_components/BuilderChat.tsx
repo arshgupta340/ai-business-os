@@ -25,7 +25,7 @@ import type {BuilderMessage} from '@/lib/api';
 import {formatTime} from '@/lib/format';
 import {useBuilderThreadContext, type PendingTurn} from '../_hooks/useBuilderThread';
 import {EXAMPLE_PROMPTS} from '../_lib/spec';
-import {VoiceInputButton} from './VoiceInputButton';
+import {VoiceControl} from '../voice/VoiceControl';
 
 function MessageTime({iso, timeZone}: {iso: string; timeZone: string}) {
   let label = '';
@@ -144,7 +144,7 @@ export function BuilderChat({timeZone}: {timeZone: string}) {
             onSubmit={submit}
             isDisabled={isSending || isBlockedByFailure || !thread.session}
             placeholder={isSending ? 'Waiting for the builder' : 'Describe what the agent should do'}
-            sendActions={<VoiceInputButton />}
+            sendActions={<VoiceControl />}
           />
         }>
         <ChatMessageList>

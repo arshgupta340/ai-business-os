@@ -416,6 +416,8 @@ The sidebar item "Activity" opens the Live operations screen (SPEC 2.9).
 | Live operations | `GET /api/activity`, `GET /api/orders`, `GET /api/orders/:id`, `GET /api/orders/:id/checkout`, `GET /api/bookings`, `GET /api/bookings/:id`, `GET /api/approvals/:id`, `POST /api/approvals/:id/decision`, `POST /api/agents/:id/sim-call` | `call.started`, `call.ended`, `proposal.created`, `approval.requested`, `approval.decided`, `approval.expired`, `execution.started`, `execution.succeeded`, `execution.failed`, `checkout.created`, `message.sent`, `message.failed`, `payment.verified`, `payment.failed`, `booking.verified`, `booking.slot_conflict`, `order.status_changed`, `booking.status_changed`, `sync.queued`, `sync.succeeded`, `sync.failed`, `guardrail.refused`, `webhook.rejected` |
 | Approvals | `GET /api/approvals`, `GET /api/approvals/:id`, `GET /api/orders/:id`, `GET /api/bookings/:id`, `POST /api/approvals/:id/decision` | `approval.requested`, `approval.decided`, `approval.expired`, `execution.started`, `execution.succeeded`, `execution.failed` |
 
+The routes added in section 3.12 list their screens in that section's own table: Knowledge review and price edit (catalog read, conflict resolve), Overview, Agent details and Live operations (calls), the telemetry panel, and Live operations (cancel and resolve).
+
 ## 7. Mock layer notes
 
 `NEXT_PUBLIC_MOCK=1` makes `apps/web` start MSW from `apps/web/mocks` and serve fixtures from `packages/contracts`. With the flag off, every call goes to `NEXT_PUBLIC_API_URL`. UI code calls one client module and never checks the flag itself.
@@ -446,4 +448,4 @@ Paths, fields and values that SPEC v1.1 does not define. Error codes are defined
 
 Still open:
 1. Whether the Square signature header value is base64 (spike B-02, SPEC 2.9).
-2. The owner recovery actions in the CONTRACTS.md state machines (cancel an order, abandon a `NEEDS_REVIEW` step, retry a `RETRY_REQUIRED` booking, mark an `UNKNOWN` dispatch failed) have no endpoint here. Each needs an endpoint or a ruling that it is out of this build.
+2. The owner recovery actions (cancel an order, retry or abandon a stuck step) are defined in section 3.12 as SHOULD-tier routes (SPEC proposal P-19). Until they are built, leave those buttons out.

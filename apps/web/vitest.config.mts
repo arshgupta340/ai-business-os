@@ -12,5 +12,10 @@ export default defineConfig({
     environment: 'node',
     include: ['**/*.test.ts', '**/*.test.tsx'],
     exclude: ['node_modules/**', '.next/**', 'e2e/**'],
+    setupFiles: ['./vitest.setup.ts'],
+    // Generous on purpose: these tests drive real components against the mock
+    // API, and a loaded machine can be several times slower than CI.
+    testTimeout: 30000,
+    hookTimeout: 30000,
   },
 });

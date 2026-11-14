@@ -26,11 +26,12 @@ Real mode without `NEXT_PUBLIC_SUPABASE_URL` or `NEXT_PUBLIC_SUPABASE_ANON_KEY`:
 |---|---|
 | `app/(dashboard)/<route>/page.tsx` | One screen per route. Each is a placeholder you replace. |
 | `app/(dashboard)/layout.tsx` | Wraps every screen in `DashboardShell` (sidebar, top bar, sandbox banner, sign-in guard). |
+| `app/icon.svg` | The app icon. Next.js serves it as the favicon. |
 | `app/sign-in/page.tsx` | Sign-in. Outside the dashboard group. |
 | `components/` | Shared building blocks (below). |
 | `components/shell/` | Shell parts. `useShellBadges()` sets the Approvals count. |
-| `components/providers/AppProviders.tsx` | Theme, links, auth, business and `ApiProvider` (React Query, plus the mock API in mock mode). |
-| `lib/session/` | `useBusiness()`, `BusinessProvider`, seeded businesses. |
+| `components/providers/AppProviders.tsx` | Theme, links, auth, `ApiProvider` (React Query, plus the mock API in mock mode), `ApiBusinessProvider` and `SessionErrorHandler`. |
+| `lib/session/` | `useBusiness()`, `BusinessProvider`, `ApiBusinessProvider`, seeded businesses, the sign-in notice. |
 | `lib/session/auth/` | `useAuth()`, `getAccessToken()`. |
 | `lib/supabase/client.ts` | `getSupabaseBrowserClient()`, null when not configured. |
 | `lib/api/`, `mocks/` | Typed API client, React Query hooks and the MSW mock layer. Read `lib/api/README.md`. |
@@ -45,10 +46,26 @@ Import from `@/components` (or the single file).
 - `ErrorState` `{message, title?, onRetry?, retryLabel?}`. Shows a retry button when `onRetry` is set.
 - `StatusBadge` `{label, tone}`, tone `neutral | info | warning | danger | success`. `success` (green) is only for states the server or provider confirmed. Never green before the provider confirms.
 - `SandboxBadge`. Put it next to any payment data: totals, payment links, payment status.
+- `SessionNotice`. Shows once why the owner landed on /sign-in (for example "Your session ended"). The sign-in page renders it.
+
+## Shell on narrow screens
+
+`AppShell` switches to its mobile layout below the `md` breakpoint (768px). The top bar then shows the app name and the menu button only. The menu (a drawer) holds the business selector, the connection health badges, the owner name with Sign out, and the sections. The sandbox banner stays above the top bar at every width. `TopBarStartContent` and `TopBarEndContent` (from `@/components/shell`) do this with `useTopNavRenderMode()`. Screens do not need to do anything.
+
+## Signed out and wrong business
+
+`SessionErrorHandler` (mounted once in `AppProviders`) listens to every failed API call through the QueryClient:
+
+- `UNAUTHENTICATED`: the owner is signed out, cached data is cleared and the app goes to /sign-in, which shows "Your session ended. Sign in again to continue."
+- `FORBIDDEN_BUSINESS`: that business leaves the selector and the selector moves to a business the owner has. The businesses list is refetched.
+
+Hooks still return their errors, so a screen can show its own error state as before. Do not add a second redirect in a screen.
 
 ## Shared helpers
 
 - `statusView(machine, state)` and `conflictView(status, required)` from `@/lib/status`. They map every server state to `{label, tone}`. Use them with `StatusBadge` so a state looks the same on every screen. Do not write your own state to color mapping.
+  - Machines: `order`, `booking`, `approval`, `execution`, `syncJob` (the Sheets report), `messageDispatch`, `call`, `callStage`, `agent`, `fact`, `fileExtraction`, `integration`, plus `feed` (the `useActivityFeed` status, never green), `catalogSync` (a Square catalog sync job, same states as `syncJob`) and `builderSession` (`active`, `completed`, `abandoned`).
+  - `factView(kind, status)` is `statusView('fact', status)` except a `menu_item` draft, which shows `MENU_ITEM_DRAFT_VIEW` ("Menu draft, for comparison only").
 - `formatMoney(amountMinor, currency)`, `formatDateTime(iso, timeZone)`, `formatTime`, `formatDate`, `formatRelative`, `secondsUntil`, `formatCountdown`, `lastFour` from `@/lib/format`. Money is in minor units on the wire. Show times in `business.timezone`.
 
 ## Hooks
@@ -59,7 +76,7 @@ const {status, owner, signIn, signOut, isMock, configError} = useAuth(); // from
 const {setPendingApprovalsCount} = useShellBadges(); // from '@/components/shell'
 ```
 
-`businessId` defaults to `biz_pizza_01` and is kept in localStorage. `business` has `id`, `name`, `category`, `timezone` and an optional `contact: { phone?, email?, address? }` (the location is `contact.address`). Pass it to every business-scoped API call. `status` is `loading | signed_in | signed_out`. Screens under `(dashboard)` only render when `signed_in`, so they can assume an owner.
+`businesses` comes from `GET /api/businesses` once the owner is signed in. While it loads, when it fails, or when signed out, it is the seeded list. `businessId` defaults to `biz_pizza_01` and is kept in localStorage. `business` has `id`, `name`, `category`, `timezone` and an optional `contact: { phone?, email?, address? }` (the location is `contact.address`). Pass it to every business-scoped API call. `status` is `loading | signed_in | signed_out`. Screens under `(dashboard)` only render when `signed_in`, so they can assume an owner.
 
 ## Domain names to reuse
 

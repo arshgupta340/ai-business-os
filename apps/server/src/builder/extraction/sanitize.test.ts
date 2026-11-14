@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SEED_FACTS } from '../fixtures';
+import { allFacts as SEED_FACTS } from '@abos/contracts/fixtures';
 import { detectConflict, matchCatalogRow } from './conflicts';
 import { emptyValue, type ExtractedValue } from './model';
 import { LIMITS, sanitizeExtraction } from './sanitize';
@@ -86,13 +86,13 @@ describe('conflict detection', () => {
     expect(detectConflict({ kind: 'menu_item', key: 'k', value: { itemName: 'Pepperoni', variationName: 'Small', priceMinor: 1400 } }, ctx)).toBeUndefined();
     expect(detectConflict({ kind: 'menu_item', key: 'k', value: { itemName: 'Pepperoni', variationName: 'Small', priceMinor: 1500 } }, ctx)?.required).toBe(true);
     expect(detectConflict({ kind: 'policy', key: 'pickup_window', value: { minutes: 20 } }, ctx)).toBeUndefined();
-    expect(detectConflict({ kind: 'policy', key: 'pickup_window', value: { minutes: 30 } }, ctx)).toMatchObject({ required: false, authority: { factId: 'fact_pz_policy_pickup_window' } });
+    expect(detectConflict({ kind: 'policy', key: 'pickup_window', value: { minutes: 30 } }, ctx)).toMatchObject({ required: false, authority: { factId: 'fact_pizza_policy_pickup_window' } });
     // A text policy cannot be compared with a structured one.
     expect(detectConflict({ kind: 'policy', key: 'pickup_window', value: { text: 'about twenty minutes' } }, ctx)).toBeUndefined();
     expect(detectConflict({ kind: 'hours', key: 'mon', value: { closed: true } }, ctx)?.required).toBe(false);
 
     const barber = { catalog: [], verifiedFacts: SEED_FACTS.filter((f) => f.businessId === 'biz_barber_01') };
-    expect(detectConflict({ kind: 'service', key: 'svc_cut', value: { name: 'Haircut', priceMinor: 3500, currency: 'USD' } }, barber)?.required).toBe(true);
-    expect(detectConflict({ kind: 'service', key: 'svc_cut', value: { name: 'Haircut', durationMinutes: 40 } }, barber)?.required).toBe(false);
+    expect(detectConflict({ kind: 'service', key: 'svc_haircut', value: { name: 'Haircut', priceMinor: 3500, currency: 'USD' } }, barber)?.required).toBe(true);
+    expect(detectConflict({ kind: 'service', key: 'svc_haircut', value: { name: 'Haircut', durationMinutes: 40 } }, barber)?.required).toBe(false);
   });
 });

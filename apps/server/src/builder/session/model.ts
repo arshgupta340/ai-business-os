@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AgentTemplateSchema, KnowledgeScopeSchema, type AgentSpec, type BuilderMessage } from '../pending-contracts';
+import { AgentTemplateSchema, KnowledgeScopeSchema, type BuilderMessage, type DraftAgentSpec } from '@abos/contracts';
 
 // The builder model: one call per owner turn (API.md 3.3). Two implementations:
 // OpenAiBuilderModel (Responses API, strict Structured Outputs) and
@@ -30,7 +30,7 @@ export interface BuilderTurnInput {
   businessName: string;
   ownerText: string;
   history: Pick<BuilderMessage, 'role' | 'text'>[];
-  draftSpec: Partial<AgentSpec>;
+  draftSpec: DraftAgentSpec;
   missingFields: string[];
   // What the builder already knows, as data for the model to read.
   knownFacts: { kind: string; key: string; value: unknown }[];

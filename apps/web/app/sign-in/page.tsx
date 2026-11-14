@@ -14,6 +14,7 @@ import {Button} from '@astryxdesign/core/Button';
 import {Card} from '@astryxdesign/core/Card';
 import {Banner} from '@astryxdesign/core/Banner';
 import {LoadingState} from '@/components/LoadingState';
+import {SessionNotice} from '@/components/SessionNotice';
 import {useAuth} from '@/lib/session/auth';
 
 // Standalone auth page paints its own body background (no host shell).
@@ -80,6 +81,8 @@ export default function SignInPage() {
                 Sign in as the business owner.
               </Text>
             </VStack>
+
+            <SessionNotice />
 
             {isMock ? (
               <Banner

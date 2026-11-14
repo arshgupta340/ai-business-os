@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../app';
 import { parseEnv } from '../env';
+import { isLoopbackAddress } from './auth';
 import { builderAuthMode } from './env';
 
 // The builder fails closed: with no auth option, only BUILDER_DEV_AUTH=1 (and
@@ -65,6 +66,52 @@ describe('builder auth fails closed', () => {
     app = await appWith({ BUILDER_DEV_AUTH: '1' });
     const res = await app.inject({ method: 'POST', url: '/api/builder/sessions?businessId=biz_pizza_01', headers: AUTH, payload: {} });
     expect(res.statusCode).toBe(201);
+  });
+
+  it('the dev stand-in answers loopback addresses only', async () => {
+    app = await appWith({ BUILDER_DEV_AUTH: '1' });
+    for (const remoteAddress of ['127.0.0.1', '::1', '::ffff:127.0.0.1']) {
+      const res = await app.inject({ method: 'POST', url: '/api/builder/sessions?businessId=biz_pizza_01', headers: AUTH, payload: {}, remoteAddress });
+      expect(res.statusCode, remoteAddress).toBe(201);
+    }
+    for (const remoteAddress of ['192.168.1.20', '10.0.0.5', '::ffff:192.168.1.20', 'fe80::1', '127.0.0.2']) {
+      for (const [method, url] of routes) {
+        const res = await app.inject({ method, url, headers: AUTH, payload: {}, remoteAddress });
+        expect(res.statusCode, `${remoteAddress} ${method} ${url}`).toBe(401);
+        expect(res.json()).toMatchObject({ code: 'UNAUTHENTICATED', message: 'Development auth accepts requests from this machine only.', retryable: false });
+      }
+    }
+  });
+
+  it('the dev stand-in does not trust X-Forwarded-For', async () => {
+    app = await appWith({ BUILDER_DEV_AUTH: '1' });
+    const spoofed = await app.inject({
+      method: 'POST',
+      url: '/api/builder/sessions?businessId=biz_pizza_01',
+      headers: { ...AUTH, 'x-forwarded-for': '127.0.0.1', 'x-real-ip': '127.0.0.1' },
+      payload: {},
+      remoteAddress: '203.0.113.7',
+    });
+    expect(spoofed.statusCode).toBe(401);
+    expect(spoofed.json().code).toBe('UNAUTHENTICATED');
+    // A loopback peer that sends a foreign X-Forwarded-For is still the loopback peer.
+    const local = await app.inject({
+      method: 'POST',
+      url: '/api/builder/sessions?businessId=biz_pizza_01',
+      headers: { ...AUTH, 'x-forwarded-for': '203.0.113.7' },
+      payload: {},
+      remoteAddress: '127.0.0.1',
+    });
+    expect(local.statusCode).toBe(201);
+  });
+
+  it('reads loopback addresses exactly', () => {
+    expect(isLoopbackAddress('127.0.0.1')).toBe(true);
+    expect(isLoopbackAddress('::1')).toBe(true);
+    expect(isLoopbackAddress('::ffff:127.0.0.1')).toBe(true);
+    expect(isLoopbackAddress(undefined)).toBe(false);
+    expect(isLoopbackAddress('0.0.0.0')).toBe(false);
+    expect(isLoopbackAddress('127.0.0.1 ')).toBe(false);
   });
 
   it('keeps /api/builder/ping open', async () => {

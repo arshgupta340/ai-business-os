@@ -64,3 +64,9 @@ export const queryKeys = {
   call: (businessId: string, callId: string) => [...biz(businessId, "calls"), "detail", callId] as const,
   telemetry: (businessId: string, since?: string) => [...biz(businessId, "telemetry"), since ?? null] as const,
 };
+
+/**
+ * The pending approvals query the sidebar badge and the Approvals inbox share,
+ * so both read one cache entry: useApprovals(businessId, PENDING_APPROVALS_QUERY).
+ */
+export const PENDING_APPROVALS_QUERY = { state: "PENDING", limit: 200 } as const satisfies ApprovalsQuery;
