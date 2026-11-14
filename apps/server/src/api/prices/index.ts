@@ -28,6 +28,11 @@ export const pricesPlugin: FastifyPluginAsync<PricesDependencies> = async (app, 
       if (!params.success) throw apiFailure('VALIDATION_FAILED', 'The business path is invalid.');
       const owner = await deps.auth.requireOwner(request, params.data.id);
       if (!owner) throw apiFailure('UNAUTHENTICATED', 'An owner session is required.');
+      // The price proposal contract has no resolvesConflictId yet (NOTES.md), so say what works instead.
+      if (request.body && typeof request.body === 'object' && 'resolvesConflictId' in request.body) {
+        return reply.code(ERROR_CODE_INFO.VALIDATION_FAILED.httpStatus).send(makeApiError('VALIDATION_FAILED',
+          'A price change cannot resolve a conflict yet. Change the price, sync, then keep the current value on the conflict.', correlationId));
+      }
       const parsed = endpoint.body.safeParse(request.body);
       if (!parsed.success) throw apiFailure('VALIDATION_FAILED', 'The price proposal is invalid.');
       const input = parsed.data;
