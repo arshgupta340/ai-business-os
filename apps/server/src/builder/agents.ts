@@ -1,5 +1,6 @@
 import { BuilderSessionIdSchema, type Agent, type AgentStatus } from '@abos/contracts';
 import { z } from 'zod';
+import { KeyedLock, sessionLockKey } from './publish/lock';
 import { validateCapabilitySet } from './registry';
 import { toVersionView, type AgentVersionRecord } from './publish/stores';
 import { BuilderAgentSpecSchema } from './spec';
@@ -48,19 +49,45 @@ export interface AgentServiceDeps {
   liveAgent: LiveAgentReader;
   activeVersions?: ActiveVersionReader;
   now: () => Date;
+  // The per-session lock that chat turns use (BuilderSessionService), so a
+  // create from a session never interleaves with a turn or another create for
+  // that session. Without one, the service makes its own.
+  sessionLock?: KeyedLock;
 }
 
 export class AgentService {
-  constructor(private readonly deps: AgentServiceDeps) {}
+  private readonly sessionLock: KeyedLock;
 
+  constructor(private readonly deps: AgentServiceDeps) {
+    this.sessionLock = deps.sessionLock ?? new KeyedLock();
+  }
+
+  // A create from a builder session runs under that session's lock. Two
+  // creates for one session then run one after the other, and the second
+  // finds the agent the first one made and returns it, so a session never
+  // gets two agents. The lock is in this process only. Two server processes
+  // sharing one database would need a guard in the session store as well.
   async create(businessId: string, body: CreateAgentBody): Promise<AgentSummary> {
+    if ('builderSessionId' in body) {
+      return this.sessionLock.run(sessionLockKey(businessId, body.builderSessionId), () => this.createLocked(businessId, body));
+    }
+    return this.createLocked(businessId, body);
+  }
+
+  private async createLocked(businessId: string, body: CreateAgentBody): Promise<AgentSummary> {
     const id = newId('agt_');
     let draft: Record<string, unknown>;
     let sessionToClose: Awaited<ReturnType<BuilderSessionStore['get']>> = undefined;
     if ('builderSessionId' in body) {
       sessionToClose = await this.deps.sessions.get(businessId, body.builderSessionId);
       if (!sessionToClose) throw apiError('NOT_FOUND', 'Builder session not found.');
-      if (sessionToClose.agentId) throw apiError('INVALID_STATE', 'This session already has an agent.', { state: sessionToClose.status });
+      if (sessionToClose.agentId) {
+        // The session already made its agent (a second click, a retry or a
+        // request that ran at the same time). Return that agent.
+        const existing = await this.deps.agents.get(businessId, sessionToClose.agentId);
+        if (existing) return this.summary(existing);
+        throw apiError('INVALID_STATE', 'This session already has an agent.', { state: sessionToClose.status });
+      }
       draft = { ...sessionToClose.draftSpec };
     } else {
       draft = { ...body.spec };

@@ -264,8 +264,7 @@ describe('tenant isolation', () => {
     for (const route of lists) {
       // Naming the victim business.
       const scoped = await send(route, { businessId: PIZZA, headers: OTHER, query: 'limit=200' });
-      // Owner-scoped routes ignore businessId, and a health ping has no scope. Whatever they answer, nothing of the victim may be in it.
-      if (scoped.statusCode !== 403 && !['/api/builder/ping'].includes(route.url)) violations.push(`${keyOf(route)} in the victim scope: status ${scoped.statusCode}`);
+      if (scoped.statusCode !== 403) violations.push(`${keyOf(route)} in the victim scope: status ${scoped.statusCode}`);
       if (leaked(scoped).length) violations.push(`${keyOf(route)} in the victim scope: leaked ${leaked(scoped).join(', ')}`);
       // The attacker's own, empty business.
       const own = await send(route, { businessId: OTHER_BIZ, headers: OTHER, query: 'limit=200' });
@@ -354,8 +353,8 @@ describe('authentication', () => {
   // An unsigned JWT that names the real owner. A verifier that trusted it would be the bug.
   const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
   const ALG_NONE = `${b64({ alg: 'none', typ: 'JWT' })}.${b64({ sub: OWNER_AUTH, aud: 'authenticated', role: 'authenticated', exp: 4102444800 })}.`;
-  /** Routes that answer without a token today. Each is listed in the pull request under "Defects found". */
-  const OPEN_ROUTES = ['GET /api/builder/ping', 'HEAD /api/builder/ping'];
+  /** Routes that answer without a token. There are none: adding one here is a decision, not a way to make a test pass. */
+  const OPEN_ROUTES: string[] = [];
 
   async function unauthenticated(route: Route, headers: Record<string, string>, query?: string): Promise<string[]> {
     const t = targets[keyOf(route)];
@@ -398,18 +397,19 @@ describe('authentication', () => {
     expect(problems).toEqual([]);
   });
 
-  // DEFECT 3 (see the pull request), left open on purpose: the builder plugin registers GET
-  // /api/builder/ping with no auth check, and the global guard skips routes whose policy is `builder`.
-  // It answers 200 to anyone and returns nothing about a business. The route is in the UI lead's folder
-  // (apps/server/src/builder/) and her own test requires it open; tracked in issue #96.
-  it.fails('GET /api/builder/ping without a token returns 401 like every other /api route', async () => {
-    const res = await w.app.inject({ url: '/api/builder/ping' });
-    expect(res.statusCode).toBe(401);
+  // Issue #96: the builder's scaffolding route GET /api/builder/ping answered 200 to anyone. The UI lead
+  // asked for it to be removed, so no /api route answers without a token any more.
+  it('GET /api/builder/ping is gone: without a token the path answers 404 or 401, never 200', async () => {
+    for (const method of ['GET', 'HEAD'] as const) {
+      const res = await w.app.inject({ method, url: '/api/builder/ping' });
+      expect([401, 404], method).toContain(res.statusCode);
+      expect(res.body, method).not.toContain('lane');
+    }
+    expect(api.map(keyOf).filter((k) => k.includes('ping'))).toEqual([]);
   });
-  it('the route that answers without a token returns nothing about any business', async () => {
-    const res = await w.app.inject({ url: '/api/builder/ping' });
-    expect(res.json()).toEqual({ ok: true, lane: 'builder' });
-    expect(leaks.filter((s) => res.body.includes(s))).toEqual([]);
+  it('with the owner\'s token the removed path is still not a route', async () => {
+    const res = await w.app.inject({ url: '/api/builder/ping', headers: OWNER });
+    expect(res.statusCode).toBe(404);
   });
 
   it('an unregistered /api path and an unknown method are refused without a token and never reach a handler', async () => {
@@ -453,7 +453,7 @@ describe('authentication with a verifier that knows more token states', () => {
 
   it.each(['expired', 'forged', 'stranger', 'crash'])('a token that is %s: 401 UNAUTHENTICATED on every registered /api route, with no detail from the verifier', async (token) => {
     const problems: string[] = [];
-    for (const route of x.app.routeInventory().filter((r) => r.url.startsWith('/api/') && r.url !== '/api/builder/ping')) {
+    for (const route of x.app.routeInventory().filter((r) => r.url.startsWith('/api/'))) {
       const hasBody = !['GET', 'HEAD'].includes(route.method);
       const path = route.url.replace(':id', route.url.startsWith('/api/businesses/:id') ? PIZZA : 'agt_pizza_01');
       const res = await x.app.inject({ method: route.method as 'GET', url: `${path}?businessId=${PIZZA}`, headers: { authorization: `Bearer ${token}` }, ...(hasBody ? { payload: {} } : {}) });

@@ -19,7 +19,7 @@ import {
   TEMPLATE_KNOWLEDGE_SCOPES,
   type CapabilitySetFit,
 } from '../registry';
-import { KeyedLock } from '../publish/lock';
+import { KeyedLock, sessionLockKey } from '../publish/lock';
 import { apiError, newId } from '../util';
 import { readableFactValue, sameFactMeaning, typedFactValue } from './fact-values';
 import type { BusinessContext, BusinessKnowledge } from './knowledge';
@@ -100,6 +100,10 @@ export interface BuilderSessionDeps {
   proposeFactFromChat?: ProposeFactFromChat;
   // Optional. Gets error codes only, never a value or the owner's words.
   log?: SessionLogger;
+  // Optional. The per-session lock shared with AgentService, so a turn and
+  // a create from the same session never interleave. Without one, the
+  // service makes its own.
+  sessionLock?: KeyedLock;
 }
 
 export interface SessionLogger {
@@ -110,7 +114,7 @@ const silent: SessionLogger = { warn() {} };
 
 export class BuilderSessionService {
   // One turn per session at a time, in this process (see message()).
-  private readonly turns = new KeyedLock();
+  private readonly turns: KeyedLock;
   // Proposal records whose session write failed, per session, so the next
   // turn in this process neither proposes them again nor loses them. They are
   // written with that turn's reply. A restart loses them (see turn()).
@@ -119,6 +123,7 @@ export class BuilderSessionService {
 
   constructor(private readonly deps: BuilderSessionDeps) {
     this.log = deps.log ?? silent;
+    this.turns = deps.sessionLock ?? new KeyedLock();
   }
 
   async create(input: { businessId: string; ownerId: string; agentId?: string }): Promise<BuilderSessionView> {
@@ -160,7 +165,7 @@ export class BuilderSessionService {
   // the builder only refuses a write when the stored session changed since it
   // was read (a check, not an atomic compare and swap).
   async message(businessId: string, sessionId: string, input: { text: string; inputMode: 'text' | 'voice' }): Promise<BuilderTurnResponse> {
-    return this.turns.run(`${businessId}:${sessionId}`, () => this.turn(businessId, sessionId, input));
+    return this.turns.run(sessionLockKey(businessId, sessionId), () => this.turn(businessId, sessionId, input));
   }
 
   private async turn(businessId: string, sessionId: string, input: { text: string; inputMode: 'text' | 'voice' }): Promise<BuilderTurnResponse> {
@@ -215,7 +220,7 @@ export class BuilderSessionService {
     // typed for its readers, and an answer may also change a verified fact or
     // correct an earlier draft; each saved draft then opens a fact_edit.
     const propose = this.deps.proposeFactFromChat;
-    const lockKey = `${businessId}:${sessionId}`;
+    const lockKey = sessionLockKey(businessId, sessionId);
     const carried = this.unrecorded.get(lockKey) ?? [];
     const ledger = proposalLedger(session.messages, carried);
     const newDrafts: BusinessFact[] = [];

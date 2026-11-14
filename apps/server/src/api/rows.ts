@@ -9,3 +9,15 @@ export function mapRow(value: unknown): Record<string, unknown> {
   }
   return output;
 }
+
+/**
+ * An approval row as the contract shows it. `approval_requests.payload` may hold server-side fields
+ * beside the hashed material (today only `resolvesConflictId` on a fact edit, policy/engine.ts). The
+ * contract payload is exactly the material, which the database keeps as `payload_canonical` and
+ * checks against the hash, so that text is what every reader of an approval gets.
+ */
+export function mapApprovalRow(value: unknown): Record<string, unknown> {
+  const row = mapRow(value);
+  if (typeof row.payloadCanonical === 'string') row.payload = JSON.parse(row.payloadCanonical) as unknown;
+  return row;
+}

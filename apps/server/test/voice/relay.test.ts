@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CAPABILITIES, TOOL_CAPABILITY, ToolNameSchema, isToolEffect, type AgentSpec } from '@abos/contracts';
 import { barberSpecV1, pizzaSpecV2 } from '@abos/contracts/fixtures';
 import { StreamTokenStore } from '../../src/voice/logic';
-import { adaptWs, buildSessionUpdate, checkSessionCapabilities, nextStage, runPhoneRelay } from '../../src/voice/relay';
+import { DEFAULT_LIMITS, adaptWs, buildSessionUpdate, checkSessionCapabilities, nextStage, runPhoneRelay } from '../../src/voice/relay';
 import type { CallDecision, PinnedCall, RelayLimits } from '../../src/voice/types';
 import { FakeSocket, PIZZA_SNAPSHOT, fakeCalls, fakeEvents, fakeLogger, fakeToolset, specWith, ulaw, type Json } from './helpers';
 
@@ -318,6 +318,175 @@ describe('voice relay: wait and finish (FLOWS 3.1)', () => {
     await vi.waitFor(() => expect(s.outputs()).toHaveLength(1));
     await new Promise((r) => setTimeout(r, 120));
     expect(JSON.stringify(s.openai().sent)).not.toContain('still pending');
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
+  });
+});
+
+// Issue #95 item 8: the phone path had no cap. A caller who keeps changing the cart and saying yes could
+// fill the approvals inbox, and a looping model could call tools without end.
+describe('voice relay: per-call caps on tool calls and proposals (issue #95 item 8)', () => {
+  const systemTexts = (s: ReturnType<typeof setup>) => s.openai().ofType('conversation.item.create')
+    .map((m) => (m as { item: { type: string; role?: string; content?: { text: string }[] } }).item)
+    .filter((i) => i.type === 'message' && i.role === 'system').map((i) => i.content?.[0]?.text ?? '');
+  const proposal = (n: number) => ({ ok: true, proposalId: `ord_${n}`, approvalId: `apv_${n}`, missingFields: [] });
+
+  it('has finite default caps, with room for a normal call', () => {
+    expect(DEFAULT_LIMITS.maxToolCalls).toBeGreaterThanOrEqual(20);
+    expect(DEFAULT_LIMITS.maxToolCalls).toBeLessThanOrEqual(100);
+    expect(DEFAULT_LIMITS.maxProposals).toBeGreaterThanOrEqual(2);
+    expect(DEFAULT_LIMITS.maxProposals).toBeLessThanOrEqual(5);
+  });
+
+  it('past the tool-call cap the extra call is refused without reaching the toolset, recorded, and the agent says it cannot continue; then the call ends', async () => {
+    const s = setup({ limits: { maxToolCalls: 3 } });
+    await s.connect();
+    for (let i = 1; i <= 3; i++) {
+      s.openai().emit(s.fnCall('read_catalog', '{"query":"pepperoni"}', `fc_${i}`));
+      await vi.waitFor(() => expect(s.outputs()).toHaveLength(i));
+    }
+    expect(s.call).toHaveBeenCalledTimes(3);
+    expect(s.events.guardrailRefused).not.toHaveBeenCalled();
+    expect(systemTexts(s)).toEqual([]);
+
+    s.openai().emit(s.fnCall('read_catalog', '{"query":"PRIVATE caller words"}', 'fc_4'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(4));
+    // Refused before the toolset, with a tool failure the model can read.
+    expect(s.call).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(String(s.outputs()[3]?.output))).toMatchObject({ ok: false, reason: 'VALIDATION_FAILED' });
+    // Recorded with fixed codes only: nothing the model sent.
+    await vi.waitFor(() => expect(s.events.guardrailRefused).toHaveBeenCalledTimes(1));
+    expect(s.events.guardrailRefused).toHaveBeenCalledWith({ businessId: 'biz_pizza_01', payload: { callId: 'call_test_01', rule: 'unsupported_request', reasonCode: 'tool_call_limit', toolName: 'read_catalog' } });
+    expect(JSON.stringify(s.events.guardrailRefused.mock.calls)).not.toContain('PRIVATE');
+    expect(s.lines.some((l) => l.level === 'warn' && l.msg.includes('tool call limit'))).toBe(true);
+    expect(JSON.stringify(s.lines)).not.toContain('PRIVATE');
+    // The agent is told, by a fixed server instruction, to say it cannot continue.
+    await vi.waitFor(() => expect(systemTexts(s)).toHaveLength(1));
+    expect(systemTexts(s)[0]).toContain('I cannot continue with this call');
+    const goodbye = s.openai().ofType('response.create').find((m) => m.response !== undefined) as { response: Json };
+    expect(goodbye).toBeDefined();
+    // The goodbye plays, then the server ends the call.
+    s.openai().emit({ type: 'response.created', response: { id: 'resp_limit', metadata: goodbye.response.metadata } });
+    s.openai().emit({ type: 'response.output_audio.delta', item_id: 'item_limit', delta: ulaw(20) });
+    s.openai().emit({ type: 'response.done', response: { id: 'resp_limit', status: 'completed', output: [] } });
+    s.phone.emit({ event: 'mark', mark: { name: 'p1' } });
+    expect(await s.relay.done).toMatchObject({ endReason: 'completed' });
+    expect(s.calls.endCall).toHaveBeenCalledWith('call_test_01', 'completed');
+  });
+
+  it('every call past the tool-call cap is refused and recorded, and a model that keeps calling is cut off', async () => {
+    const s = setup({ limits: { maxToolCalls: 1, goodbyeMaxMs: 10_000 } });
+    await s.connect();
+    s.openai().emit(s.fnCall('read_catalog', '{}', 'fc_1'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(1));
+    // The first call past the cap: the agent is told to say goodbye.
+    s.openai().emit(s.fnCall('quote_order', '{}', 'fc_2'));
+    await vi.waitFor(() => expect(systemTexts(s)).toHaveLength(1));
+    // The model ignores that and keeps calling tools.
+    for (let i = 3; i <= 12; i++) s.openai().emit(s.fnCall('quote_order', '{}', `fc_${i}`));
+    const outcome = await s.relay.done;
+    expect(outcome.endReason).toBe('completed');
+    expect(outcome.why).toContain('tool call limit');
+    expect(s.call).toHaveBeenCalledTimes(1);
+    const refused = s.events.guardrailRefused.mock.calls.map((c) => c[0].payload);
+    expect(refused.length).toBeGreaterThanOrEqual(2);
+    expect(refused.length).toBeLessThan(11);
+    expect(new Set(refused.map((p) => p.reasonCode))).toEqual(new Set(['tool_call_limit']));
+    // One goodbye instruction, not one per refused call.
+    expect(systemTexts(s)).toHaveLength(1);
+  });
+
+  it('unknown and disallowed tool names count toward the cap too', async () => {
+    const s = setup({ limits: { maxToolCalls: 2 } });
+    await s.connect();
+    s.openai().emit(s.fnCall('send_message', '{}', 'fc_1'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(1));
+    s.openai().emit(s.fnCall('propose_booking', '{}', 'fc_2'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(2));
+    s.openai().emit(s.fnCall('read_catalog', '{}', 'fc_3'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(3));
+    expect(s.call).not.toHaveBeenCalled();
+    expect(JSON.parse(String(s.outputs()[2]?.output))).toMatchObject({ ok: false, reason: 'VALIDATION_FAILED' });
+    expect(s.events.guardrailRefused.mock.calls.map((c) => c[0].payload.reasonCode)).toEqual(['unknown_tool', 'tool_not_allowed', 'tool_call_limit']);
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
+  });
+
+  it('past the proposal cap a further proposal is refused without reaching the toolset and recorded; the call goes on and read tools still work', async () => {
+    const s = setup({ limits: { maxProposals: 2 } });
+    await s.connect();
+    s.call.mockResolvedValueOnce(proposal(1)).mockResolvedValueOnce(proposal(2));
+    s.openai().emit(s.fnCall('propose_order', '{"n":1}', 'fc_1'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(1));
+    s.openai().emit(s.fnCall('propose_order', '{"n":2}', 'fc_2'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(2));
+    expect(s.call).toHaveBeenCalledTimes(2);
+    expect(s.events.guardrailRefused).not.toHaveBeenCalled();
+
+    s.openai().emit(s.fnCall('propose_order', '{"n":3}', 'fc_3'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(3));
+    expect(s.call).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(s.outputs()[2]?.output))).toMatchObject({ ok: false, reason: 'VALIDATION_FAILED' });
+    await vi.waitFor(() => expect(s.events.guardrailRefused).toHaveBeenCalledTimes(1));
+    expect(s.events.guardrailRefused).toHaveBeenCalledWith({ businessId: 'biz_pizza_01', payload: { callId: 'call_test_01', rule: 'unsupported_request', reasonCode: 'proposal_limit', toolName: 'propose_order' } });
+    // The agent is told to say so. It is not a goodbye: the call is not ended.
+    expect(systemTexts(s).filter((t) => t.includes('I cannot send another request on this call'))).toHaveLength(1);
+    expect(s.calls.endCall).not.toHaveBeenCalled();
+    // A read tool still runs.
+    s.openai().emit(s.fnCall('read_catalog', '{}', 'fc_4'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(4));
+    expect(s.call).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(String(s.outputs()[3]?.output))).toMatchObject({ ok: true });
+    // A second refused proposal is recorded again, and the agent is not told twice.
+    s.openai().emit(s.fnCall('propose_order', '{"n":4}', 'fc_5'));
+    await vi.waitFor(() => expect(s.events.guardrailRefused).toHaveBeenCalledTimes(2));
+    expect(systemTexts(s).filter((t) => t.includes('I cannot send another request on this call'))).toHaveLength(1);
+    expect(s.call).toHaveBeenCalledTimes(3);
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
+  });
+
+  it('a repeat that returns the same stored proposal, and a proposal that failed, do not use up the proposal cap', async () => {
+    const s = setup({ limits: { maxProposals: 2 } });
+    await s.connect();
+    s.call.mockResolvedValueOnce(proposal(1)).mockResolvedValueOnce(proposal(1)).mockResolvedValueOnce({ ok: false, reason: 'QUOTE_EXPIRED' }).mockResolvedValueOnce(proposal(2));
+    for (let i = 1; i <= 4; i++) {
+      s.openai().emit(s.fnCall('propose_order', '{}', `fc_${i}`));
+      await vi.waitFor(() => expect(s.outputs()).toHaveLength(i));
+    }
+    expect(s.call).toHaveBeenCalledTimes(4);
+    expect(s.events.guardrailRefused).not.toHaveBeenCalled();
+    s.openai().emit(s.fnCall('propose_order', '{}', 'fc_5'));
+    await vi.waitFor(() => expect(s.events.guardrailRefused).toHaveBeenCalledTimes(1));
+    expect(s.call).toHaveBeenCalledTimes(4);
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
+  });
+
+  it('a proposal whose result is unknown (it timed out) uses one place, so a retry loop cannot go round the cap', async () => {
+    const s = setup({ limits: { maxProposals: 1, toolTimeoutMs: 30 } });
+    await s.connect();
+    s.call.mockImplementationOnce(() => new Promise(() => undefined));
+    s.openai().emit(s.fnCall('propose_order', '{}', 'fc_1'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(1));
+    expect(JSON.parse(String(s.outputs()[0]?.output))).toMatchObject({ ok: false, reason: 'INTEGRATION_UNAVAILABLE' });
+    s.openai().emit(s.fnCall('propose_order', '{}', 'fc_2'));
+    await vi.waitFor(() => expect(s.events.guardrailRefused).toHaveBeenCalledTimes(1));
+    expect(s.call).toHaveBeenCalledTimes(1);
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
+  });
+
+  it('the booking agent gets the same caps', async () => {
+    const s = setup({ spec: barberSpecV1, limits: { maxProposals: 1 } });
+    await s.connect();
+    s.call.mockResolvedValueOnce({ ok: true, proposalId: 'bkg_1', approvalId: 'apv_b1', missingFields: [] });
+    s.openai().emit(s.fnCall('propose_booking', '{}', 'fc_1'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(1));
+    s.openai().emit(s.fnCall('propose_booking', '{}', 'fc_2'));
+    await vi.waitFor(() => expect(s.events.guardrailRefused).toHaveBeenCalledTimes(1));
+    expect(s.events.guardrailRefused.mock.calls[0]?.[0].payload).toMatchObject({ reasonCode: 'proposal_limit', toolName: 'propose_booking' });
+    expect(s.call).toHaveBeenCalledTimes(1);
     s.phone.emit({ event: 'stop' });
     await s.relay.done;
   });

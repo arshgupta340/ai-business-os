@@ -12,11 +12,12 @@
 // a second proposal). One bound covers waiting and running: when it passes, the caller hears a fixed
 // apology, the turn is abandoned (it starts no further tool call and its unheard reply is not kept), and the
 // next turn waits only for a tool call that is still running.
-import { AgentSpecSchema, toolsForCapabilities, type AgentSpec, type CallEndReason, type CapabilityId } from '@abos/contracts';
+import { AgentSpecSchema, type AgentSpec, type CallEndReason, type CapabilityId, type MessageChannelSetting } from '@abos/contracts';
 import type { AgentModel } from '../../builder/runner/agent-model';
 import type { QueryDb } from '../../db/index';
 import type { CallsStore } from '../../compose/ports';
 import type { RealToolset } from '../../tools/real/types';
+import { checkSessionCapabilities } from '../../voice/relay';
 import type { CallDecision, CallDecisionsPort, LiveAgentPort } from '../../voice/types';
 import { initialTurnStage, runAgentTurn, type TurnSession } from '../../api/simcall/turn';
 import type { TurnReply } from '../types';
@@ -51,6 +52,8 @@ export interface AgentPhoneVoiceDeps {
   calls: CallsStore;
   toolsetFor(ctx: { businessId: string; agentVersionId: string; callId: string; capabilities: readonly CapabilityId[] }): RealToolset;
   model: AgentModel;
+  /** The server's MESSAGE_CHANNEL setting, which the phone prompt takes (shared runner). */
+  messageChannel: MessageChannelSetting;
   decisions?: CallDecisionsPort | undefined;
   now(): Date;
   newId(prefix: string): string;
@@ -95,6 +98,13 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
     if (!row) {
       const live = await deps.liveAgent.resolve(to);
       if (live.state !== 'live') return { speak: { text: SPEECH.notTakingCalls, hangup: true } };
+      // The phone path's check, before the call starts (voice/plugin.ts does the same at the Twilio webhook):
+      // a published spec with a capability an agent may not hold takes no call, and no call row is made.
+      const allowed = checkSessionCapabilities(live.spec);
+      if (!allowed.ok) {
+        deps.log?.warn({ agentVersionId: live.agentVersionId, unknown: allowed.unknown.length, notAllowed: allowed.notAllowed.length }, 'agentphone: live agent has a capability that is not allowed; call refused');
+        return { speak: { text: SPEECH.notTakingCalls, hangup: true }, businessId: live.businessId };
+      }
       try {
         await deps.calls.startCall({ businessId: live.businessId, agentId: live.agentId, agentVersionId: live.agentVersionId, providerCallId, callerLast4 });
       } catch { /* A concurrent first turn won the insert; read its row below. */ }
@@ -109,6 +119,13 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
     if (!spec.success) return { speak: { text: SPEECH.notTakingCalls, hangup: true }, businessId };
     const callId = String(row.id);
     const agentVersionId = String(row.agent_version_id);
+    // A call that is already running on a spec the check refuses (it started before the check existed, or
+    // in another process): the call fails, as on the Twilio socket. The turn runner would refuse it too.
+    if (!checkSessionCapabilities(spec.data).ok) {
+      deps.log?.warn({ agentVersionId }, 'agentphone: pinned spec has a capability that is not allowed; call ended');
+      await deps.calls.endCall(callId, 'failed');
+      return { speak: { text: SPEECH.notTakingCalls, hangup: true }, businessId };
+    }
     if (sessions.size >= MAX_SESSIONS) drop(sessions.keys().next().value as string);
     const s: Session = {
       spec: spec.data, businessId, businessName: String(row.business_name), agentVersionId, callId,
@@ -127,7 +144,7 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
     /** Number of live sessions (tests). */
     get size() { return sessions.size; },
     /** The tools the agent of a call holds (tests prove no write or external_message tool). */
-    toolsOf(providerCallId: string) { const s = sessions.get(providerCallId); return s ? toolsForCapabilities(s.spec.capabilities) : undefined; },
+    toolsOf(providerCallId: string) { const s = sessions.get(providerCallId); const c = s ? checkSessionCapabilities(s.spec) : undefined; return c?.ok ? c.tools : undefined; },
 
     async turn(input: { providerCallId: string; to: string; callerLast4?: string | undefined; text: string }): Promise<TurnOutcome> {
       const id = input.providerCallId;

@@ -1,7 +1,7 @@
 // Web app audit (Phase 3) and review finding 8: through the composed app, a signed-in owner reaches the
 // builder routes; without a token verifier the builder answers INTEGRATION_UNAVAILABLE (a server
-// problem, so the web app does not sign the owner out); every delegated /api route but the ping
-// refuses a request without a token.
+// problem, so the web app does not sign the owner out); every delegated /api route refuses a request
+// without a token (the builder's open ping route was removed, issue #96).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../../src/app';
 import { parseEnv } from '../../src/env';
@@ -21,11 +21,10 @@ describe('builder routes through the composed app', () => {
     expect(session.statusCode, session.body).toBe(201);
   });
 
-  // Review finding 8: GET /api/builder/ping is still open. The builder's own test (builder/auth.test.ts)
-  // requires it open and that directory is the UI lead's, so it is left to her (needs:saina).
-  it('every delegated /api route except the builder ping refuses a request without a token', async () => {
+  // Review finding 8 and issue #96: the builder's ping route is removed, so there is no exception.
+  it('every delegated /api route refuses a request without a token', async () => {
     await w.app.ready();
-    const delegated = w.app.routeInventory().filter((r) => r.url.startsWith('/api/') && r.url !== '/api/builder/ping' && r.auth === 'builder' && (r.method === 'GET' || r.method === 'POST'));
+    const delegated = w.app.routeInventory().filter((r) => r.url.startsWith('/api/') && r.auth === 'builder' && (r.method === 'GET' || r.method === 'POST'));
     expect(delegated.length).toBeGreaterThan(5);
     for (const r of delegated) {
       const url = r.url.replace(/:[A-Za-z]+/g, 'x_missing') + `?businessId=${PIZZA}`;

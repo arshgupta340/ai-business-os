@@ -2,7 +2,7 @@
 // poll. With TELEPHONY_PROVIDER=twilio (the default) the route answers 503 without reading the body, so the
 // composed app behaves as before. With agentphone selected but settings missing, the route also answers 503
 // and health names what is missing; nothing falls back to Twilio.
-import { WEBHOOK_ENDPOINTS, type CapabilityId } from '@abos/contracts';
+import { WEBHOOK_ENDPOINTS, type CapabilityId, type MessageChannelSetting } from '@abos/contracts';
 import { markWebhookProcessed } from '@abos/db';
 import type { FastifyPluginAsync } from 'fastify';
 import type { AgentModel } from '../builder/runner/agent-model';
@@ -41,6 +41,8 @@ export function createAgentPhoneWiring(deps: {
   calls: CallsStore;
   toolsetFor(ctx: { businessId: string; agentVersionId: string; callId: string; capabilities: readonly CapabilityId[] }): RealToolset;
   model: AgentModel;
+  /** The server's MESSAGE_CHANNEL setting, for the phone prompt. */
+  messageChannel: MessageChannelSetting;
   decisions: CallDecisionsPort;
   now(): Date;
   newId(prefix: string): string;
@@ -56,7 +58,7 @@ export function createAgentPhoneWiring(deps: {
   const missing = selected && ap ? [...ap.missing, ...(deps.hasDb ? [] : ['DATABASE_URL']), ...(deps.modelMissing ?? [])] : [];
   const enabled = selected && !!ap && missing.length === 0;
   const liveAgent = dbLiveAgentPort(deps.db);
-  const voice = enabled ? createAgentPhoneVoice({ db: deps.db, liveAgent, calls: deps.calls, toolsetFor: deps.toolsetFor, model: deps.model,
+  const voice = enabled ? createAgentPhoneVoice({ db: deps.db, liveAgent, calls: deps.calls, toolsetFor: deps.toolsetFor, model: deps.model, messageChannel: deps.messageChannel,
     decisions: deps.decisions, now: deps.now, newId: deps.newId, log: deps.log, ...(deps.turnTimeoutMs !== undefined ? { turnTimeoutMs: deps.turnTimeoutMs } : {}) }) : undefined;
 
   const off: FastifyPluginAsync = async (app) => {

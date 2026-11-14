@@ -343,7 +343,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     } : undefined,
   };
 
-  const agentphone = createAgentPhoneWiring({ telephony, db, hasDb, calls, toolsetFor, model: agentModel, decisions, now, newId, log,
+  const agentphone = createAgentPhoneWiring({ telephony, db, hasDb, calls, toolsetFor, model: agentModel, messageChannel, decisions, now, newId, log,
     ...(options.telephony?.interimAfterMs !== undefined ? { interimAfterMs: options.telephony.interimAfterMs } : {}),
     ...(options.telephony?.turnTimeoutMs !== undefined ? { turnTimeoutMs: options.telephony.turnTimeoutMs } : {}),
     receiptsEnabled: messageChannel === 'agentphone', modelMissing });

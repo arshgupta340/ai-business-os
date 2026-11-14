@@ -3,13 +3,16 @@
 // with a test secret as the vendor's documentation describes, REST reads go to a fake HTTP port, and the
 // agentphone message channel talks to a fake fetch.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { CAPABILITIES, ENDPOINTS, TOOL_CAPABILITY, type Cart, type Quote, type ToolName, type ToolResult } from '@abos/contracts';
+import { AgentSpecSchema, CAPABILITIES, ENDPOINTS, TOOL_CAPABILITY, type AgentSpec, type Cart, type Quote, type ToolName, type ToolResult } from '@abos/contracts';
 import { createMessageAdapter } from '../../src/adapters/message/index';
+import { PLAIN_SPEECH_RULE } from '../../src/api/simcall/plain';
 import { createDbExecutor } from '../../src/compose/executor';
 import { notWiredExecutor, type SeamDeps } from '../../src/compose/seams';
 import type { HttpPort } from '../../src/telephony/agentphone/client';
 import { REJECTED_EVENTS_PER_MINUTE } from '../../src/telephony/agentphone/plugin';
 import { agentPhoneSignature } from '../../src/telephony/agentphone/signature';
+import { buildInstructions } from '../../src/voice/prompt';
+import { DEFAULT_LIMITS, checkSessionCapabilities } from '../../src/voice/relay';
 import { OWNER, PHONE, createWorld, nextLocalDate, zonedIso, type World } from './world';
 
 const PIZZA = 'biz_pizza_01';
@@ -130,6 +133,54 @@ describe('AgentPhone webhook: replay, rule 6 and the processed mark', () => {
     expect(w.app.composed.agentphone.voice!.size).toBeGreaterThanOrEqual(1);
   });
 
+  it('one AgentPhone call stores at most the proposal cap of approvals; the fourth proposal is refused and recorded (issue #95 item 8)', async () => {
+    const cap = DEFAULT_LIMITS.maxProposals;
+    expect(cap).toBe(3);
+    const results: Record<string, unknown>[] = [];
+    const pickupAt = zonedIso(nextLocalDate([0, 1, 2, 3, 4, 5, 6]), '18:00', 'America/Los_Angeles');
+    for (let n = 1; n <= cap + 1; n++) {
+      const cart = { lines: [{ catalogItemId: 'SQ_ITEM_PEP', variationId: 'SQ_VAR_PEP_LG', quantity: n, modifierIds: [] }] };
+      w.model.push(async ({ executeTool }) => {
+        const q = await executeTool('quote_order', { cart }) as { ok: boolean; quote: { quoteId: string } };
+        results.push(await executeTool('propose_order', { cart, quoteId: q.quote.quoteId, fulfillment: { type: 'pickup', pickupAt }, contact: { name: 'Sam', messageConsent: false } }) as Record<string, unknown>);
+        return 'ok';
+      });
+      expect((await signed(w, voiceTurn('call_cap_1', `Make it ${n} pizzas. Yes, send it.`))).statusCode).toBe(200);
+    }
+    expect(results.slice(0, cap).map((r) => r.ok)).toEqual(Array(cap).fill(true));
+    expect(results[cap]).toMatchObject({ ok: false, reason: 'VALIDATION_FAILED' });
+    const call = (await w.t.db.query("select id from calls where provider_call_id = 'call_cap_1'", [])).rows[0] as { id: string };
+    expect(await count(w, 'select count(*)::int n from orders where call_id = $1', [call.id])).toBe(cap);
+    expect(await count(w, 'select count(*)::int n from approval_requests a join orders o on o.id = a.subject_id where o.call_id = $1', [call.id])).toBe(cap);
+    const refused = (await w.t.db.query("select payload from activity_events where correlation_id = $1 and type = 'guardrail.refused' and payload->>'reasonCode' = 'proposal_limit'", [call.id])).rows;
+    expect(refused).toEqual([{ payload: { callId: call.id, rule: 'unsupported_request', reasonCode: 'proposal_limit', toolName: 'propose_order' } }]);
+    // A read still works on the same call, and nothing was written outside our database.
+    let read: unknown;
+    w.model.push(async ({ executeTool }) => { read = await executeTool('read_catalog', { query: 'pepperoni' }); return 'ok'; });
+    await signed(w, voiceTurn('call_cap_1', 'What do you have?'));
+    expect(read).toMatchObject({ ok: true });
+    expect(w.squareWrites).toEqual([]);
+    expect(w.messageSends).toBe(0);
+  });
+
+  it('an AgentPhone turn gets the phone prompt and the tools of the session capability check, as a simulated call does (issue #95 item 10)', async () => {
+    const row = (await w.t.db.query("select v.spec, b.name from live_agent l join agent_versions v on v.id = l.agent_version_id join businesses b on b.id = l.business_id where l.phone_number = $1", [PHONE])).rows[0] as { spec: unknown; name: string };
+    const spec = AgentSpecSchema.parse(row.spec);
+    const phonePrompt = buildInstructions(spec, { businessName: row.name, messageChannel: w.app.composed.providers.messageChannel });
+    let phone = { instructions: '', tools: [] as string[] };
+    let simulated = { instructions: '', tools: [] as string[] };
+    w.model.push(async (input) => { phone = { instructions: input.instructions, tools: [...input.tools] }; return 'ok'; });
+    await signed(w, voiceTurn('call_parity_1', 'hello'));
+    w.model.push(async (input) => { simulated = { instructions: input.instructions, tools: [...input.tools] }; return 'ok'; });
+    expect((await w.app.inject({ method: 'POST', url: `/api/agents/agt_pizza_01/sim-call?businessId=${PIZZA}`, headers: OWNER, payload: { message: 'hello', end: true } })).statusCode).toBe(200);
+    expect(phone.instructions.startsWith(phonePrompt)).toBe(true);
+    expect(phone.instructions.slice(phonePrompt.length).trim()).toBe(PLAIN_SPEECH_RULE);
+    expect(phone.instructions).toBe(simulated.instructions);
+    const check = checkSessionCapabilities(spec);
+    expect(check.ok && [...check.tools].sort()).toEqual([...phone.tools].sort());
+    expect([...simulated.tools].sort()).toEqual([...phone.tools].sort());
+  });
+
   it('a turn on a call whose agent was unpublished is still marked processed (review F7)', async () => {
     w.model.push(async () => 'Hello.', async () => 'Still here.');
     await signed(w, voiceTurn('call_mk_1', 'Hi'));
@@ -160,6 +211,43 @@ describe('AgentPhone webhook: replay, rule 6 and the processed mark', () => {
     w.clock.advance(61_000);
     expect((await signed(w, voiceTurn('call_flood', 'hi'), { secret: 'wrong-secret' })).statusCode).toBe(401);
     expect(await rejected()).toBe(before + REJECTED_EVENTS_PER_MINUTE + 1);
+  });
+  it('a live version that lists a capability an agent may not hold takes no AgentPhone call; a call already on it ends as failed', async () => {
+    // A call that started on the good version, before the version below is pinned.
+    w.clock.advance(120_000);
+    w.model.push(async () => 'Hello.');
+    await signed(w, voiceTurn('call_capcheck_old', 'Hi'));
+    const good = (await w.t.db.query('select agent_version_id from live_agent where phone_number = $1', [PHONE])).rows[0] as { agent_version_id: string };
+    await w.t.admin(async (q) => {
+      const row = (await q.query('select v.spec from public.agent_versions v where v.id = $1', [good.agent_version_id])).rows[0] as { spec: AgentSpec };
+      const version = Number(((await q.query("select max(version) as v from public.agent_versions where agent_id = 'agt_pizza_01'")).rows[0] as { v: number }).v) + 1;
+      await q.query("insert into public.agent_versions (id, business_id, agent_id, version, spec, published_at) values ('agv_pizza_ap_write', $1, 'agt_pizza_01', $2, $3::jsonb, now())",
+        [PIZZA, version, JSON.stringify({ ...row.spec, capabilities: [...row.spec.capabilities, 'catalog.price.update'] })]);
+      await q.query("update public.agents set active_version_id = 'agv_pizza_ap_write' where id = 'agt_pizza_01'");
+      await q.query("update public.live_agent set agent_version_id = 'agv_pizza_ap_write' where phone_number = $1", [PHONE]);
+    });
+    try {
+      const before = await count(w, 'select count(*)::int n from calls');
+      let reached = false;
+      w.model.push(async () => { reached = true; return 'ok'; });
+      const r = await signed(w, voiceTurn('call_capcheck_new', 'hello'));
+      expect(chunks(r.payload)).toEqual([{ text: 'Sorry, this number is not taking calls right now. Goodbye.', hangup: true }]);
+      expect(r.payload).not.toContain('catalog.price.update');
+      expect(reached).toBe(false);
+      expect(await count(w, 'select count(*)::int n from calls')).toBe(before);
+      // A call pinned to the refused version by another process: its next turn ends it as failed.
+      await w.t.admin((q) => q.query("update public.calls set agent_version_id = 'agv_pizza_ap_write' where provider_call_id = 'call_capcheck_old'"));
+      w.app.composed.agentphone.voice!.dispose();
+      const old = await signed(w, voiceTurn('call_capcheck_old', 'Are you there?'));
+      expect(chunks(old.payload)).toEqual([{ text: 'Sorry, this number is not taking calls right now. Goodbye.', hangup: true }]);
+      expect(reached).toBe(false);
+      expect((await w.t.db.query("select status, end_reason from calls where provider_call_id = 'call_capcheck_old'", [])).rows[0]).toEqual({ status: 'FAILED', end_reason: 'failed' });
+    } finally {
+      await w.t.admin(async (q) => {
+        await q.query('update public.agents set active_version_id = $1 where id = \'agt_pizza_01\'', [good.agent_version_id]);
+        await q.query('update public.live_agent set agent_version_id = $1 where phone_number = $2', [good.agent_version_id, PHONE]);
+      });
+    }
   });
 });
 
