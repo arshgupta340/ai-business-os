@@ -1,6 +1,17 @@
 import {describe, expect, it} from 'vitest';
-import type {BuilderTurnResponse} from '@/lib/api';
-import {continueState, EMPTY_NOTES, groupCapabilities, mergeTurn, missingFieldQuestion, parseNotes} from './spec';
+import {ApiError, type BuilderTurnResponse} from '@/lib/api';
+import {
+  builderSendErrorView,
+  continueState,
+  EMPTY_NOTES,
+  groupCapabilities,
+  humanizeKey,
+  mergeTurn,
+  missingFieldQuestion,
+  parseNotes,
+  stopConditionLabel,
+  stopConditionLink,
+} from './spec';
 
 function turn(over: Partial<BuilderTurnResponse> = {}): BuilderTurnResponse {
   return {
@@ -116,5 +127,71 @@ describe('missingFieldQuestion', () => {
   it('asks a question for known keys and falls back to a readable key', () => {
     expect(missingFieldQuestion('policy.pickup_window')).toBe('How long until an order is ready for pickup?');
     expect(missingFieldQuestion('policy.after_hours')).toBe('Policy after hours');
+  });
+});
+
+// Real server answers on origin/arsh/integration:
+// apps/server/src/builder/session/requirements.ts stopConditions() and RULES,
+// apps/server/src/builder/session/service.ts turn() (INVALID_STATE and INTEGRATION_UNAVAILABLE).
+describe('builder turn answers from the real server', () => {
+  it('gives every stop condition code the builder sends an owner-readable line and a place to fix it', () => {
+    for (const code of ['missing_timezone', 'open_conflict', 'missing_message_consent_policy', 'empty_catalog']) {
+      const label = stopConditionLabel(code);
+      expect(label).not.toBe(humanizeKey(code));
+      expect(label).toMatch(/\.$/);
+      expect(label).not.toMatch(/_/);
+      expect(stopConditionLink(code)?.href).toMatch(/^\/(settings|knowledge)$/);
+    }
+    expect(stopConditionLink('open_conflict')?.href).toBe('/knowledge');
+    expect(stopConditionLink('brand_new_code')).toBeNull();
+  });
+
+  it('asks a real question for each missing field key the builder uses', () => {
+    for (const key of ['hours.mon', 'hours.sun', 'catalog.items', 'policy.min_notice', 'policy.message_consent', 'services', 'name', 'goal']) {
+      expect(missingFieldQuestion(key)).toMatch(/\?$/);
+    }
+    expect(missingFieldQuestion('hours.tue')).toMatch(/Tuesday/);
+  });
+
+  it('passes the approval id of a proposed fact_edit through unchanged', () => {
+    const notes = mergeTurn(EMPTY_NOTES, turn({proposedChange: {approvalId: 'apv_01JD8Q7Z9X', bundleType: 'fact_edit'}}));
+    expect(notes.proposedChanges).toEqual([{approvalId: 'apv_01JD8Q7Z9X', bundleType: 'fact_edit'}]);
+    expect(parseNotes(JSON.stringify(notes)).proposedChanges[0].approvalId).toBe('apv_01JD8Q7Z9X');
+  });
+
+  const err = (code: ApiError['code'], message: string, details: Record<string, unknown>, status: number, retryable: boolean) =>
+    new ApiError({code, message, status, retryable, details, kind: 'http', correlationId: 'cor_b_1'});
+
+  it('says a message hit by a session change was not lost and can be sent again', () => {
+    const view = builderSendErrorView(
+      err('INVALID_STATE', 'This builder session changed while the message was handled. Send it again.', {state: 'active'}, 409, false),
+    );
+    expect(view.canRetry).toBe(true);
+    expect(view.refreshSession).toBe(true);
+    expect(view.sessionBroken).toBe(false);
+    expect(view.tone).toBe('warning');
+    expect(view.description).toMatch(/not lost/);
+    expect(view.description).toMatch(/send it again/i);
+  });
+
+  it('treats a closed session as closed, not as a retry', () => {
+    const view = builderSendErrorView(err('INVALID_STATE', 'This builder session is closed.', {state: 'closed'}, 409, false));
+    expect(view.canRetry).toBe(false);
+    expect(view.sessionBroken).toBe(true);
+  });
+
+  it('names the builder model when OpenAI is not available', () => {
+    const view = builderSendErrorView(
+      err('INTEGRATION_UNAVAILABLE', 'The builder model is not available right now. Try again.', {provider: 'openai'}, 503, true),
+    );
+    expect(view.description).toMatch(/^OpenAI is not responding\./);
+    expect(view.description).toMatch(/kept/);
+    expect(view.canRetry).toBe(true);
+  });
+
+  it('falls back to the server message for anything else', () => {
+    const view = builderSendErrorView(err('INTERNAL', 'Something went wrong.', {}, 500, true));
+    expect(view.description).toBe('Something went wrong.');
+    expect(view.canRetry).toBe(true);
   });
 });

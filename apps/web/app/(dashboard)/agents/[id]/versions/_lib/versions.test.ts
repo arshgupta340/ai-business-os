@@ -210,3 +210,44 @@ describe('rollbackErrorView', () => {
     expect(rollbackErrorView(err('INTERNAL', undefined, 'network')).next).toBe('reload');
   });
 });
+
+// The real rollback answers: apps/server/src/builder/publish/service.ts rollback() and validateSpec()
+// on origin/arsh/integration.
+describe('rollbackErrorView with the real builder answers', () => {
+  const real = (code: ApiError['code'], message: string, details: Record<string, unknown>, status: number, retryable: boolean) =>
+    new ApiError({code, message, status, retryable, details, kind: 'http', correlationId: 'cor_rb_1'});
+
+  it('explains that a paused agent cannot take the number', () => {
+    const view = rollbackErrorView(
+      real('INVALID_STATE', 'A paused agent cannot take the number. Publish it first.', {state: 'paused'}, 409, false),
+    );
+    expect(view.message).toMatch(/^A paused agent cannot take the number\. Publish it first\./);
+    expect(view.title).not.toBe(rollbackErrorView(err('INVALID_STATE', {state: 'live'})).title);
+    expect(view.next).toBe('none');
+  });
+
+  it('still reads "already the active one" for a paused agent as a reload', () => {
+    const view = rollbackErrorView(
+      real('INVALID_STATE', 'That version is already the active one.', {state: 'paused', activeVersionId: 'agv_1'}, 409, false),
+    );
+    expect(view.next).toBe('reload');
+    expect(view.message).toMatch(/already the active one/);
+  });
+
+  it('names providers with the Integrations labels', () => {
+    expect(rollbackErrorView(real('INTEGRATION_UNAVAILABLE', 'x', {provider: 'google_calendar'}, 503, true)).title).toBe(
+      'Google Calendar is not responding',
+    );
+    expect(rollbackErrorView(real('INTEGRATION_UNAVAILABLE', 'x', {provider: 'twilio', providers: ['twilio', 'openai']}, 503, true)).title).toBe(
+      'Twilio and OpenAI are not connected',
+    );
+  });
+
+  it('shows why a stored version no longer passes validation', () => {
+    const view = rollbackErrorView(
+      real('VALIDATION_FAILED', 'The agent spec is not complete.', {issues: [{path: 'greeting', message: 'Required'}]}, 400, false),
+    );
+    expect(view.message).toMatch(/The agent spec is not complete\./);
+    expect(view.message).toMatch(/Nothing changed/);
+  });
+});
