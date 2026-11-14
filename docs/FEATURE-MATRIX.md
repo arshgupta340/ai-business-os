@@ -14,7 +14,7 @@ One row for each acceptance criterion AC-01 to AC-20 and for each P0 item in `do
 
 A row can be built and tested with fakes and also have one part verified. The row then names that part. Everything else in the row is not verified.
 
-Test totals for this checkout are in `SECURITY_NOTES.md` section 3. In short: typecheck passed, and all 1558 server and package tests passed with two workers. The default `npm test` run had 4 and then 5 timeouts in database tests on a 4-core container.
+Test totals for this checkout are in `SECURITY_NOTES.md` section 3. In short: typecheck passed, and all 1558 server and package tests passed with two workers. The default `npm test` run had 4 and then 5 timeouts in database tests on a 4-core container, and CI is red at the same step for the same kind of timeout.
 
 Paths are shortened: `server/` means `apps/server/`, `builder/` means `apps/server/src/builder/`, `db/` means `packages/db/test/`, and `contracts/` means `packages/contracts/src/`.
 

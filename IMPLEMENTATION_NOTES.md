@@ -12,6 +12,7 @@ Status words are used as in `SECURITY_NOTES.md` section 1: built and tested with
 - `main` is deployed on Render as `abos-server` and serves only the health route and the builder.
 - The real database has migrations 0001 to 0004. This branch needs 0005 as well.
 - `npm run typecheck` passes. All 1558 server and package tests pass with two workers. The default `npm test` run had 4 and then 5 timeouts in database tests on a 4-core container.
+- CI is red on this branch's base commit and on this branch, at the `npm test` step, with timeouts in the database tests' setup hooks. Details are in `SECURITY_NOTES.md` section 3.
 - No phone call, paid payment link, webhook, message, Calendar event or Sheets row has gone through this code against a real service.
 
 ## 2. Architecture as built
@@ -205,7 +206,7 @@ In the order I would do them.
 9. **Pass `decisions` and `twilioBusinessId`** to the voice plugin.
 10. **Add a routine for `webhook_events.processed_at`** and for the move to `FULFILLMENT_READY` (both marked `INTERIM(0005)` in `compose/interim-db.ts`).
 11. **Build the owner recovery actions** (P-19) or accept the reset script as the way out of a stuck record.
-12. **Raise the test timeout or lower the worker count** for the database tests, so `npm test` is stable on small machines.
+12. **Raise the test and hook timeouts or lower the worker count** for the database tests, so `npm test` is stable on small machines and CI can go green. CI is red today for this reason.
 13. **Look at the one failing web test**, `VoiceControl.test.tsx`.
 14. **Run the three rehearsals and the outside owner test** (AC-20). Neither has happened.
 
