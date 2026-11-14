@@ -32,7 +32,8 @@ import { createExecutor, DEFAULT_STALE_AFTER_MS } from '../executor/index';
 import { runSyncJob } from '../executor/jobs';
 import type { ExecutorDeps, MessageResult, QueuePort, StepOutcome, SubjectsPort, SyncDeps, SyncJob } from '../executor/types';
 import { emitActivity } from '../policy/activity';
-import { executionFromRow } from '../policy/engine';
+import { approvalFromRow, executionFromRow } from '../policy/engine';
+import { executeCatalogSyncStep, executePriceEditStep } from '../api/prices/index';
 import type { Executor, SeamDeps } from './seams';
 
 type Row = Record<string, unknown>;
@@ -288,6 +289,20 @@ export function createDbExecutor(deps: SeamDeps, options: DbExecutorOptions = {}
         const r = await providers.calendar.createEvent(input);
         if (r.ok) return { ok: true, googleEventId: r.googleEventId };
         return { ok: false, reason: r.reason, retryable: r.retryable, ...(r.alternatives ? { alternatives: r.alternatives } : {}) };
+      },
+    },
+    prices: {
+      async update({ executionId, approvalId, idempotencyKey, attempt }) {
+        if (!providers.prices) throw { code: 'INTEGRATION_UNAVAILABLE', requestSent: false, retryable: true };
+        const row = await one(db, 'select a.* from public.approval_requests a join public.action_executions e on e.approval_id = a.id where e.id = $1 and a.id = $2', [executionId, approvalId]);
+        if (!row) throw { code: 'NOT_FOUND', requestSent: false };
+        const approval = approvalFromRow(row);
+        if (approval.bundleType !== 'price_edit') throw { code: 'INVALID_STATE', requestSent: false };
+        return executePriceEditStep({ approval, idempotencyKey, attempt }, { square: providers.prices });
+      },
+      async sync({ businessId, attempt }) {
+        const square = providers.square;
+        return executeCatalogSyncStep({ businessId, attempt }, { sync: async (id) => { if (!square) throw new Error('Square is not configured'); await square.syncCatalog(db, id); } });
       },
     },
     templates: {

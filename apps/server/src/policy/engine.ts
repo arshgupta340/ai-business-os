@@ -9,7 +9,7 @@
 // edits), writes the activity events the routines do not write, and maps routine refusals to the
 // contract error codes. It never performs an external write.
 import {
-  ActionExecutionSchema, ApprovalRequestSchema, OrderSchema, BookingSchema, BusinessIdSchema, UserIdSchema,
+  ActionExecutionSchema, ApprovalRequestSchema, PriceEditApprovalPayloadSchema, type PriceEditApprovalPayload, OrderSchema, BookingSchema, BusinessIdSchema, UserIdSchema,
   MessageChannelSettingSchema, ContactSchema, BookingCustomerSchema, FactKindSchema,
   BUNDLE_ACTIONS, APPROVAL_EXPIRY_MS, ACTION_TYPE_CAPABILITY, CAPABILITIES,
   executionStepsFor, cartHash, payloadHash, idempotencyKey, canonicalJson, hashCanonical, pickMaterialFields,
@@ -288,6 +288,33 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
           await requested(tx, at, approval, approval.id);
           if (approval.bundleType !== 'fact_edit') throw new PolicyError('INTERNAL');
           return { approval };
+        });
+      } catch (error) { return rethrow(error); }
+    },
+
+    /**
+     * P-11 price change (api/prices). Stores a PENDING price_edit approval through create_approval and
+     * writes approval.requested, in one transaction. An identical pending proposal for the variation is
+     * returned as it is; a different one pending for the same row is a conflict. Nothing is written to
+     * Square until the owner approves and the executor runs the step.
+     */
+    async createPriceEditApproval(input: { ownerUserId: string; payload: PriceEditApprovalPayload; payloadHash: string }):
+      Promise<{ kind: 'created' | 'existing'; approval: ApprovalRequest } | { kind: 'conflict' }> {
+      const p = PriceEditApprovalPayloadSchema.parse(input.payload);
+      try {
+        return await db.transaction(async (tx) => {
+          await assertOwner(tx, p.businessId, input.ownerUserId);
+          const pending = await one(tx, `select * from public.approval_requests where business_id=$1 and subject_id=$2 and bundle_type='price_edit' and state='PENDING'
+            order by created_at desc limit 1`, [p.businessId, p.subjectId]);
+          if (pending) {
+            const existing = approvalFromRow(pending);
+            return existing.payloadHash === input.payloadHash ? { kind: 'existing' as const, approval: existing } : { kind: 'conflict' as const };
+          }
+          const at = await dbNow(tx);
+          const approval = await storeApproval(tx, 'price_edit', p as unknown as Record<string, unknown>, 'owner', input.ownerUserId);
+          if (approval.payloadHash !== input.payloadHash) throw new PolicyError('PAYLOAD_HASH_MISMATCH');
+          await requested(tx, at, approval, approval.id);
+          return { kind: 'created' as const, approval };
         });
       } catch (error) { return rethrow(error); }
     },

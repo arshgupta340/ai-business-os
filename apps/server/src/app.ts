@@ -7,6 +7,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { healthRoutes } from './api/health';
 import { apiRoutes } from './api/routes';
 import { registerSimCall } from './api/simcall/index';
+import { pricesPlugin } from './api/prices/index';
 import { createAuthGuard, routeAuthPolicyOf, withAuthPolicy, type RouteAuthPolicy } from './auth/verify';
 import { builderPlugin } from './builder/index';
 import { composeServer, type ComposeOptions, type ComposedServer } from './compose/index';
@@ -121,6 +122,9 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
         code: 'INTEGRATION_UNAVAILABLE', message: 'Phone voice is not configured on this server.', correlationId: request.correlationId, retryable: true }));
     });
   }
+
+  // P-11 price change proposals (B-26). The global guard authenticates the owner and the business first.
+  await app.register(withAuthPolicy('owner', pricesPlugin), composed.prices);
 
   // GET /api/telemetry (B-30). The global guard has already authenticated the owner.
   await app.register(withAuthPolicy('owner', telemetryPlugin), composed.telemetry);

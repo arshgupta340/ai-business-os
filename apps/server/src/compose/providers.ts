@@ -11,6 +11,7 @@ import { createCalendarAdapter, type CalendarAdapter } from '../adapters/calenda
 import { createMessageAdapter, type MessageAdapter } from '../adapters/message/index';
 import { createSheetsAdapter, type ReportingAdapter } from '../adapters/sheets/index';
 import { createSandboxSquareClient, createSquareAdapter, type SquareAdapter } from '../adapters/square/index';
+import { createPriceAdapter, type PriceAdapter } from '../adapters/square/price';
 import type { Env } from '../env';
 import type { HealthProbe } from './health';
 import { createTwilioRequestValidator, createWsOpenAISocketFactory, type OpenAISocketFactory, type TwilioRequestValidator } from '../voice/plugin';
@@ -21,6 +22,8 @@ export type ProviderStatus = { configured: boolean; detail: string; noProviderNe
 
 export interface Providers {
   square?: SquareAdapter | undefined;
+  /** P-11: read and write one variation's price at the configured location (sandbox only). */
+  prices?: PriceAdapter | undefined;
   /** The Square location the checkout order is built for (the adapter refuses any other). */
   squareLocationId?: string | undefined;
   /** Reads a payment's Square status (FAILED, CANCELED, ...) for a payment that did not verify. Read only. */
@@ -66,9 +69,11 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   // Square: sandbox only (AGENTS rule 4). env.ts already refuses any other SQUARE_ENVIRONMENT.
   let square: SquareAdapter | undefined;
   let squarePaymentStatus: Providers['squarePaymentStatus'];
+  let prices: PriceAdapter | undefined;
   if (env.SQUARE_ACCESS_TOKEN && env.SQUARE_LOCATION_ID) {
     const client = createSandboxSquareClient({ accessToken: env.SQUARE_ACCESS_TOKEN });
     square = createSquareAdapter({ client, locationId: env.SQUARE_LOCATION_ID, environment: env.SQUARE_ENVIRONMENT, now });
+    prices = createPriceAdapter({ client, locationId: env.SQUARE_LOCATION_ID, environment: env.SQUARE_ENVIRONMENT });
     squarePaymentStatus = async (paymentId) => (await client.payments.get({ paymentId })).payment?.status ?? undefined;
     const locationId = env.SQUARE_LOCATION_ID;
     probes.square = async () => {
@@ -160,7 +165,7 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   }
 
   return {
-    square, squareLocationId: env.SQUARE_LOCATION_ID, squarePaymentStatus, calendar: calendarAdapter, calendarId: env.GOOGLE_CALENDAR_ID, sheets: sheetsAdapter, sheetId: env.GOOGLE_SHEET_ID,
+    square, prices, squareLocationId: env.SQUARE_LOCATION_ID, squarePaymentStatus, calendar: calendarAdapter, calendarId: env.GOOGLE_CALENDAR_ID, sheets: sheetsAdapter, sheetId: env.GOOGLE_SHEET_ID,
     message, messageChannel, twilioValidator, openaiSocketFactory, status, probes,
     ...overrides,
   };

@@ -36,6 +36,7 @@ import { createDbWebhooks, type DbWebhooks } from './webhooks';
 import { createHealthMonitor, type HealthMonitor } from './health';
 import { createTelemetry, type TelemetryPluginOptions } from '../telemetry/index';
 import { mapRow } from '../api/rows';
+import type { PricesDependencies } from '../api/prices/index';
 import { createProposeFactFromChat, dbAgentDraftStore, dbBuilderSessionStore, dbBusinessKnowledge, dbDraftFactStore, dbLiveAgentReader, type ProposeFactFromChat } from './builder';
 import { notWiredExecutor, notWiredWebhooks, type Executor, type ExecutorFactory, type SeamDeps, type WebhooksFactory } from './seams';
 
@@ -85,6 +86,8 @@ export interface ComposedServer {
   webhooksPlugin: FastifyPluginAsync;
   /** The database webhooks wiring, when it is the one in use (jobs, recovery, reconciliation). */
   webhooks: DbWebhooks | undefined;
+  /** POST /api/businesses/:id/catalog/prices/propose (B-26): owner, catalog row, Square read, approval. */
+  prices: PricesDependencies;
   /** Integration health: configuration plus cached read-only probe results (API 3.11). */
   health: HealthMonitor;
   /** GET /api/telemetry (B-30) and the recorder modules may record into. */
@@ -174,6 +177,28 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     },
   };
 
+  // P-11 price change: a proposal reads Square's current price and stores a pending price_edit approval.
+  // The global guard has already authenticated the owner and checked the business (auth/verify.ts).
+  const prices: PricesDependencies = {
+    auth: { async requireOwner(request, businessId) {
+      const r = request as { ownerUserId?: string; businessId?: string };
+      return r.ownerUserId && r.businessId === businessId ? { ownerUserId: r.ownerUserId } : null;
+    } },
+    catalog: { async findVariation(businessId, variationId) {
+      const row = (await db.query('select id, square_item_id, square_variation_id from public.catalog_items where business_id = $1 and square_variation_id = $2', [businessId, variationId])).rows[0] as Record<string, unknown> | undefined;
+      return row ? { businessId, subjectId: String(row.id), squareItemId: String(row.square_item_id), variationId: String(row.square_variation_id) } : null;
+    } },
+    square: { readVariationPrice(variationId) {
+      if (!providers.prices) throw new AppError('INTEGRATION_UNAVAILABLE', 'Square is not configured.');
+      return providers.prices.readVariationPrice(variationId);
+    } },
+    approvals: { createPendingPriceEditApproval: async (input) => {
+      const r = await engine.createPriceEditApproval({ ownerUserId: input.ownerUserId, payload: input.payload, payloadHash: input.payloadHash });
+      return r.kind === 'conflict' ? r : { kind: r.kind, approval: r.approval as Extract<typeof r.approval, { bundleType: 'price_edit' }> };
+    } },
+    now,
+  };
+
   const agentModel: AgentModel = options.agentModel
     ?? (env.OPENAI_API_KEY && env.OPENAI_BUILDER_MODEL ? new OpenAiAgentModel({ apiKey: env.OPENAI_API_KEY, model: env.OPENAI_BUILDER_MODEL }) : new RecordedAgentModel());
 
@@ -230,7 +255,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
 
   let sweep: ReturnType<typeof setInterval> | undefined;
   return {
-    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, telemetry: telemetryOptions, health, now, newId,
+    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, prices, telemetry: telemetryOptions, health, now, newId,
     async close() { if (pool) await pool.end(); },
     startJobs() {
       if (!hasDb || sweep) return;

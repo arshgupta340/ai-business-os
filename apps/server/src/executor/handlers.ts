@@ -1,5 +1,5 @@
 import {
-  BookingApprovalPayloadSchema, OrderApprovalPayloadSchema, FactEditApprovalPayloadSchema,
+  BookingApprovalPayloadSchema, OrderApprovalPayloadSchema, FactEditApprovalPayloadSchema, PriceEditApprovalPayloadSchema,
   AvailabilitySlotSchema, cartHash, SLOT_CONFLICT_MAX_ALTERNATIVES,
   type ExecutionActionType, type Order, type Booking,
 } from '@abos/contracts';
@@ -183,11 +183,25 @@ export async function updateFact(c: HandlerContext): Promise<StepOutcome> {
   return { status: 'SUCCEEDED', apply: (subjects) => subjects.updateFact(approved.businessId, approved) };
 }
 
-export async function updateCatalogPrice(_c: HandlerContext): Promise<StepOutcome> {
-  return { status: 'FAILED', errorCode: 'CAPABILITY_NOT_ALLOWED', reason: 'square.catalog.price.update is not implemented' };
+export async function updateCatalogPrice(c: HandlerContext): Promise<StepOutcome> {
+  const prices = c.deps.prices;
+  if (!prices) return { status: 'FAILED', errorCode: 'CAPABILITY_NOT_ALLOWED', reason: 'Price changes are not configured' };
+  const approved = PriceEditApprovalPayloadSchema.parse(c.material);
+  const r = await c.external(() => prices.update({ executionId: c.execution.id, approvalId: c.execution.approvalId, idempotencyKey: c.execution.idempotencyKey, attempt: c.execution.attempts }));
+  switch (r.state) {
+    // The provider reference names the variation and the version Square returned after the write.
+    case 'SUCCEEDED': return { status: 'SUCCEEDED', externalRef: `${approved.variationId}@${r.squareVersion}` };
+    case 'QUEUED': return { status: 'QUEUED', errorCode: r.code, delayMs: 1000 * 2 ** Math.max(0, c.execution.attempts - 1), reason: 'Square refused the write before applying it' };
+    case 'FAILED': return { status: 'FAILED', errorCode: r.code, reason: 'Price change failed' };
+    default: return { status: 'NEEDS_REVIEW', errorCode: r.code, reason: 'Price change outcome is unknown' };
+  }
 }
-export async function syncCatalog(_c: HandlerContext): Promise<StepOutcome> {
-  return { status: 'FAILED', errorCode: 'CAPABILITY_NOT_ALLOWED', reason: 'local.catalog.sync is not implemented' };
+export async function syncCatalog(c: HandlerContext): Promise<StepOutcome> {
+  const prices = c.deps.prices;
+  if (!prices) return { status: 'FAILED', errorCode: 'CAPABILITY_NOT_ALLOWED', reason: 'Price changes are not configured' };
+  const r = await prices.sync({ businessId: c.execution.businessId, attempt: c.execution.attempts });
+  if (r.state === 'SUCCEEDED') return { status: 'SUCCEEDED' };
+  return r.state === 'QUEUED' ? { status: 'QUEUED', errorCode: r.code, delayMs: 1000, reason: 'Catalog sync will retry' } : { status: 'FAILED', errorCode: r.code, reason: 'Catalog sync failed' };
 }
 
 export const handlers = {
