@@ -8,7 +8,7 @@ Migrations and seeds in `packages/db` and `scripts/` are owned by Arsh (SPEC 3.1
 
 ## 0. Read this first: the migrations are the source of truth
 
-The SQL in this document was the starting point for task B-06. An independent review of the migrations then found defects, and the fixes changed the SQL. Where this document and `packages/db/migrations` differ, **the migrations win**. State lists did not change. Migration 0005 adds the receipt table, reference columns and renewable deadlines described below. These rules did:
+The SQL in this document was the starting point for task B-06. An independent review of the migrations then found defects, and the fixes changed the SQL. Where this document and `packages/db/migrations` differ, **the migrations win**. State lists did not change. Migration 0005 adds the receipt table, reference columns and renewable deadlines described below. Migration 0006 adds the ownership and material guards and the receipt routines described below. These rules did:
 
 | Rule | What the migrations do | What this document's SQL still shows |
 |---|---|---|
@@ -22,6 +22,8 @@ The SQL in this document was the starting point for task B-06. An independent re
 | Helper functions | Every function pins an empty `search_path`. `owns_business` lives in a `private` schema and only `authenticated` may run it. | `public.owns_business` with `search_path = public` |
 | Message dispatches | A dispatch is tied to the approval of the execution it belongs to. | No such tie |
 | Payment outcomes (0005) | `private.mark_order_paid` and `private.mark_order_payment_failed` are the only checked paths for a Square result; `orders.square_payment_id` is unique, immutable to runtime DML and backed by append-only `payment_receipts`. | Plain order updates |
+| Ownership (0006) | `abos_app` cannot insert users or businesses and cannot write users. An ALWAYS trigger freezes `businesses.id`, `owner_id` and `created_at` for the runtime role. | Runtime insert and update on both tables |
+| Subject material (0006) | For `abos_app`, order cart, cart hash, quote, total, currency, contact and fulfillment, and booking service, calendar, slot, timezone and customer, are frozen from insert on. A subject is inserted only `AWAITING_OWNER_APPROVAL` with no approval and no checkout references. | Mutable material columns |
 | Stale leases (0005) | `private.recover_stale_executions` uses renewable deadlines and atomically audits unknown outcomes in `NEEDS_REVIEW`. Evidence resolution is a separate checked call. | A sweeper that requeues |
 | Seed facts (section 6.1) | The seed takes its data from the fixtures in `@abos/contracts/fixtures`. The policy keys are `message_consent`, `min_notice` and `no_refunds_by_phone`. Some seeded facts carry the fixture source types `owner_chat` or `owner_ui`. Both agents are seeded with their fixture versions. | Different policy keys, every fact with source type `seed`, version 1 for both agents |
 | Server database role | The server connects as `abos_app` and changes approvals, steps, dispatches and sync jobs only through the checked routines in the `private` schema (migration 0004). | The server writing those tables directly |
@@ -67,6 +69,8 @@ create table public.users (
 
 Supabase Auth owns `auth.users`. This is the public profile. Its ID uses the SPEC 2.1 prefix `usr_`, and `auth_user_id` links it to the auth user so RLS can map `auth.uid()` to the profile. The server reads `role` for its role checks.
 
+**Runtime writes (0006).** `abos_app` has SELECT only on `users`. The seed creates the owner as the migration owner. An ALWAYS invoker trigger also refuses a runtime insert and any change except `display_name`, in case a grant is ever restored.
+
 ### 2.2 `businesses`
 
 ```sql
@@ -84,6 +88,8 @@ create table public.businesses (
 ```
 
 `owner_id` anchors every RLS policy. `timezone` is not null because a missing timezone is a builder stop condition (PRD section 6).
+
+**Runtime writes (0006).** `abos_app` cannot insert a business. It can update the profile columns the server writes (`name`, `contact`, `settings`, and also `category` and `timezone`), but the ALWAYS trigger `businesses_runtime_guard` refuses a change of `id`, `owner_id` or `created_at`. `decide_and_enqueue` and the approval guard trust `owner_id`, so the runtime role can no longer make itself the decider.
 
 ### 2.3 `capabilities`
 
@@ -512,7 +518,7 @@ create table public.action_executions (
 
 `idempotency_key` is `sha256(businessId:subjectId:actionType:approvalId)` in hex (SPEC 2.9). It is computed once at insert and sent unchanged to Square, Google and the message channel on every retry; where a provider caps key length, the adapter shortens it the same way every time. `unique (approval_id, action_type)` means a double click on Approve cannot queue a bundle twice. A worker claims a row with `update ... set status = 'RUNNING', attempts = attempts + 1, locked_by = $1, locked_at = now() where id = $2 and status = 'QUEUED' and next_attempt_at <= now() returning *`, so only one worker owns an intent. A retryable failure returns to `QUEUED` with a later `next_attempt_at`; after 3 attempts it is `FAILED`; an unknown result is `NEEDS_REVIEW`, never a blind retry (SPEC 2.9). When `MESSAGE_CHANNEL` is `qr_only`, a message step goes straight to `SKIPPED` and no `message_dispatches` row is created (SPEC 2.9). `last_error` is `ActionExecution.lastError`. `capability_id` follows the SPEC 2.3 mapping and is null for `local.*` steps.
 
-**Leases and recovery (migration 0005).** Execution and sync rows have `lease_deadline`. Checked claims set it to the database clock plus 15 minutes. `renewExecutionLease` and `renewSyncLease` require the same business, current worker, current attempt and a live deadline. They can extend it by one to fifteen minutes from the database clock and never shorten it. Expired or recovered workers cannot renew or finish. Ordinary `finish_execution` retains all previous checks and adds two: a checkout step whose Square order ID was saved by `saveCheckout` succeeds only with that ID as its reference, and a calendar step succeeds only when its booking is BOOKED_VERIFIED with the same event ID, which `verifyBooking` does in one transaction. A checkout finished with no saved references keeps the 0004 behavior.
+**Leases and recovery (migration 0005).** Execution and sync rows have `lease_deadline`. Checked claims set it to the database clock plus 15 minutes. `renewExecutionLease` and `renewSyncLease` require the same business, current worker, current attempt and a live deadline. They can extend it by one to fifteen minutes from the database clock and never shorten it. Expired or recovered workers cannot renew or finish. Ordinary `finish_execution` retains all previous checks and adds two: a checkout step whose Square order ID was saved by `saveCheckout` succeeds only with that ID as its reference, and a calendar step succeeds only when its booking is BOOKED_VERIFIED with the same event ID, which `verifyBooking` does in one transaction. Migration 0006 removes the 0004 fallback: a checkout step succeeds only after `saveCheckout` stored its references, and only with that Square order ID. FAILED, NEEDS_REVIEW and a retry need no references.
 
 Checkout claim atomically moves `APPROVED` to `CREATING_CHECKOUT` and writes its event. `recoverStaleExecutions` selects expired deadlines, locks approval before execution, rechecks the deadline and moves only RUNNING rows to NEEDS_REVIEW. It keeps the key and attempt and writes `execution.failed` in the same transaction. A checkout in CREATING_CHECKOUT moves to RECOVERY_REQUIRED; an older running checkout still in APPROVED first takes the allowed APPROVED to CREATING_CHECKOUT move and event. A calendar step moves RECHECKING_SLOT to RETRY_REQUIRED. Message and local steps leave their subjects unchanged. A repeat returns no rows.
 
@@ -554,6 +560,8 @@ create unique index message_dispatches_provider_id_key
 
 The adapter inserts this row with the execution's idempotency key before it calls the provider, so a retry finds the row and does not send twice. Under `qr_only` nothing is sent, so no row exists and nothing is ever marked sent (SPEC 2.9). A timeout with no provider answer sets `UNKNOWN`, which needs review; a failed or unknown message does not fail the order or booking (SPEC 2.3). `order_id` and `booking_id` keep real foreign keys; `subject_id` is a generated column that gives the `MessageDispatch.subjectId` field. Only the body hash is stored; the checkout URL lives on the order. `recipient` is stored in full and must equal the number in the approved payload (application rule, checked against `payload_hash`); events show only its last four digits. The adapter adds WhatsApp's `whatsapp:` prefix; it is not stored.
 
+**Delivery receipts (0006).** `updateDispatchStatus(businessId, dispatchId, status)` (`private.update_dispatch_status`) applies a provider receipt without a worker lease. It needs a dispatch in the same business that has a provider message ID. It moves SENT to DELIVERED or FAILED. DELIVERED, FAILED and UNKNOWN are terminal for receipts; `resolveExecution` settles UNKNOWN. A repeated, stale or out-of-order receipt returns the row unchanged, so the caller compares the returned status to learn whether it moved. Like the other dispatch routines it writes no activity event.
+
 ### 2.19 `webhook_events`
 
 ```sql
@@ -571,6 +579,8 @@ create table public.webhook_events (
 ```
 
 Only signature-verified events are inserted (SPEC 2.9), so the table has no `signature_valid` column. A rejected webhook writes one `webhook.rejected` activity event and nothing else. That event belongs to the business that owns the integration the webhook URL serves, read from `integrations`, so `activity_events.business_id` stays not null. Nothing from the unverified request body is trusted or stored, in this table or in the event payload (SPEC 2.9). `unique (source, provider_event_id)` is the replay guard: the handler inserts with `on conflict do nothing` and processes only when a row was inserted. Square uses `event_id`; Twilio callbacks use `CallSid:CallStatus`. WhatsApp message status arrives on `/webhooks/twilio/status` and uses source `twilio_status` (SPEC 2.8). `payload` keeps only object IDs, statuses, amount and currency; `card_details` is stripped before insert.
+
+**Processed marker (0006).** `abos_app` has no UPDATE on this table. `markWebhookProcessed(businessId or null, webhookEventId, error or null)` (`private.mark_webhook_processed`) sets `processed_at` from the database clock and `process_error` (cut to 500 characters). The business must equal the row's; null matches only a row stored without one. A processed row is returned unchanged, so the marker is never cleared and the first error is kept.
 
 ### 2.20 `sync_jobs`
 
@@ -691,6 +701,8 @@ No table has an insert, update or delete policy, so `authenticated` and `anon` c
 **Runtime routines and stored events.** Migration 0005 keeps every existing check in `decide_and_enqueue` and `expire_approvals`, replacing their event correlation and subject payloads only. Call journeys use call IDs; owner fact or price edits use approval IDs. A nullable booking call falls back to its approval ID. New audit rows use the database wall clock so events inserted in one transaction retain their causal order. Historical audit rows are not rewritten. Every routine-written subject status event includes orderId or bookingId, callId when present, from and to. Tests import `activityEventFromRow` from `@abos/contracts` and parse the actual stored event rows.
 
 All 0005 entry points are SECURITY DEFINER with empty search paths and schema-qualified application objects. EXECUTE is revoked from PUBLIC, anon, authenticated and service_role and granted only to abos_app. Internal helpers are not runtime entry points. No new dynamic SQL or superuser-only statement is needed. Direct runtime writes to approvals, executions, dispatches and sync jobs remain denied.
+
+**Migration 0006.** The new entry points `mark_webhook_processed` and `update_dispatch_status` follow the same rules. `runtime_role_check()` is the one SECURITY INVOKER entry point, because it must report the caller's own role: it returns `current_user`, `session_user`, superuser, BYPASSRLS, the count of roles it is a member of, whether it can write `approval_requests`, `action_executions`, `message_dispatches`, `sync_jobs` or `payment_receipts` directly, and `restricted`, true only for `abos_app` with none of those. The server calls `assertRestrictedRuntimeRole` at startup; any other role, including one refused EXECUTE, fails closed. 0006 replaces one routine, `finish_execution` (saved checkout references), and revokes from `service_role` all DML on `orders` and `bookings` and EXECUTE on `create_approval`, `claim_next_execution`, `record_dispatch`, `update_dispatch` and `enqueue_sheets_sync`. `service_role` keeps Supabase's default rights on the other tables; the server never connects as it.
 
 **Verification limit.** Local tests use PGlite, migrate as a non-superuser and call the runtime routines as abos_app. Ordered finish/recovery and payment replays exercise both serial outcomes. PGlite has one backend, so these tests do not prove independent-session lock interleavings or deadlock freedom. Supabase Postgres 17 and live provider behavior require separate operator verification; no remote database or provider is contacted by these tests. Before applying 0005 to existing data, inspect duplicate non-null Square payment IDs. Index creation fails atomically if duplicates exist.
 

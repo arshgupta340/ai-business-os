@@ -174,7 +174,7 @@ it('upgrades a database shaped like the real one (seeded world, two businesses, 
     expect(before.f).toBeGreaterThanOrEqual(33); expect(before.c).toBeGreaterThanOrEqual(6); expect(counts0.v).toBeGreaterThan(0);
 
     await fresh.exec('set role supabase_postgres');
-    expect((await applyMigrations(migrationDb(fresh))).applied).toEqual(['0005_payments_and_stale_leases.sql']);
+    expect((await applyMigrations(migrationDb(fresh))).applied).toEqual(['0005_payments_and_stale_leases.sql', '0006_ownership_material_and_receipts.sql']);
     await fresh.exec('reset role');
     expect((await fresh.query('select distinct spec_revision from public.agents')).rows).toEqual([{ spec_revision: 1 }]);
     expect((await fresh.query<{ f: number; c: number }>('select (select count(*)::int from public.business_facts) f,(select count(*)::int from public.catalog_items) c')).rows[0]).toEqual(before);
@@ -213,7 +213,9 @@ describe('review regression cases', () => {
     await app(() => runtime.runtimeClaimExecution(db, lease));
     await db.query("update public.action_executions set lease_deadline=clock_timestamp()-interval '1 second' where id=$1", [lease.executionId]);
     await app(() => runtime.recoverStaleExecutions(db, { businessId: p.businessId, staleAfterMs: 60_000 }));
-    await app(() => db.query('update public.orders set total_minor=999 where id=$1', [p.subjectId]));
+    // 0006 freezes order material for abos_app, so the drift is an owner-side write.
+    await app(() => expect(db.query('update public.orders set total_minor=999 where id=$1', [p.subjectId])).rejects.toThrow(/protected order material/));
+    await db.query('update public.orders set total_minor=999 where id=$1', [p.subjectId]);
     await app(async () => {
       await expect(runtime.resolveExecution(db, { ...lease, status: 'SUCCEEDED', externalRef: 'sq', nothingWritten: false })).rejects.toThrow(/SUBJECT/);
       await expect(runtime.resolveExecution(db, { ...lease, status: 'QUEUED', nothingWritten: true })).rejects.toThrow(/SUBJECT/);

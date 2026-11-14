@@ -71,7 +71,8 @@ describe('0005 migration', () => {
       await migrateAsSupabaseOwner(fresh);
       const q = await fresh.query<{ name: string }>('select name from public.schema_migrations order by name');
       expect(q.rows.map(r => r.name)).toEqual(readMigrations().map(f => f.name));
-      expect(q.rows.at(-1)?.name).toBe('0005_payments_and_stale_leases.sql');
+      expect(q.rows.map(r => r.name)).toContain('0005_payments_and_stale_leases.sql');
+      expect(q.rows.at(-1)?.name).toBe('0006_ownership_material_and_receipts.sql');
       const owners = await fresh.query<{ o: string }>(`select distinct pg_get_userbyid(proowner) o from pg_proc p
         join pg_namespace n on n.oid=p.pronamespace where n.nspname='private' and proname in ('mark_order_paid','mark_order_payment_failed','recover_stale_executions')`);
       expect(owners.rows).toEqual([{ o: 'supabase_postgres' }]);
@@ -299,8 +300,10 @@ describe('recover_stale_executions', () => {
     const p = await approved();
     await app(async () => {
       await runtime.runtimeClaimExecution(db, { businessId: p.businessId, executionId: p.executions[0]!.id, workerId: 'w' });
-      await runtime.finishExecution(db, { businessId: p.businessId, executionId: p.executions[0]!.id, workerId: 'w', attempt: 1, status: 'SUCCEEDED', externalRef: 'sq-order' });
-      await db.query("update public.orders set status='PAYMENT_LINK_READY',square_order_id='sq-'||id,square_payment_link_id='link-'||id,checkout_url='https://example.test/c' where id=$1", [p.subjectId]);
+      // 0006: a checkout step succeeds only with its saved references.
+      await runtime.saveCheckout(db, { businessId: p.businessId, executionId: p.executions[0]!.id, workerId: 'w', attempt: 1,
+        squareOrderId: 'sq-' + p.subjectId, paymentLinkId: 'link-' + p.subjectId, url: 'https://example.test/c' });
+      await runtime.finishExecution(db, { businessId: p.businessId, executionId: p.executions[0]!.id, workerId: 'w', attempt: 1, status: 'SUCCEEDED', externalRef: 'sq-' + p.subjectId });
       await runtime.runtimeClaimExecution(db, { businessId: p.businessId, executionId: p.executions[1]!.id, workerId: 'dead' });
     });
     await age(p.executions[1]!.id, 30);
@@ -398,7 +401,9 @@ describe('provider observation regression cases', () => {
 
   it('rechecks order totals and signed approval material on both success and failure', async () => {
     const p = await pending();
-    await app(() => db.query('update public.orders set total_minor=1199 where id=$1', [p.subjectId]));
+    // 0006 freezes order material for abos_app, so the drift is an owner-side write.
+    await app(() => expect(db.query('update public.orders set total_minor=1199 where id=$1', [p.subjectId])).rejects.toThrow(/protected order material/));
+    await db.query('update public.orders set total_minor=1199 where id=$1', [p.subjectId]);
     for (const amountMinor of [1200, 1199]) {
       await app(() => expect(runtime.markOrderPaid(db, { businessId: p.businessId, orderId: p.subjectId, paymentId: 'x', ...evidence(p), amountMinor })).rejects.toThrow(/SUBJECT|PAYMENT/));
       await app(() => expect(runtime.markOrderPaymentFailed(db, { businessId: p.businessId, orderId: p.subjectId, paymentId: 'x', reason: 'Declined', ...evidence(p, 'FAILED'), amountMinor })).rejects.toThrow(/SUBJECT|PAYMENT/));
@@ -791,7 +796,7 @@ it('upgrades populated 0004 with a legacy APPROVED running checkout using only a
     const originalChecksums = (await fresh.query('select name,checksum from public.schema_migrations order by name')).rows;
     await fresh.exec('set role supabase_postgres');
     const result = await applyMigrations(migrationDb(fresh));
-    expect(result.applied).toEqual(['0005_payments_and_stale_leases.sql']);
+    expect(result.applied).toEqual(['0005_payments_and_stale_leases.sql', '0006_ownership_material_and_receipts.sql']);
     await fresh.exec('reset role');
     expect((await fresh.query('select name,checksum from public.schema_migrations order by name limit 4')).rows).toEqual(originalChecksums);
     await fresh.exec('set role abos_app');

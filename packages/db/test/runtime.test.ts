@@ -61,8 +61,16 @@ async function approved(type: Bundle = 'order_bundle', channel = 'surge') {
   const result = await app(() => runtime.runtimeDecideAndEnqueue(db, decision));
   return { ...p, a, decision, ...result };
 }
-const finish = (businessId: string, executionId: string, attempt = 1, workerId = 'worker', status: 'SUCCEEDED' | 'QUEUED' = 'SUCCEEDED') =>
-  runtime.finishExecution(db, { businessId,executionId,workerId,attempt,status,externalRef: 'provider-' + executionId, retryAt: new Date(0) });
+// 0006: a checkout step succeeds only with the references save_checkout stored, so the helper saves them first.
+async function finish(businessId: string, executionId: string, attempt = 1, workerId = 'worker', status: 'SUCCEEDED' | 'QUEUED' = 'SUCCEEDED') {
+  let externalRef = 'provider-' + executionId;
+  const step = (await db.query<{ action_type: string }>('select action_type from public.action_executions where id=$1', [executionId])).rows[0];
+  if (status === 'SUCCEEDED' && step?.action_type === 'square.checkout.create') {
+    externalRef = 'sq-' + executionId;
+    await runtime.saveCheckout(db, { businessId, executionId, workerId, attempt, squareOrderId: externalRef, paymentLinkId: 'link-' + executionId, url: 'https://example.test/c' });
+  }
+  return runtime.finishExecution(db, { businessId,executionId,workerId,attempt,status,externalRef, retryAt: new Date(0) });
+}
 
 it('installs a nonowner, nonmember restricted runtime role', async () => {
   const { rows } = await db.query(`select rolcanlogin, rolinherit, rolcreatedb, rolcreaterole, rolbypassrls, rolsuper,
@@ -89,8 +97,9 @@ it('grants exactly the ordinary table operations and matching RLS policies', asy
       has_table_privilege('abos_app',$1,'INSERT') ins, has_table_privilege('abos_app',$1,'UPDATE') upd,
       has_table_privilege('abos_app',$1,'DELETE') del, has_table_privilege('abos_app',$1,'TRUNCATE') trunc,
       has_table_privilege('abos_app',$1,'SELECT') sel, (select relrowsecurity from pg_class where oid=$1::regclass) rls`, ['public.'+table]);
-    expect(q.rows[0], table).toEqual({ ins: writable.includes(table) || ['activity_events','webhook_events'].includes(table),
-      upd:writable.includes(table),del:deletable.includes(table),trunc:false,sel:true,rls:true });
+    // 0006: users is read only and no runtime INSERT creates a business; businesses keeps a guarded UPDATE.
+    expect(q.rows[0], table).toEqual({ ins: (writable.includes(table) && !['users','businesses'].includes(table)) || ['activity_events','webhook_events'].includes(table),
+      upd:writable.includes(table) && table!=='users',del:deletable.includes(table),trunc:false,sel:true,rls:true });
     const policies = await db.query<{cmd:string}>(`select cmd from pg_policies where tablename=$1 and 'abos_app'=any(roles)`, [table]);
     expect(policies.rows.map(p => p.cmd).sort()).toEqual(['SELECT', ...(q.rows[0]!.ins?['INSERT']:[]), ...(q.rows[0]!.upd?['UPDATE']:[]), ...(q.rows[0]!.del?['DELETE']:[])].sort());
   }
@@ -113,12 +122,14 @@ it('exposes only the checked entry points and pins definer search paths', async 
   const routines=['create_approval','decide_and_enqueue','claim_execution','claim_next_execution','finish_execution','record_dispatch',
     'update_dispatch','enqueue_sheets_sync','claim_sync_job','finish_sync_job','expire_approvals',
     'mark_order_paid','mark_order_payment_failed','recover_stale_executions',
-    'save_checkout','fulfill_order','verify_booking','renew_execution_lease','resolve_execution','renew_sync_lease','recover_stale_sync_jobs','apply_fact_update'];
+    'save_checkout','fulfill_order','verify_booking','renew_execution_lease','resolve_execution','renew_sync_lease','recover_stale_sync_jobs','apply_fact_update',
+    'mark_webhook_processed','update_dispatch_status','runtime_role_check'];
   for(const r of q.rows) {
     expect(r.runtime,r.proname).toBe(routines.includes(r.proname)); expect(r.browser).toBe(false); expect(r.pub).toBe(false);
-    if(r.runtime) { expect(r.prosecdef).toBe(true); expect(r.proconfig).toContain('search_path=""'); }
+    // runtime_role_check reports the caller's own role, so it is the one invoker entry point.
+    if(r.runtime) { expect(r.prosecdef,r.proname).toBe(r.proname!=='runtime_role_check'); expect(r.proconfig).toContain('search_path=""'); }
   }
-  expect(q.rows.filter(r=>r.runtime)).toHaveLength(22);
+  expect(q.rows.filter(r=>r.runtime)).toHaveLength(25);
 });
 
 for(const type of types) describe(type, () => {
@@ -352,7 +363,9 @@ it('stops retries at three attempts and never changes a finished result',async()
 it('revalidates current material on claim and does not accept caller chosen keys or routing',async()=>{
   const p=await approved(); const businessId=p.owner.businessId;
   await app(async()=>{
-    await db.query('update public.orders set total_minor=9999 where id=$1',[p.args.subjectId]);
+    // 0006 freezes order material for abos_app, so the drift is an owner-side write.
+    await expect(db.query('update public.orders set total_minor=9999 where id=$1',[p.args.subjectId])).rejects.toThrow(/protected order material/);
+    await ownerFixtureQuery('update public.orders set total_minor=9999 where id=$1',[p.args.subjectId]);
     await expect(runtime.runtimeClaimExecution(db,{businessId,executionId:p.executions[0]!.id,workerId:'worker'})).rejects.toThrow(/SUBJECT/);
     await expect(db.query('select private.decide_and_enqueue($1,$2,$3,$4,$5,$6,$7)',[businessId,p.a.id,p.owner.userId,p.a.payload_hash,'APPROVED',null,'caller-key'])).rejects.toThrow(/does not exist/);
     await expect(db.query('select private.record_dispatch($1,$2,$3,$4,$5,$6)',[businessId,p.executions[1]!.id,'worker',1,hash('body'),'+19999999999'])).rejects.toThrow(/does not exist/);
