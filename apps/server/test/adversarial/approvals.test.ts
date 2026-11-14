@@ -308,59 +308,34 @@ describe('a payload changed after the proposal', () => {
     expect(delta(w, before)).toEqual(NONE);
   });
 
-  // The runtime role may update orders. Each change below makes the order disagree with the signed
-  // material, so the unchanged hash can no longer approve it.
+  // The runtime role may update an order's status, but its material is frozen from insert (migration 0006).
   const BIGGER: Cart = { lines: [{ ...CART.lines[0]!, quantity: 20 }] };
   it.each([
-    ['cart', async (orderId: string) => { await w.t.db.query('update orders set cart = $2::jsonb, cart_hash = $3 where id = $1', [orderId, JSON.stringify(BIGGER), await cartHash(BIGGER)]); }],
-    ['total', async (orderId: string) => { await w.t.db.query('update orders set total_minor = 1 where id = $1', [orderId]); }],
-    ['pickup time', async (orderId: string) => { await w.t.db.query(`update orders set fulfillment = jsonb_set(fulfillment, '{pickupAt}', to_jsonb($2::text)) where id = $1`, [orderId, pickupAt('19:30')]); }],
-  ] as const)('order %s changed in the database after the proposal: the old hash is refused, zero writes', async (_field, change) => {
-    const before = counts(w);
-    const { orderId, approvalId } = await pizzaOrder(w);
-    const hash = (await getApproval(w, PIZZA, approvalId)).payloadHash;
-    await change(orderId);
-    // The approval the owner saw is unchanged, so its hash is unchanged too.
-    expect((await getApproval(w, PIZZA, approvalId)).payloadHash).toBe(hash);
-    const res = await decide(w, PIZZA, approvalId, 'approve', hash);
-    expect(res.statusCode).toBe(409);
-    expect(res.json()).toMatchObject({ code: 'INVALID_STATE' });
-    await expectUntouched(orderId, approvalId);
-    expect(delta(w, before)).toEqual(NONE);
-  });
-
-  describe('cart rewritten under an unchanged cart hash', () => {
-    let ids: { orderId: string; approvalId: string };
-    it('the approval passes, the executor refuses the step: no Square call, no message', async () => {
-      const before = counts(w);
-      ids = await pizzaOrder(w);
-      await w.t.db.query('update orders set cart = $2::jsonb where id = $1', [ids.orderId, JSON.stringify(BIGGER)]);
-      await approve(w, PIZZA, ids.approvalId);
-      await quiesce();
-      expect((await steps(w, ids.approvalId)).map((x) => [x.status, x.attempts])).toEqual([['FAILED', 1], ['QUEUED', 0], ['QUEUED', 0]]);
-      expect(await order(w, ids.orderId)).toMatchObject({ square_order_id: null, checkout_url: null, square_payment_id: null });
-      expect(await count(w, 'message_dispatches where approval_id = $1', [ids.approvalId])).toBe(0);
-      expect(delta(w, before)).toEqual(NONE);
-    });
-    // DEFECT (see the pull request): the refused order stays APPROVED, which the dashboard labels
-    // "Creating checkout", although its first step is FAILED and nothing will ever run. The state
-    // machine has no move from APPROVED to RECOVERY_REQUIRED, so the executor's own move is rolled back.
-    it.fails('the refused order is surfaced for review (RECOVERY_REQUIRED) instead of staying APPROVED', async () => {
-      expect((await order(w, ids.orderId)).status).toBe('RECOVERY_REQUIRED');
-    });
-  });
-
-  it('recipient replaced on the order row: the one message goes to the approved number only', async () => {
+    ['cart and cart hash', async (orderId: string) => w.t.db.query('update orders set cart = $2::jsonb, cart_hash = $3 where id = $1', [orderId, JSON.stringify(BIGGER), await cartHash(BIGGER)])],
+    ['cart under an unchanged cart hash', async (orderId: string) => w.t.db.query('update orders set cart = $2::jsonb where id = $1', [orderId, JSON.stringify(BIGGER)])],
+    ['total', async (orderId: string) => w.t.db.query('update orders set total_minor = 1 where id = $1', [orderId])],
+    ['quote', async (orderId: string) => w.t.db.query(`update orders set quote = jsonb_set(quote, '{totalMinor}', '1') where id = $1`, [orderId])],
+    ['pickup time', async (orderId: string) => w.t.db.query(`update orders set fulfillment = jsonb_set(fulfillment, '{pickupAt}', to_jsonb($2::text)) where id = $1`, [orderId, pickupAt('19:30')])],
+    ['recipient', async (orderId: string) => w.t.db.query(`update orders set contact = jsonb_set(contact, '{messageRecipient}', to_jsonb($2::text)) where id = $1`, [orderId, ATTACKER])],
+  ] as const)('order %s cannot be changed in the database after the proposal, before or after approval; the one message goes to the approved number', async (_field, change) => {
     const before = counts(w);
     const sentBefore = w.messages.sent.length;
     const { orderId, approvalId } = await pizzaOrder(w, { recipient: '+15555550155' });
-    await w.t.db.query(`update orders set contact = jsonb_set(contact, '{messageRecipient}', to_jsonb($2::text)) where id = $1`, [orderId, ATTACKER]);
-    await approve(w, PIZZA, approvalId);
+    const material = async () => JSON.stringify((await w.t.db.query('select cart, cart_hash, quote, total_minor, currency, contact, fulfillment from orders where id = $1', [orderId])).rows[0]);
+    const stored = await material();
+    const hash = (await getApproval(w, PIZZA, approvalId)).payloadHash;
+    await expect(change(orderId)).rejects.toThrow(/protected order material/);
+    expect(await material()).toBe(stored);
+    await expectUntouched(orderId, approvalId);
+    expect(delta(w, before)).toEqual(NONE);
+    // Approved with the hash the owner saw. The material is still frozen while the bundle runs and afterwards.
+    expect((await decide(w, PIZZA, approvalId, 'approve', hash)).statusCode).toBe(200);
+    await expect(change(orderId)).rejects.toThrow(/protected order material/);
     await quiesce();
-    const sent = w.messages.sent.slice(sentBefore);
-    expect(sent.map((m) => m.to)).toEqual(['+15555550155']);
+    await expect(change(orderId)).rejects.toThrow(/protected order material/);
+    expect(await material()).toBe(stored);
+    expect(w.messages.sent.slice(sentBefore).map((m) => m.to)).toEqual(['+15555550155']);
     expect((await w.t.db.query('select recipient, status from message_dispatches where approval_id = $1', [approvalId])).rows).toEqual([{ recipient: '+15555550155', status: 'SENT' }]);
-    expect(w.messages.sent.some((m) => m.to === ATTACKER)).toBe(false);
     expect((await order(w, orderId)).status).toBe('PAYMENT_PENDING');
     expect(delta(w, before)).toEqual({ square: 1, messages: 1, calendar: 0, sheets: 0 });
   });

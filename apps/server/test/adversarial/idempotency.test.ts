@@ -7,10 +7,9 @@ import { createSquareAdapterForTest } from '../../src/adapters/square/testing';
 import { createDbExecutor } from '../../src/compose/executor';
 import { notWiredExecutor, type SeamDeps } from '../../src/compose/seams';
 import { currentRole } from '../support/db';
-import { READBACK_MIN_MS } from '../../src/tools/real/index';
 import { LOCATION_ID, OWNER, createWorld, fakeSquareClient, nextLocalDate, zonedIso, type World } from '../e2e/world';
 import {
-  BARBER, NONE, PIZZA, TZ, approve, bookingProposal, count, counts, decide, delta, filterCalendarListByProperty, getApproval, order, paymentEvent, pizzaOrder, pizzaToPaymentPending, postSquare, sim, statusOf, steps, type Step,
+  BARBER, NONE, PIZZA, TZ, approve, bookingProposal, count, counts, decide, delta, filterCalendarListByProperty, getApproval, order, paymentEvent, pizzaOrder, pizzaToPaymentPending, postSquare, statusOf, steps, type Step,
 } from './helpers';
 
 const silentLog: SeamDeps['log'] = { info() {}, warn() {}, error() {} };
@@ -38,10 +37,10 @@ describe('a worker that dies between claim and finish', () => {
 
   function seamDeps(): SeamDeps {
     const c = w.app.composed;
-    return { env: c.env, db: c.db, engine: c.engine, providers: c.providers, interim: c.interim, now: c.now, newId: c.newId, log: silentLog };
+    return { env: c.env, db: c.db, engine: c.engine, providers: c.providers, now: c.now, newId: c.newId, log: silentLog };
   }
   /** Test-only time travel on the database clock: the running lease was taken 16 minutes ago. */
-  const staleLease = (approvalId: string) => w.t.admin((q) => q.query("update public.action_executions set locked_at = locked_at - interval '16 minutes' where approval_id = $1 and status = 'RUNNING'", [approvalId]));
+  const staleLease = (approvalId: string) => w.t.admin((q) => q.query("update public.action_executions set locked_at = locked_at - interval '16 minutes', lease_deadline = lease_deadline - interval '16 minutes' where approval_id = $1 and status = 'RUNNING'", [approvalId]));
 
   it('runs as abos_app', async () => { expect(await currentRole(w.t.db)).toBe('abos_app'); });
 
@@ -60,14 +59,14 @@ describe('a worker that dies between claim and finish', () => {
     hanging.client.checkout.paymentLinks.create = async ({ idempotencyKey: key }) => { hanging.writes.push('checkout.paymentLinks.create'); hanging.createKeys.push(key); reached(); return new Promise(() => {}); };
     const deps = seamDeps();
     const crashed = createDbExecutor({ ...deps, providers: { ...deps.providers, square: createSquareAdapterForTest(hanging.client, { locationId: LOCATION_ID, environment: 'sandbox', now: () => new Date() }) } },
-      { workerId: 'worker-crashed-checkout', interim: deps.interim });
+      { workerId: 'worker-crashed-checkout' });
     void crashed.tick();
     await sent;
     expect(hanging.createKeys).toEqual([queued[0]!.idempotency_key]);
     expect((await steps(w, approvalId)).map((x) => x.status)).toEqual(['RUNNING', 'QUEUED', 'QUEUED']);
 
     // Worker B: leaves a live lease alone, and sends a stale one to review, never back to QUEUED.
-    const healthy = createDbExecutor(deps, { workerId: 'worker-b-checkout', interim: deps.interim });
+    const healthy = createDbExecutor(deps, { workerId: 'worker-b-checkout' });
     await healthy.drain();
     expect((await steps(w, approvalId))[0]!.status).toBe('RUNNING');
     await staleLease(approvalId);
@@ -82,7 +81,7 @@ describe('a worker that dies between claim and finish', () => {
     // One provider write in total, by the worker that died. The healthy worker made none.
     expect(hanging.writes).toEqual(['checkout.paymentLinks.create']);
     expect(delta(w, before)).toEqual(NONE);
-    expect(await count(w, "activity_events where correlation_id = $1 and type = 'execution.failed' and payload->>'nextStatus' = 'NEEDS_REVIEW'", [approvalId])).toBe(1);
+    expect(await count(w, "activity_events where type = 'execution.failed' and payload->>'nextStatus' = 'NEEDS_REVIEW' and payload->>'executionId' = $1", [after[0]!.id])).toBe(1);
   });
 
   describe('during the message send', () => {
@@ -97,7 +96,7 @@ describe('a worker that dies between claim and finish', () => {
       let reached!: () => void;
       const sent = new Promise<void>((resolve) => { reached = resolve; });
       const crashed = createDbExecutor({ ...deps, providers: { ...deps.providers, message: { channel: 'surge', send: async (input) => { received.push(input); reached(); return new Promise(() => {}); } } } },
-        { workerId: 'worker-crashed-message', interim: deps.interim });
+        { workerId: 'worker-crashed-message' });
       // Worker A creates the checkout, then dies inside the send: the provider has the message, we have no answer.
       expect(await crashed.tick()).toBe(true);
       void crashed.tick();
@@ -105,7 +104,7 @@ describe('a worker that dies between claim and finish', () => {
       expect(received.map((m) => m.idempotencyKey)).toEqual([queued[1]!.idempotency_key]);
       expect((await steps(w, ids.approvalId)).map((x) => x.status)).toEqual(['SUCCEEDED', 'RUNNING', 'QUEUED']);
 
-      const healthy = createDbExecutor(deps, { workerId: 'worker-b-message', interim: deps.interim });
+      const healthy = createDbExecutor(deps, { workerId: 'worker-b-message' });
       await healthy.drain();
       expect((await steps(w, ids.approvalId))[1]!.status).toBe('RUNNING');
       await staleLease(ids.approvalId);
@@ -297,26 +296,24 @@ describe('provider timeouts and ambiguous replies', () => {
     expect(delta(w, before)).toEqual({ square: 0, messages: 1, calendar: 1, sheets: 1 });
   });
 
-  it('Calendar times out and the event never appears: every retry uses the same event ID, three attempts, then review; no confirmation', async () => {
+  it('Calendar times out and the event never appears: one insert on the step key, then review; no retry, no confirmation', async () => {
     const before = counts(w);
     const original = w.calendar.client.events.insert;
     const inserted: string[] = [];
     // The request is lost on the way: Google stores nothing and we get a timeout.
     w.calendar.client.events.insert = async (input) => { inserted.push(input.requestBody.id); throw timeoutError(); };
-    // Retry times are set from the server clock; set it back so each retry is due at once.
-    w.clock.advance(-120_000);
     let b: { bookingId: string; approvalId: string };
     try {
       b = await bookingProposal(w);
       await approve(w, BARBER, b.approvalId);
       await kickAndSettle(w, 5);
-    } finally { w.clock.advance(120_000); w.calendar.client.events.insert = original; }
-    // Google works again. Nothing may insert on its own after the attempts are used up.
+    } finally { w.calendar.client.events.insert = original; }
+    // Google works again. Nothing may insert on its own.
     await kickAndSettle(w);
     const s = await steps(w, b.approvalId);
-    // FLOWS 5: up to 3 attempts, each on the event ID that is the step's key, so none can create a second event.
-    expect(inserted).toEqual([s[0]!.idempotency_key, s[0]!.idempotency_key, s[0]!.idempotency_key]);
-    expect(s.map((x) => [x.status, x.attempts])).toEqual([['FAILED', 3], ['QUEUED', 0], ['QUEUED', 0]]);
+    // FLOWS 5: an unknown insert result goes to NEEDS_REVIEW and the booking to RETRY_REQUIRED.
+    expect(inserted).toEqual([s[0]!.idempotency_key]);
+    expect(s.map((x) => [x.status, x.attempts])).toEqual([['NEEDS_REVIEW', 1], ['QUEUED', 0], ['QUEUED', 0]]);
     await expectDatabaseKeys(BARBER, b.bookingId, b.approvalId, s);
     expect(w.calendar.events.has(s[0]!.idempotency_key)).toBe(false);
     expect((await w.t.db.query('select status, google_event_id from bookings where id = $1', [b.bookingId])).rows).toEqual([{ status: 'RETRY_REQUIRED', google_event_id: null }]);
@@ -370,19 +367,7 @@ describe('provider timeouts and ambiguous replies', () => {
     it('approving both books the slot once: one Calendar event, one confirmation, the second booking is never booked', async () => {
       const before = counts(w);
       const startUtc = zonedIso(nextLocalDate([3, 4], 8), '15:00', TZ);
-      const propose = async (name: string, to: string) => {
-        let r: { ok: boolean; proposalId: string; approvalId: string } | undefined;
-        w.model.push(async ({ executeTool }) => {
-          const input = { serviceId: 'svc_haircut', startUtc, customer: { name, messageRecipient: to, messageConsent: true } };
-          await executeTool('propose_booking', input);
-          w.clock.advance(READBACK_MIN_MS + 100);
-          r = await executeTool('propose_booking', input) as typeof r;
-          return 'proposed';
-        });
-        await sim(w, 'agt_barber_01', BARBER, { message: 'A haircut at three please', end: true });
-        expect(r).toMatchObject({ ok: true });
-        return { bookingId: r!.proposalId, approvalId: r!.approvalId };
-      };
+      const propose = (name: string, recipient: string) => bookingProposal(w, { name, recipient, startUtc, minDays: 8 });
       first = await propose('Ana', '+15555550124');
       second = await propose('Bo', '+15555550125');
       await approve(w, BARBER, first.approvalId);
@@ -397,12 +382,17 @@ describe('provider timeouts and ambiguous replies', () => {
       expect(w.messages.sent.filter((m) => m.to === '+15555550125')).toEqual([]);
       expect(delta(w, before)).toEqual({ square: 0, messages: 1, calendar: 1, sheets: 1 });
     });
+    it('the second approval is refused with 409 SLOT_CONFLICT, not a server error', async () => {
+      expect(secondResponse.statusCode).toBe(409);
+      expect(JSON.parse(secondResponse.body)).toMatchObject({ code: 'SLOT_CONFLICT' });
+      expect(await steps(w, second.approvalId)).toEqual([]);
+    });
     // DEFECT (see the pull request): FLOWS X1 says an approval that hits the overlap rule moves the
-    // booking to SLOT_CONFLICT with a booking.slot_conflict event. The decision answers 500 INTERNAL
-    // (marked retryable) instead, and the approval stays PENDING until it expires.
-    it.fails('the second approval answers without a server error and the booking moves to SLOT_CONFLICT', async () => {
-      expect(secondResponse.statusCode).toBeLessThan(500);
+    // booking to SLOT_CONFLICT with a booking.slot_conflict event. The decision is refused, but the
+    // booking stays AWAITING_OWNER_APPROVAL and its approval PENDING until it expires, with no event.
+    it.fails('the refused booking moves to SLOT_CONFLICT with a booking.slot_conflict event', async () => {
       expect(await statusOf(w, 'bookings', second.bookingId)).toBe('SLOT_CONFLICT');
+      expect(await count(w, "activity_events where type = 'booking.slot_conflict' and payload->>'bookingId' = $1", [second.bookingId])).toBe(1);
     });
   });
 

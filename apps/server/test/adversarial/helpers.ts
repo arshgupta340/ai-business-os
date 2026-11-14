@@ -4,8 +4,7 @@
 // reach a provider except through the server's own routes.
 import { createHmac } from 'node:crypto';
 import { expect, vi } from 'vitest';
-import { ENDPOINTS, type AgentSpec, type ApprovalRequest, type Cart, type ToolContext, type ToolInput, type ToolName, type ToolResult } from '@abos/contracts';
-import { READBACK_MIN_MS } from '../../src/tools/real/index';
+import { ENDPOINTS, type AgentSpec, type ApprovalRequest, type Cart, type Quote, type ToolContext, type ToolInput, type ToolName, type ToolResult } from '@abos/contracts';
 import { StreamTokenStore } from '../../src/voice/logic';
 import { runPhoneRelay } from '../../src/voice/relay';
 import type { PinnedCall, VoiceLogger } from '../../src/voice/types';
@@ -41,33 +40,45 @@ export const pickupAt = (hhmm = '18:00') => zonedIso(nextLocalDate([0, 1, 2, 3, 
 export type OrderOptions = { consent?: boolean; recipient?: string; cart?: Cart; pickup?: string; name?: string };
 export type Proposed = { callId: string; orderId: string; approvalId: string };
 
-/** A pizza order through a simulated call: read the catalog, quote, propose (with the recipient read-back). */
+/**
+ * A pizza order on a simulated call: read the catalog and quote through the real toolset, then propose.
+ * Without consent the toolset itself proposes (qr_only). With consent the proposal is stored through the
+ * engine on the same live call, as the end-to-end tests do: the deployed toolset proposes every order as
+ * qr_only until server-owned consent evidence exists (voice NOTES 3), so this is the only way to reach the
+ * message path. Either way the result is a PENDING approval that only the owner can decide.
+ */
 export async function pizzaOrder(w: World, o: OrderOptions = {}): Promise<Proposed> {
   const consent = o.consent ?? true;
   const cart = o.cart ?? CART;
-  let quoteId = '';
+  const name = o.name ?? 'Sam';
+  const fulfillment = { type: 'pickup' as const, pickupAt: o.pickup ?? pickupAt() };
+  let quote: Quote | undefined;
   w.model.push(
     async ({ executeTool }) => { await executeTool('read_catalog', { query: 'pepperoni' }); return 'We have pepperoni.'; },
     async ({ executeTool }) => {
       const r = await executeTool('quote_order', { cart }) as ToolResult<'quote_order'>;
       if (!r.ok) return `quote failed ${r.reason}`;
-      quoteId = r.quote.quoteId;
+      quote = r.quote;
       return 'quoted';
     },
-    async ({ executeTool }) => {
-      const name = o.name ?? 'Sam';
-      const contact = consent ? { name, messageRecipient: o.recipient ?? RECIPIENT, messageConsent: true, consentAt: new Date().toISOString() } : { name, messageConsent: false };
-      const input = { cart, contact, fulfillment: { type: 'pickup', pickupAt: o.pickup ?? pickupAt() }, quoteId };
-      let r = await executeTool('propose_order', input);
-      if (consent) { w.clock.advance(READBACK_MIN_MS + 100); r = await executeTool('propose_order', input); }
-      return JSON.stringify(r);
-    },
+    consent ? async () => 'Thanks, the shop will review it.' : async ({ executeTool }) =>
+      JSON.stringify(await executeTool('propose_order', { cart, contact: { name, messageConsent: false }, fulfillment, quoteId: quote!.quoteId })),
   );
   const first = await sim(w, 'agt_pizza_01', PIZZA, { message: 'What pizzas do you have?' });
   expect(first.status).toBe(200);
   const callId = first.body.callId;
   await sim(w, 'agt_pizza_01', PIZZA, { callId, message: 'Two large pepperoni' });
+  if (!quote) throw new Error('quote_order did not return a quote');
+  let ids: { orderId: string; approvalId: string } | undefined;
+  if (consent) {
+    const call = (await w.t.db.query('select agent_version_id from calls where id = $1', [callId])).rows[0] as { agent_version_id: string };
+    const { order: stored, approval } = await w.app.composed.engine.createOrderProposal({ businessId: PIZZA, callId, agentVersionId: call.agent_version_id, cart, quote,
+      contact: { name, messageRecipient: o.recipient ?? RECIPIENT, messageConsent: true, consentAt: new Date().toISOString() }, fulfillment,
+      messageChannel: w.app.composed.providers.messageChannel });
+    ids = { orderId: stored.id, approvalId: approval.id };
+  }
   const proposed = await sim(w, 'agt_pizza_01', PIZZA, { callId, message: 'Sam, pickup at six', end: true });
+  if (ids) return { callId, ...ids };
   const r = JSON.parse(proposed.body.reply) as { ok: boolean; proposalId: string; approvalId: string };
   expect(r).toMatchObject({ ok: true });
   return { callId, orderId: r.proposalId, approvalId: r.approvalId };
@@ -75,30 +86,34 @@ export async function pizzaOrder(w: World, o: OrderOptions = {}): Promise<Propos
 
 export type Booked = { callId: string; bookingId: string; approvalId: string; startUtc: string };
 
-/** A haircut booking through a simulated call: availability, then propose with the read-back. */
-export async function bookingProposal(w: World, o: { recipient?: string; minDays?: number } = {}): Promise<Booked> {
+/**
+ * A haircut booking on a simulated call: availability through the real toolset, then a proposal with
+ * consent through the composed proposal port on the live call (the toolset proposes qr_only, see above).
+ * `startUtc` proposes that exact slot instead of the first free one.
+ */
+export async function bookingProposal(w: World, o: { recipient?: string; minDays?: number; startUtc?: string; name?: string } = {}): Promise<Booked> {
   const date = nextLocalDate([3, 4], o.minDays ?? 1); // Wednesday or Thursday, open 09:00 to 18:00
-  let slot = '';
+  let slot = o.startUtc ?? '';
   w.model.push(
     async ({ executeTool }) => {
       const r = await executeTool('read_calendar_availability', { serviceId: 'svc_haircut', date }) as ToolResult<'read_calendar_availability'>;
       if (!r.ok) return `no slots ${r.reason}`;
-      slot = r.slots[0]!.startUtc;
+      slot ||= r.slots[0]!.startUtc;
       return 'slots';
     },
-    async ({ executeTool }) => {
-      const input = { serviceId: 'svc_haircut', startUtc: slot, customer: { name: 'Ana', messageRecipient: o.recipient ?? '+15555550124', messageConsent: true } };
-      await executeTool('propose_booking', input);
-      w.clock.advance(READBACK_MIN_MS + 100);
-      return JSON.stringify(await executeTool('propose_booking', input));
-    },
+    async () => 'Thanks, the shop will confirm.',
   );
   const first = await sim(w, 'agt_barber_01', BARBER, { message: 'Can I get a haircut?' });
   expect(first.status).toBe(200);
-  const proposed = await sim(w, 'agt_barber_01', BARBER, { callId: first.body.callId, message: 'The first one, I am Ana', end: true });
-  const r = JSON.parse(proposed.body.reply) as { ok: boolean; proposalId: string; approvalId: string };
-  expect(r).toMatchObject({ ok: true });
-  return { callId: first.body.callId, bookingId: r.proposalId, approvalId: r.approvalId, startUtc: slot };
+  const callId = first.body.callId;
+  if (!slot) throw new Error('read_calendar_availability returned no slot');
+  const call = (await w.t.db.query('select agent_version_id from calls where id = $1', [callId])).rows[0] as { agent_version_id: string };
+  const made = await w.app.composed.toolsetPorts.proposals.createBookingProposal({ businessId: BARBER, agentVersionId: call.agent_version_id, callId, correlationId: callId,
+    operationId: `op-${callId}`, signal: new AbortController().signal, serviceId: 'svc_haircut', startUtc: slot,
+    customer: { name: o.name ?? 'Ana', messageRecipient: o.recipient ?? '+15555550124', messageConsent: true }, messageChannel: w.app.composed.providers.messageChannel });
+  if (!made.ok) throw new Error(`booking proposal failed: ${made.reason}`);
+  await sim(w, 'agt_barber_01', BARBER, { callId, message: 'The first one, I am Ana', end: true });
+  return { callId, bookingId: made.bookingId, approvalId: made.approvalId, startUtc: slot };
 }
 
 /** The approval as the owner sees it, through the API. */

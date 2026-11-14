@@ -10,7 +10,7 @@ import type { TokenVerifier } from '../../src/auth/verify';
 import { currentRole } from '../support/db';
 import { OTHER, OTHER_AUTH, OWNER, OWNER_AUTH, createWorld, type World } from '../e2e/world';
 import {
-  BARBER, NONE, OTHER_BIZ, PIZZA, RECIPIENT, VOICE_ENV, approve, bookingProposal, count, counts, delta, filterCalendarListByProperty, getApproval, order, pizzaOrder, statusOf,
+  BARBER, NONE, OTHER_BIZ, PIZZA, RECIPIENT, VOICE_ENV, approve, bookingProposal, count, counts, delta, filterCalendarListByProperty, getApproval, order, pizzaOrder, statusOf, steps,
 } from './helpers';
 
 type Route = { method: string; url: string; auth: string | undefined };
@@ -27,7 +27,7 @@ let api: Route[] = [];
 let targets: Record<string, Target> = {};
 /** Strings that belong to the victim. None may appear in a response to anyone else. */
 let leaks: string[] = [];
-let ids: { approvalId: string; orderId: string; callId: string; paidOrderId: string; bookingId: string; bookingApprovalId: string; sessionId: string; fileId: string; conflictId: string; payloadHash: string };
+let ids: { approvalId: string; orderId: string; callId: string; paidOrderId: string; bookingId: string; bookingApprovalId: string; sessionId: string; fileId: string; conflictId: string; payloadHash: string; stuckOrderId: string; stuckExecutionId: string };
 
 const keyOf = (r: Route) => `${r.method} ${r.url}`;
 const json = (res: Res): Record<string, unknown> => { try { return JSON.parse(res.body) as Record<string, unknown>; } catch { return {}; } };
@@ -63,6 +63,12 @@ beforeAll(async () => {
   const pending = await pizzaOrder(w, { name: CUSTOMER });
   const paid = await pizzaOrder(w, { name: CUSTOMER, recipient: '+15555550166' });
   await approve(w, PIZZA, paid.approvalId);
+  // An order whose checkout step needs review: something an owner can cancel, and a step an owner can resolve.
+  w.square.mode.create = 'timeout';
+  const stuck = await pizzaOrder(w, { name: CUSTOMER, recipient: '+15555550168' });
+  try { await approve(w, PIZZA, stuck.approvalId); } finally { w.square.mode.create = 'ok'; }
+  const stuckStep = (await steps(w, stuck.approvalId))[0]!;
+  expect(stuckStep.status).toBe('NEEDS_REVIEW');
   const booking = await bookingProposal(w, { recipient: '+15555550167' });
   const session = await w.app.inject({ method: 'POST', url: `/api/builder/sessions?businessId=${PIZZA}`, headers: OWNER, payload: {} });
   expect(session.statusCode).toBe(201);
@@ -79,7 +85,8 @@ beforeAll(async () => {
   const approval = await getApproval(w, PIZZA, pending.approvalId);
   const paidRow = await order(w, paid.orderId);
   ids = { approvalId: pending.approvalId, orderId: pending.orderId, callId: pending.callId, paidOrderId: paid.orderId, bookingId: booking.bookingId, bookingApprovalId: booking.approvalId,
-    sessionId: (session.json() as { id: string }).id, fileId, conflictId: file.conflictIds?.[0] ?? 'cfl_adv_missing', payloadHash: approval.payloadHash };
+    sessionId: (session.json() as { id: string }).id, fileId, conflictId: file.conflictIds?.[0] ?? 'cfl_adv_missing', payloadHash: approval.payloadHash,
+    stuckOrderId: stuck.orderId, stuckExecutionId: stuckStep.id };
 
   const pizza = (id: string, extra: Partial<Target> = {}): Target => ({ business: PIZZA, otherOwned: BARBER, id, ...extra });
   targets = {
@@ -90,6 +97,9 @@ beforeAll(async () => {
     'GET /api/businesses/:id/catalog': pizza(PIZZA),
     'POST /api/businesses/:id/catalog/sync': pizza(PIZZA),
     'POST /api/businesses/:id/files': pizza(PIZZA, { multipart: true }),
+    'POST /api/businesses/:id/catalog/prices/propose': pizza(PIZZA, { body: () => ({ variationId: 'SQ_VAR_PEP_LG', newPriceMinor: 1, currency: 'USD' }) }),
+    'POST /api/orders/:id/cancel': pizza(ids.stuckOrderId),
+    'POST /api/executions/:id/resolve': pizza(ids.stuckExecutionId, { body: () => ({ action: 'abandon' }) }),
     'GET /api/approvals/:id': pizza(ids.approvalId),
     'POST /api/approvals/:id/decision': pizza(ids.approvalId, { body: () => ({ decision: 'approve', payloadHash: ids.payloadHash }) }),
     'GET /api/orders/:id': pizza(ids.paidOrderId),
@@ -114,7 +124,7 @@ beforeAll(async () => {
   leaks = [
     ids.payloadHash, RECIPIENT, '+15555550166', '+15555550167', CUSTOMER, 'Zebulon', FILE_NAME, paidRow.checkout_url!, paidRow.square_order_id!, paidRow.square_payment_link_id!,
     'Demo Pizza', 'Demo Barbershop', 'Pizza Order Assistant', 'Booking Assistant', 'Pepperoni', 'Margherita', 'SQ_VAR_', 'thanks for calling',
-    ids.approvalId, ids.orderId, ids.paidOrderId, ids.callId, ids.bookingId, ids.bookingApprovalId, ids.sessionId, ids.fileId, 'agv_pizza', 'agv_barber', 'usr_owner_01', OWNER_AUTH, 'owner@example.com',
+    ids.approvalId, ids.orderId, ids.paidOrderId, ids.stuckOrderId, ids.stuckExecutionId, '+15555550168', ids.callId, ids.bookingId, ids.bookingApprovalId, ids.sessionId, ids.fileId, 'agv_pizza', 'agv_barber', 'usr_owner_01', OWNER_AUTH, 'owner@example.com',
   ];
 }, 120_000);
 afterAll(async () => { await w?.close(); });
@@ -133,7 +143,8 @@ async function victimSnapshot() {
     orders: await q('select id, status from orders order by id'),
     bookings: await q('select id, status from bookings order by id'),
     calls: await count(w, 'calls where business_id in ($1, $2)', [PIZZA, BARBER]),
-    executions: await count(w, 'action_executions'),
+    executions: await q('select id, status, attempts from action_executions order by id'),
+    catalog: await q('select square_variation_id, price_minor, is_available from catalog_items order by business_id, square_variation_id'),
     conflicts: await q('select id, state from fact_conflicts order by id'),
     sessions: await q('select id, status, jsonb_array_length(messages) as n from builder_sessions order by id'),
     files: await count(w, 'files'),
@@ -340,8 +351,9 @@ describe('tenant isolation', () => {
     expect(await statusOf(w, 'approval_requests', ids.approvalId)).toBe('PENDING');
     expect(await statusOf(w, 'approval_requests', ids.bookingApprovalId)).toBe('PENDING');
     expect(await statusOf(w, 'orders', ids.orderId)).toBe('AWAITING_OWNER_APPROVAL');
-    // Exactly the one approved order of the setup: one link, one message.
-    expect(delta(w, NONE)).toEqual({ square: 1, messages: 1, calendar: 0, sheets: 0 });
+    expect(await statusOf(w, 'orders', ids.stuckOrderId)).toBe('RECOVERY_REQUIRED');
+    // Exactly the setup: one link and one message for the approved order, and the one create that timed out.
+    expect(delta(w, NONE)).toEqual({ square: 2, messages: 1, calendar: 0, sheets: 0 });
   });
 });
 

@@ -3,7 +3,6 @@
 // step, so "zero" means they had the chance and did nothing.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { APPROVAL_EXPIRY_MS, type ToolResult } from '@abos/contracts';
-import { READBACK_MIN_MS } from '../../src/tools/real/index';
 import { ageApproval, currentRole } from '../support/db';
 import { createWorld, nextLocalDate, type World } from '../e2e/world';
 import {
@@ -37,30 +36,32 @@ it('runs as abos_app with phone voice composed', async () => {
 });
 
 describe('proposals', () => {
-  it('an order proposed through the phone toolset: PENDING approval, zero external writes', async () => {
+  it('an order proposed through the phone toolset: PENDING approval, zero external writes, and a consent flag from the model is not believed', async () => {
     const before = counts(w);
     const phone = await phoneCall(w, PIZZA, 'CA_adv_order_1');
     try {
       const quoted = await phone.call('quote_order', { cart: CART }) as ToolResult<'quote_order'>;
       if (!quoted.ok) throw new Error(`quote failed: ${quoted.reason}`);
+      // The model claims consent, a number and a consent time. None of it is server-owned evidence (voice NOTES 3).
       const input = { cart: CART, quoteId: quoted.quote.quoteId, fulfillment: { type: 'pickup', pickupAt: pickupAt() },
         contact: { name: 'Sam', messageRecipient: RECIPIENT, messageConsent: true, consentAt: new Date().toISOString() } };
-      // The first call only presents the number for the read-back; nothing is stored yet.
-      expect(await phone.call('propose_order', input)).toMatchObject({ ok: true, missingFields: ['contact.messageRecipient.readBack'] });
-      expect(await count(w, 'orders where call_id = $1', [phone.callId])).toBe(0);
-      w.clock.advance(READBACK_MIN_MS + 100);
       const proposed = await phone.call('propose_order', input) as { ok: true; proposalId: string; approvalId: string };
-      expect(proposed).toMatchObject({ ok: true, missingFields: [] });
+      expect(proposed).toMatchObject({ ok: true });
+      expect(proposed.proposalId).toMatch(/^ord_/);
       await runEverything();
       expect(await statusOf(w, 'orders', proposed.proposalId)).toBe('AWAITING_OWNER_APPROVAL');
-      expect(await getApproval(w, PIZZA, proposed.approvalId)).toMatchObject({ state: 'PENDING', actorType: 'deployed_agent', bundleType: 'order_bundle' });
+      const approval = await getApproval(w, PIZZA, proposed.approvalId);
+      expect(approval).toMatchObject({ state: 'PENDING', actorType: 'deployed_agent', bundleType: 'order_bundle', payload: { messageChannel: 'qr_only' } });
+      expect(approval.payload).not.toHaveProperty('messageRecipient');
+      expect(JSON.stringify((await w.t.db.query('select contact from orders where id = $1', [proposed.proposalId])).rows)).not.toContain(RECIPIENT.slice(1));
       expect((await w.t.db.query('select channel, status from calls where id = $1', [phone.callId])).rows).toEqual([{ channel: 'phone', status: 'IN_PROGRESS' }]);
       await noTraceOfWork(proposed.approvalId);
       // Proposing again, or asking for the status, still writes nothing.
-      expect(await phone.call('propose_order', input)).toMatchObject({ ok: false });
+      await phone.call('propose_order', input);
       expect(await phone.call('get_order_status', { orderId: proposed.proposalId })).toMatchObject({ ok: true, status: 'AWAITING_OWNER_APPROVAL', paid: false, checkoutLinkSent: false });
       await runEverything();
       expect(await count(w, 'approval_requests where subject_id = $1', [proposed.proposalId])).toBe(1);
+      expect(await count(w, 'orders where call_id = $1', [phone.callId])).toBe(1);
       expect(delta(w, before)).toEqual(NONE);
     } finally { phone.toolset.dispose(); }
   });
@@ -72,17 +73,17 @@ describe('proposals', () => {
       const slots = await phone.call('read_calendar_availability', { serviceId: 'svc_haircut', date: nextLocalDate([3, 4], 4) }) as ToolResult<'read_calendar_availability'>;
       if (!slots.ok) throw new Error(`no slots: ${slots.reason}`);
       const input = { serviceId: 'svc_haircut', startUtc: slots.slots[0]!.startUtc, customer: { name: 'Ana', messageRecipient: '+15555550124', messageConsent: true } };
-      await phone.call('propose_booking', input);
-      w.clock.advance(READBACK_MIN_MS + 100);
       const proposed = await phone.call('propose_booking', input) as { ok: true; proposalId: string; approvalId: string };
-      expect(proposed).toMatchObject({ ok: true, missingFields: [] });
+      expect(proposed).toMatchObject({ ok: true });
+      expect(proposed.proposalId).toMatch(/^bkg_/);
       await runEverything();
       expect(await statusOf(w, 'bookings', proposed.proposalId)).toBe('AWAITING_OWNER_APPROVAL');
-      expect(await statusOf(w, 'approval_requests', proposed.approvalId)).toBe('PENDING');
+      const approval = await getApproval(w, BARBER, proposed.approvalId);
+      expect(approval).toMatchObject({ state: 'PENDING', payload: { messageChannel: 'qr_only' } });
+      expect(approval.payload).not.toHaveProperty('messageRecipient');
       await noTraceOfWork(proposed.approvalId);
       expect(delta(w, before)).toEqual(NONE);
-      const hash = (await getApproval(w, BARBER, proposed.approvalId)).payloadHash;
-      expect((await decide(w, BARBER, proposed.approvalId, 'reject', hash)).statusCode).toBe(200);
+      expect((await decide(w, BARBER, proposed.approvalId, 'reject', approval.payloadHash)).statusCode).toBe(200);
     } finally { phone.toolset.dispose(); }
   });
 
