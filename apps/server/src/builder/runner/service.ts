@@ -1,5 +1,5 @@
 import type { AgentRunRequest, AgentRunResponse, AgentTemplate, ToolContext, ToolTraceEntry } from '../pending-contracts';
-import { permissionSummary, validateCapabilitiesAgainstRegistry, type PermissionSummary } from '../registry';
+import { permissionSummary, validateCapabilitySet, type PermissionSummary } from '../registry';
 import type { BusinessKnowledge } from '../session/knowledge';
 import type { AgentDraftStore, AgentRecord } from '../session/stores';
 import { apiError, newId } from '../util';
@@ -32,8 +32,12 @@ export const PREVIEW_SCENARIOS: Record<AgentTemplate, Record<string, string[]>> 
     happy_path: [AGENT_SCRIPTS.barberAvailability, AGENT_SCRIPTS.barberBook],
     approval_bypass: [AGENT_SCRIPTS.barberBypass],
   },
+  // A custom agent has any valid subset (P-13). These scenarios show the FAQ
+  // case: two questions, an order it must refuse, and an injection.
   custom: {
-    happy_path: [AGENT_SCRIPTS.pizzaHours],
+    happy_path: [AGENT_SCRIPTS.faqHours, AGENT_SCRIPTS.faqMenu],
+    unsupported_order: [AGENT_SCRIPTS.faqOrder],
+    order_injection: [AGENT_SCRIPTS.faqInjection],
   },
 };
 
@@ -151,8 +155,10 @@ export class AgentRunService {
   private async loadAgent(businessId: string, agentId: string): Promise<AgentRecord> {
     const agent = await this.deps.agents.get(businessId, agentId);
     if (!agent) throw apiError('NOT_FOUND', 'Agent not found.');
-    const issues = validateCapabilitiesAgainstRegistry(agent.draftSpec.capabilities);
-    if (issues.length > 0) throw apiError('CAPABILITY_NOT_ALLOWED', 'The draft names a capability that is not registered.', { issues });
+    const issues = validateCapabilitySet(agent.draftSpec.capabilities).map(({ path, message }) => ({ path, message }));
+    if (issues.length > 0) {
+      throw apiError('CAPABILITY_NOT_ALLOWED', 'The draft names a capability that is not registered or a set that does not fit together.', { issues });
+    }
     return agent;
   }
 

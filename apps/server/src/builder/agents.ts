@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { AgentSpecSchema, type AgentSpec, type AgentStatus } from './pending-contracts';
-import { validateCapabilitiesAgainstRegistry } from './registry';
+import { validateCapabilitySet } from './registry';
 import type { AgentDraftStore, AgentRecord, BuilderSessionStore } from './session/stores';
 import { apiError, newId } from './util';
 
@@ -58,11 +58,16 @@ export class AgentService {
       draft = { ...body.spec };
     }
 
-    // Registry first, so an unknown capability is CAPABILITY_NOT_ALLOWED and not
-    // a generic validation error (API.md 2).
-    const capabilityIssues = validateCapabilitiesAgainstRegistry(Array.isArray(draft.capabilities) ? draft.capabilities : []);
+    // Registry and set rules first, so an unknown capability or a set that
+    // breaks a rule (registry.ts CAPABILITY_RULES) is CAPABILITY_NOT_ALLOWED
+    // and not a generic validation error (API.md 2). An empty or missing list
+    // is left to the schema below.
+    const listed = Array.isArray(draft.capabilities) ? draft.capabilities : [];
+    const capabilityIssues = listed.length === 0 ? [] : validateCapabilitySet(listed);
     if (capabilityIssues.length > 0) {
-      throw apiError('CAPABILITY_NOT_ALLOWED', 'The spec names a capability that is not registered.', { issues: capabilityIssues });
+      throw apiError('CAPABILITY_NOT_ALLOWED', 'The spec names a capability that is not registered or a set of capabilities that does not fit together.', {
+        issues: capabilityIssues.map(({ path, message }) => ({ path, message })),
+      });
     }
 
     // The server owns id, businessId, version and status. A client cannot set them.

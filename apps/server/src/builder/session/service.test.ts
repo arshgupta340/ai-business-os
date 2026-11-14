@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AgentService, noLiveAgent } from '../agents';
 import { AgentSpecSchema } from '../pending-contracts';
-import { isRegisteredCapability } from '../registry';
+import { isRegisteredCapability, toolsForCapabilities, validateCapabilitySet } from '../registry';
 import { FixtureBusinessKnowledge } from './knowledge';
 import type { BuilderModel } from './model';
 import { RECORDED_SCRIPTS, RecordedBuilderModel } from './recorded-builder-model';
@@ -138,5 +138,84 @@ describe('builder interview on recorded responses', () => {
     await service.message('biz_pizza_01', revise.id, { text: RECORDED_SCRIPTS.pizza[0], inputMode: 'voice' });
     const after = await agentService.get('biz_pizza_01', agent.id);
     expect(after.specRevision).toBe(2);
+  });
+});
+
+describe('custom FAQ-only agent (B-29) on recorded responses', () => {
+  it('classifies as custom and reaches a valid draft with exactly catalog.read and business.facts.read', async () => {
+    const { turns, session, agentService } = await interview('biz_pizza_01', [RECORDED_SCRIPTS.faq[0]]);
+    const first = turns[0]!;
+    expect(first.draftSpec).toMatchObject({
+      template: 'custom',
+      capabilities: ['catalog.read', 'business.facts.read'],
+      escalation: 'explain_unsupported_or_offer_callback',
+      writePolicy: 'owner_approval_each_action_bundle',
+    });
+    expect(first.missingFields).toEqual([]);
+    expect(first.stopConditions).toEqual([]);
+    expect(first.unsupportedRequests).toEqual([]);
+    expect(first.progress).toEqual({ answered: 10, required: 10 });
+
+    const agent = await agentService.create('biz_pizza_01', { builderSessionId: session.id });
+    const spec = AgentSpecSchema.parse(agent.draftSpec);
+    expect(spec.template).toBe('custom');
+    expect(spec.capabilities).toEqual(['catalog.read', 'business.facts.read']);
+    expect(spec.greeting).toMatch(/AI assistant/);
+    expect(validateCapabilitySet(spec.capabilities)).toEqual([]);
+    expect(toolsForCapabilities(spec.capabilities)).toEqual(['read_catalog', 'read_business_facts']);
+  });
+
+  it('asks only for what the subset needs: the barbershop has no menu yet', async () => {
+    const { turns } = await interview('biz_barber_01', [RECORDED_SCRIPTS.faq[0]]);
+    expect(turns[0]!.missingFields).toEqual(['catalog.items']);
+    expect(turns[0]!.suggestions).toEqual(['Upload menu', 'Use Square catalog']);
+    expect(turns[0]!.reply.text).toContain('Should the agent use your Square catalog, or will you upload a menu?');
+  });
+
+  it('explains a tool that does not exist and leaves the draft as it was', async () => {
+    const { turns } = await interview('biz_pizza_01', RECORDED_SCRIPTS.faq);
+    const turn = turns[1]!;
+    expect(turn.unsupportedRequests).toEqual(['give refunds', 'payment.refund.issue']);
+    expect(turn.draftSpec.capabilities).toEqual(['catalog.read', 'business.facts.read']);
+    expect(turn.draftSpec.template).toBe('custom');
+    expect(turn.reply.text).toContain('Not available, so it is not part of this agent: give refunds');
+  });
+
+  it('keeps the supported half of a mixed request and reports the other half', async () => {
+    const { turns, session, agentService } = await interview('biz_pizza_01', [RECORDED_SCRIPTS.faq[0], RECORDED_SCRIPTS.faqMixed[0]]);
+    const turn = turns[1]!;
+    expect(turn.draftSpec.capabilities).toEqual(['catalog.read', 'business.facts.read', 'order.quote']);
+    expect(turn.unsupportedRequests).toEqual(['text customers promotions', 'marketing.sms.promotions']);
+    expect(turn.reply.text).toContain('Not available, so it is not part of this agent: text customers promotions');
+    expect(turn.missingFields).toEqual([]);
+    const agent = await agentService.create('biz_pizza_01', { builderSessionId: session.id });
+    expect(toolsForCapabilities(agent.draftSpec.capabilities)).toEqual(['read_catalog', 'read_business_facts', 'quote_order']);
+  });
+
+  it('removes a write capability the model picked on its own and says why', async () => {
+    const model: BuilderModel = {
+      kind: 'recorded',
+      turn: async () => ({
+        reply: 'Here is your agent.',
+        template: 'custom',
+        capabilityIds: ['business.facts.read', 'message.checkout.send', 'order.propose'],
+        unsupportedRequests: [],
+        confidence: 0.9,
+        name: 'Q',
+        goal: 'Answer questions.',
+        greeting: null,
+        knowledgeScopes: null,
+        answers: [],
+      }),
+    };
+    const { service } = setup(model);
+    const s = await service.create({ businessId: 'biz_pizza_01', ownerId: 'usr_owner_01' });
+    const turn = await service.message('biz_pizza_01', s.id, { text: 'hi', inputMode: 'text' });
+    expect(turn.draftSpec.capabilities).toEqual(['business.facts.read']);
+    expect(turn.draftSpec.knowledgeScopes).toEqual(['business_profile', 'hours', 'faq']);
+    expect(turn.reply.text).toContain('Left out of this agent: order.propose needs catalog.read and order.quote.');
+    expect(turn.reply.text).toContain('Left out of this agent: message.checkout.send runs only inside an approved bundle that order.propose opens.');
+    // A registered capability that breaks a rule is not an unsupported request.
+    expect(turn.unsupportedRequests).toEqual([]);
   });
 });

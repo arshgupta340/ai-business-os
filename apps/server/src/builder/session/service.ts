@@ -1,5 +1,12 @@
 import { AgentSpecSchema, type AgentSpec, type BuilderMessage, type BuilderSession, type BusinessFact } from '../pending-contracts';
-import { splitRequestedCapabilities, TEMPLATE_CAPABILITIES, TEMPLATE_KNOWLEDGE_SCOPES } from '../registry';
+import {
+  fitCapabilitySet,
+  knowledgeScopesForCapabilities,
+  splitRequestedCapabilities,
+  TEMPLATE_CAPABILITIES,
+  TEMPLATE_KNOWLEDGE_SCOPES,
+  type CapabilitySetFit,
+} from '../registry';
 import { apiError, newId } from '../util';
 import type { BusinessContext, BusinessKnowledge } from './knowledge';
 import { BuilderModelUnavailable, BuilderTurnOutputSchema, type BuilderModel, type BuilderTurnOutput } from './model';
@@ -116,7 +123,7 @@ export class BuilderSessionService {
     const split = splitRequestedCapabilities(out.capabilityIds);
     const unsupportedRequests = dedupe([...out.unsupportedRequests, ...split.unsupported].map((s) => s.trim().slice(0, LIMITS.unsupported)).filter(Boolean));
 
-    const { spec: nextSpec, patch } = mergeSpec(session.draftSpec, out, split.allowed, context);
+    const { spec: nextSpec, patch, dropped } = mergeSpec(session.draftSpec, out, split.allowed, context);
 
     // Answers count only for fields that were missing and can be answered in chat.
     const newDrafts: BusinessFact[] = [];
@@ -130,7 +137,7 @@ export class BuilderSessionService {
     for (const fact of newDrafts) await this.deps.draftFacts.insertDraft(fact);
 
     const after = computeFieldStatus(nextSpec, context, [...priorDrafts, ...newDrafts]);
-    const replyText = composeReply(out.reply, unsupportedRequests, after);
+    const replyText = composeReply(out.reply, unsupportedRequests, after, dropped);
 
     const reply: BuilderMessage = {
       id: newId('bmsg_'),
@@ -224,7 +231,7 @@ export function mergeSpec(
   out: BuilderTurnOutput,
   allowedCapabilities: AgentSpec['capabilities'],
   context: BusinessContext,
-): { spec: Partial<AgentSpec>; patch: Partial<AgentSpec> } {
+): { spec: Partial<AgentSpec>; patch: Partial<AgentSpec>; dropped: CapabilitySetFit['dropped'] } {
   const spec: Partial<AgentSpec> = structuredClone(current);
   const patch: Partial<AgentSpec> = {};
   const set = <K extends keyof AgentSpec>(key: K, value: AgentSpec[K]) => {
@@ -234,16 +241,27 @@ export function mergeSpec(
     }
   };
 
+  let dropped: CapabilitySetFit['dropped'] = [];
   const templateChanged = out.template !== null && out.template !== spec.template;
   if (out.template !== null) set('template', out.template);
   const template = spec.template;
   if (template) {
     // A known template starts from its registry set. Model requests can only
-    // add registered IDs on top; they never remove the template's set.
+    // add registered IDs on top; they never remove the template's set. A
+    // custom agent starts empty and holds only what the model selected.
     const templateSet = template === 'custom' ? [] : [...TEMPLATE_CAPABILITIES[template]];
     const base = templateChanged ? templateSet : (spec.capabilities ?? templateSet);
-    const capabilities = dedupe([...base, ...allowedCapabilities]);
+    // The set rules (registry.ts CAPABILITY_RULES) decide what stays. A
+    // capability that breaks one is removed and the reply says why. Nothing
+    // is added that neither the template nor the model named.
+    const fit = fitCapabilitySet(dedupe([...base, ...allowedCapabilities]));
+    dropped = fit.dropped;
+    const capabilities = fit.kept;
     if (capabilities.length > 0) set('capabilities', capabilities);
+    else if (spec.capabilities) {
+      delete spec.capabilities;
+      delete patch.capabilities;
+    }
 
     set('channel', 'phone');
     set('writePolicy', 'owner_approval_each_action_bundle');
@@ -252,7 +270,10 @@ export function mergeSpec(
     if (!spec.status) set('status', 'draft');
     set('businessId', context.profile.id);
     if (out.knowledgeScopes && out.knowledgeScopes.length > 0) set('knowledgeScopes', dedupe(out.knowledgeScopes));
-    else if (!spec.knowledgeScopes || templateChanged) set('knowledgeScopes', [...TEMPLATE_KNOWLEDGE_SCOPES[template]]);
+    else if (template === 'custom') {
+      // A custom agent's scopes follow from its capabilities.
+      if (!spec.knowledgeScopes || templateChanged || 'capabilities' in patch) set('knowledgeScopes', knowledgeScopesForCapabilities(capabilities));
+    } else if (!spec.knowledgeScopes || templateChanged) set('knowledgeScopes', [...TEMPLATE_KNOWLEDGE_SCOPES[template]]);
   }
 
   const name = clean(out.name, LIMITS.name);
@@ -264,16 +285,22 @@ export function mergeSpec(
   else if (template && !spec.greeting) {
     set('greeting', `Hi, thanks for calling ${context.profile.name}. I am an AI assistant.`);
   }
-  return { spec, patch };
+  return { spec, patch, dropped };
 }
 
 // The reply always explains what was left out, in the builder's own words, and
 // always asks about a missing field if the model's text did not ask anything.
-export function composeReply(modelReply: string, unsupported: readonly string[], status: FieldStatus): string {
+export function composeReply(
+  modelReply: string,
+  unsupported: readonly string[],
+  status: FieldStatus,
+  dropped: CapabilitySetFit['dropped'] = [],
+): string {
   const parts = [modelReply.trim().slice(0, LIMITS.reply)];
   if (unsupported.length > 0) {
     parts.push(`Not available, so it is not part of this agent: ${unsupported.join('; ')}.`);
   }
+  for (const d of dropped) parts.push(`Left out of this agent: ${d.reason}`);
   if (status.missing.length > 0 && !parts[0]!.includes('?')) {
     const question = fieldRule(status.missing[0]!)?.question;
     if (question) parts.push(question);

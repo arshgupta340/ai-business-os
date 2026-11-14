@@ -22,7 +22,17 @@ export const RECORDED_SCRIPTS = {
     'We need at least 2 hours notice. Ask the customer if we can text them a confirmation, and only text them if they say yes.',
   ],
   unsupported: ['Also have it send marketing texts to all my customers every week.'],
+  // B-29: a custom agent that only answers questions (P-13).
+  faq: [
+    'I want an agent that answers questions about our hours and menu. It should not take orders.',
+    'Also let it give refunds.',
+  ],
+  // One supported and one unsupported ability in the same message, sent to
+  // the FAQ draft.
+  faqMixed: ['Also let it tell callers what an order would cost, and have it text customers promotions.'],
 } as const;
+
+const FAQ_CAPS = ['catalog.read', 'business.facts.read'];
 
 const PIZZA_CAPS = [
   'catalog.read',
@@ -112,6 +122,34 @@ const RECORDINGS: Record<string, BuilderTurnOutput> = {
     capabilityIds: ['marketing.sms.broadcast'],
     unsupportedRequests: ['send marketing texts'],
     confidence: 0.9,
+  },
+  [RECORDED_SCRIPTS.faq[0]]: {
+    ...empty,
+    reply:
+      'I can build that: a phone agent that answers questions about your opening hours and your menu from your verified records. It will not take orders. When a caller asks for something it cannot do, it says so and tells them what it can help with.',
+    template: 'custom',
+    capabilityIds: FAQ_CAPS,
+    confidence: 0.92,
+    name: 'Hours and Menu Assistant',
+    goal: 'Answer caller questions about opening hours and the menu. It does not take orders.',
+    greeting: 'Hi, thanks for calling. I am an AI assistant and I can answer questions about our hours and menu.',
+    knowledgeScopes: ['business_profile', 'catalog', 'hours', 'faq'],
+  },
+  [RECORDED_SCRIPTS.faq[1]]: {
+    ...empty,
+    // Names a capability that does not exist on purpose, as above.
+    reply: 'This agent cannot give refunds. No capability for refunds exists, so the draft stays as it was.',
+    capabilityIds: ['payment.refund.issue'],
+    unsupportedRequests: ['give refunds'],
+    confidence: 0.9,
+  },
+  [RECORDED_SCRIPTS.faqMixed[0]]: {
+    ...empty,
+    reply:
+      'The agent can now tell callers the exact total of an order, with tax, from your Square account. It still does not take orders. It cannot text customers promotions.',
+    capabilityIds: ['order.quote', 'marketing.sms.promotions'],
+    unsupportedRequests: ['text customers promotions'],
+    confidence: 0.88,
   },
 };
 

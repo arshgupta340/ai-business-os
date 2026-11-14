@@ -60,3 +60,30 @@ describe('missing-field computation', () => {
     expect(stopConditions(pizzaSpec, ctx, status).map((s) => s.code)).toEqual(['missing_timezone', 'open_conflict', 'missing_message_consent_policy']);
   });
 });
+
+describe('missing fields for the FAQ-only subset', () => {
+  const faqSpec = { template: 'custom' as const, capabilities: ['catalog.read', 'business.facts.read'] as const };
+
+  it('follow from the two read capabilities only', () => {
+    const fields = requiredFields({ ...faqSpec, capabilities: [...faqSpec.capabilities] });
+    expect(fields).toEqual(['name', 'goal', 'catalog.items', 'hours.mon', 'hours.tue', 'hours.wed', 'hours.thu', 'hours.fri', 'hours.sat', 'hours.sun']);
+    for (const f of ['policy.pickup_window', 'policy.special_requests', 'policy.message_consent', 'policy.minimum_notice', 'services']) {
+      expect(fields).not.toContain(f);
+    }
+  });
+
+  it('asks a business with nothing known for hours and a menu, and raises no consent stop condition', () => {
+    const ctx: BusinessContext = { profile: { id: 'biz_x', name: 'X', category: 'cafe', timezone: 'America/Los_Angeles' }, verifiedFacts: [], catalogItemCount: 0, openRequiredConflictIds: [] };
+    const spec = { ...faqSpec, capabilities: [...faqSpec.capabilities], name: 'A', goal: 'B' };
+    const status = computeFieldStatus(spec, ctx, []);
+    expect(status.missing).toEqual(['catalog.items', 'hours.mon', 'hours.tue', 'hours.wed', 'hours.thu', 'hours.fri', 'hours.sat', 'hours.sun']);
+    expect(stopConditions(spec, ctx, status)).toEqual([]);
+    expect(suggestions(status)).toEqual(['Upload menu', 'Use Square catalog']);
+  });
+
+  it('needs nothing more at the pizza shop, and only the menu at the barbershop', async () => {
+    const spec = { ...faqSpec, capabilities: [...faqSpec.capabilities], name: 'A', goal: 'B' };
+    expect(computeFieldStatus(spec, (await knowledge.getContext('biz_pizza_01'))!, []).missing).toEqual([]);
+    expect(computeFieldStatus(spec, (await knowledge.getContext('biz_barber_01'))!, []).missing).toEqual(['catalog.items']);
+  });
+});
