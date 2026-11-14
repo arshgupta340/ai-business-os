@@ -59,7 +59,9 @@ const EnvSchema = z.object({
 export type Env = z.infer<typeof EnvSchema>;
 
 export function parseEnv(source: Record<string, string | undefined> = process.env): Env {
-  const result = EnvSchema.safeParse(source);
+  // An empty value (`KEY=` in .env.local) counts as absent, so an unset optional key never stops the server.
+  const present = Object.fromEntries(Object.entries(source).filter(([, v]) => typeof v === 'string' && v.trim() !== ''));
+  const result = EnvSchema.safeParse(present);
   if (!result.success) {
     const lines = result.error.issues.map((i) => `  ${i.path.join('.') || '(env)'}: ${i.message}`);
     throw new Error(`Invalid environment:\n${lines.join('\n')}`);

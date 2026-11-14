@@ -8,6 +8,13 @@ import { parseEnv } from '../../src/env';
 import { createHarness, headers, verifier } from '../api/harness';
 
 describe('composition without optional keys', () => {
+  it('treats an empty value in .env.local as absent instead of refusing to start', () => {
+    const env = parseEnv({ SQUARE_ACCESS_TOKEN: '', PUBLIC_SERVER_URL: '', GOOGLE_SERVICE_ACCOUNT_JSON: ' ', ANDROID_GATEWAY_URL: '' });
+    expect(env.SQUARE_ACCESS_TOKEN).toBeUndefined();
+    expect(env.PUBLIC_SERVER_URL).toBeUndefined();
+    expect(() => parseEnv({ SQUARE_ENVIRONMENT: 'production' })).toThrow(/sandbox/);
+  });
+
   it('starts, reports every provider as not connected and keeps webhooks closed', async () => {
     const app = await buildApp(parseEnv({}));
     try {
