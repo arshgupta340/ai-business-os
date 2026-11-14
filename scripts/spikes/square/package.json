@@ -1,0 +1,32 @@
+{
+  "name": "square-sandbox-spike",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Spike B-02: Square sandbox quote, payment link, webhook and payment verification",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "locations": "tsx src/locations.ts",
+    "seed-catalog": "tsx src/seed-catalog.ts",
+    "quote": "tsx src/quote.ts",
+    "create-link": "tsx src/create-link.ts",
+    "webhook-server": "tsx src/webhook-server.ts",
+    "poll": "tsx src/poll.ts",
+    "fallback-payment": "tsx src/fallback-payment.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.10",
+    "fastify": "^5.12.8",
+    "square": "^46.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}
