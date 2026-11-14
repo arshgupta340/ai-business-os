@@ -6,7 +6,7 @@ import { storedKey } from './hashes';
 import { BARBER_CALENDAR_ID, MINUTE_MS, addMs } from './world';
 
 /** The demo appointment day, in the business timezone. */
-export const BOOKING_DEMO_DATE = '2026-11-17';
+export const BOOKING_DEMO_DATE: string = '2026-11-17';
 
 type BookingInput = {
   n: string; // "b02" gives bkg_demo_b02, call_demo_b02, apv_demo_b02

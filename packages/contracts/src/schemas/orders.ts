@@ -4,7 +4,7 @@ import { ApprovalIdSchema, BookingIdSchema, BusinessIdSchema, CallIdSchema, Orde
 import { CurrencySchema, E164Schema, IsoDateTimeSchema, MinorAmountSchema, Sha256HashSchema, TimezoneSchema, msBetween } from '../primitives';
 import { CartSchema, QuoteSchema } from './catalog';
 
-/** Shared by contacts, customers and approval payloads (whose consent metadata is optional). */
+/** Shared by order contacts and booking customers. Approval payloads carry no consent flag (CONTRACTS 4). */
 export function checkMessageConsent(value: { messageConsent?: boolean | undefined; messageRecipient?: string | undefined }, ctx: z.RefinementCtx): void {
   if (value.messageConsent === true && value.messageRecipient === undefined) {
     ctx.addIssue({ code: 'custom', path: ['messageRecipient'], message: 'Consent requires a messageRecipient' });

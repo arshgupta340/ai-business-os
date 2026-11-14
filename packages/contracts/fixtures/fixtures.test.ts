@@ -28,12 +28,20 @@ import {
   OrderSchema,
   QUOTE_EXPIRY_MS,
   ServiceOfferingSchema,
+  MATERIAL_FIELDS,
+  approvalPayloadHash,
+  canonicalJson,
   cartHash,
+  hashCanonical,
   idempotencyKey,
   payloadHash,
+  pickMaterialFields,
+  sha256Hex,
+  toCanonicalTimestamp,
   type EndpointName,
 } from '../src/index';
 import * as F from './index';
+import { materializeFixtures, type FixtureWorld } from './index';
 
 function parses(schema: z.ZodType, value: unknown, label: string): void {
   const r = schema.safeParse(value);
@@ -341,7 +349,7 @@ describe('referential integrity', () => {
         expect(a.payload.agentVersionId).toBe(call?.agentVersionId);
         expect(a.payload.cartHash).toBe(o.cartHash);
         expect(a.payload.totalMinor).toBe(o.totalMinor);
-        expect(a.payload.pickupAt).toBe(o.fulfillment.pickupAt);
+        expect(a.payload.pickupAt).toBe(toCanonicalTimestamp(o.fulfillment.pickupAt));
         expect(a.payload.messageRecipient).toBe(o.contact.messageRecipient);
         expect(a.createdAt).toBe(o.createdAt);
       } else if (a.bundleType === 'booking_bundle') {
@@ -349,7 +357,7 @@ describe('referential integrity', () => {
         expect(b, a.id).toBeDefined();
         if (b === undefined) continue;
         expect(a.payload.agentVersionId).toBe(F.calls.find((c) => c.id === b.callId)?.agentVersionId);
-        expect([a.payload.startUtc, a.payload.endUtc, a.payload.serviceId, a.payload.calendarId]).toEqual([b.startUtc, b.endUtc, b.serviceId, b.calendarId]);
+        expect([a.payload.startUtc, a.payload.endUtc, a.payload.serviceId, a.payload.calendarId]).toEqual([toCanonicalTimestamp(b.startUtc), toCanonicalTimestamp(b.endUtc), b.serviceId, b.calendarId]);
         expect(a.payload.messageRecipient).toBe(b.customer.messageRecipient);
       } else if (a.bundleType === 'fact_edit') {
         expect(factIds.has(a.subjectId), a.id).toBe(true);
@@ -485,5 +493,181 @@ describe('scripted timelines', () => {
     expect(keptReq?.type === 'approval.requested' && keptReq.payload.expiresAt).toBe(F.approvalOrderFulfilled.expiresAt);
     // The stored timeline is not changed.
     expect(F.pizzaOrderTimeline.entries[0]?.event.occurredAt).toBe('2026-11-14T19:00:00Z');
+  });
+});
+
+describe('approval payloads hold exactly the material fields (CONTRACTS 4)', () => {
+  const samples = [F.approvalOrderPending, F.approvalBookingPending, F.approvalFactEditPending, F.approvalPriceEditPending];
+
+  it.each(samples.map((a) => [a.bundleType, a] as const))('%s: pickMaterialFields(payload) deep-equals payload, and the stored hash is the hash of the whole payload', async (bundleType, a) => {
+    expect(pickMaterialFields(bundleType, a.payload)).toStrictEqual(a.payload);
+    expect(Object.keys(a.payload).every((k) => (MATERIAL_FIELDS[bundleType] as readonly string[]).includes(k))).toBe(true);
+    const whole = `sha256:${await sha256Hex(canonicalJson(a.payload))}`;
+    expect(a.payloadHash).toBe(whole);
+    expect(await approvalPayloadHash(bundleType, a.payload)).toBe(whole);
+  });
+
+  it('every fixture approval, all four bundle types: payload is its own projection and payloadHash covers all of it', async () => {
+    expect(new Set(F.approvals.map((a) => a.bundleType)).size).toBe(4);
+    for (const a of F.approvals) {
+      expect(pickMaterialFields(a.bundleType, a.payload), a.id).toStrictEqual(a.payload);
+      expect(a.payloadHash, a.id).toBe(await hashCanonical(a.payload));
+      expect(a.payload, a.id).not.toHaveProperty('messageConsent');
+    }
+  });
+
+  it.each(samples.map((a) => [a.bundleType, a] as const))('%s: the strict payload schema refuses an extra field', (_bundleType, a) => {
+    const bad = { ...a, payload: { ...a.payload, callId: 'call_demo_04' } };
+    expect(ApprovalRequestSchema.safeParse(bad).success).toBe(false);
+    expect(ApprovalRequestSchema.safeParse(a).success).toBe(true);
+  });
+
+  it('payload timestamps are stored in toISOString() form', () => {
+    for (const a of F.approvals) {
+      const p = a.payload as Record<string, unknown>;
+      for (const k of ['expiresAt', 'pickupAt', 'startUtc', 'endUtc']) {
+        const v = p[k];
+        if (typeof v === 'string') expect(v, `${a.id}.${k}`).toBe(toCanonicalTimestamp(v));
+      }
+    }
+  });
+});
+
+describe('fixture timestamps and uniqueness', () => {
+  it('every timestamp in every fixture uses the Z form', () => {
+    const isoLike = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+    const bad: string[] = [];
+    const walk = (v: unknown, path: string): void => {
+      if (typeof v === 'string') {
+        if (isoLike.test(v) && !F.ISO_UTC_PATTERN.test(v)) bad.push(`${path}=${v}`);
+      } else if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${path}[${i}]`));
+      else if (v !== null && typeof v === 'object') for (const [k, x] of Object.entries(v)) walk(x, `${path}.${k}`);
+    };
+    for (const [name, value] of Object.entries(F)) if (typeof value !== 'function') walk(value, name);
+    expect(bad).toEqual([]);
+  });
+
+  it('no two orders share (businessId, cartHash, callId), the orders unique index', () => {
+    const keys = F.orders.map((o) => `${o.businessId}|${o.cartHash}|${o.callId}`);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it('the QR-only order has its own call, cart hash and quote', () => {
+    const others = F.orders.filter((o) => o.id !== F.orderQrOnly.id);
+    expect(others.some((o) => o.callId === F.orderQrOnly.callId)).toBe(false);
+    expect(others.some((o) => o.cartHash === F.orderQrOnly.cartHash)).toBe(false);
+    expect(others.some((o) => o.quote.quoteId === F.orderQrOnly.quote.quoteId)).toBe(false);
+    expect(F.calls.some((c) => c.id === F.orderQrOnly.callId)).toBe(true);
+  });
+
+  it('only whatsapp_sandbox dispatches are DELIVERED', () => {
+    for (const d of F.messageDispatches) if (d.channel !== 'whatsapp_sandbox') expect(d.status, d.id).not.toBe('DELIVERED');
+    expect(F.messageDispatches.find((d) => d.id === 'msg_demo_01')?.status).toBe('SENT');
+    expect(F.messageDispatches.find((d) => d.id === 'msg_demo_07')?.status).toBe('SENT');
+  });
+});
+
+/** Parses every collection of a world and checks every stored hash and key against a recomputed one. */
+async function checkWorld(W: FixtureWorld): Promise<void> {
+  parsesAll(BusinessSchema, W.businesses, 'businesses');
+  parsesAll(BusinessFactSchema, W.allFacts, 'facts');
+  parsesAll(FactConflictSchema, [...W.factConflicts, W.menuPriceConflictResolved], 'conflicts');
+  parsesAll(FileRecordSchema, W.files, 'files');
+  parsesAll(ServiceOfferingSchema, W.barberServices, 'services');
+  parsesAll(CatalogItemSchema, W.pizzaCatalog, 'catalog');
+  parsesAll(AgentSpecSchema, [W.pizzaSpecV1, W.pizzaSpecV2, W.barberSpecV1], 'specs');
+  parsesAll(AgentVersionSchema, W.agentVersions, 'versions');
+  parsesAll(AgentSchema, W.agents, 'agents');
+  parsesAll(CallSchema, W.calls, 'calls');
+  parsesAll(LiveAgentSchema, [W.liveAgent, W.liveAgentBarber, W.liveAgentEmpty], 'liveAgent');
+  parsesAll(BuilderSessionSchema, [W.builderSession, W.builderSessionNew], 'builder');
+  parsesAll(OrderSchema, [...W.orders, W.orderCancelled], 'orders');
+  parsesAll(BookingSchema, W.bookings, 'bookings');
+  parsesAll(ApprovalRequestSchema, [...W.approvals, ...W.pendingApprovals], 'approvals');
+  parsesAll(ActionExecutionSchema, W.executions, 'executions');
+  parsesAll(MessageDispatchSchema, W.messageDispatches, 'dispatches');
+  parses(IntegrationHealthSchema, W.integrationHealth, 'health');
+  parsesAll(OrderCheckoutSchema, W.orderCheckouts, 'checkouts');
+  parsesAll(ActivityEventSchema, W.allActivityEvents, 'activity');
+  for (const t of W.timelines) {
+    for (const { offsetMs, event } of t.entries) {
+      parses(ActivityEventSchema, event, `${t.name} ${event.id}`);
+      expect(ms(event.occurredAt) - ms(t.baseStartAt)).toBe(offsetMs);
+    }
+  }
+  for (const name of Object.keys(ENDPOINTS) as EndpointName[]) parses(ENDPOINTS[name].response, W.fixtureResponses[name], `fixtureResponses.${name}`);
+
+  for (const o of [...W.orders, W.orderCancelled]) {
+    const h = await cartHash(o.cart);
+    expect(o.cartHash, o.id).toBe(h);
+    expect(o.quote.cartHash, o.id).toBe(h);
+  }
+  const allApprovals = [
+    ...W.approvals,
+    ...W.pendingApprovals,
+    ...W.fixtureResponses.listApprovals.items,
+    W.fixtureResponses.getApproval,
+    W.fixtureResponses.proposeFact.approval,
+    W.fixtureResponses.proposePrice.approval,
+  ];
+  for (const a of allApprovals) {
+    expect(a.payloadHash, a.id).toBe(await hashCanonical(a.payload));
+    expect(a.payloadHash, a.id).toBe(await approvalPayloadHash(a.bundleType, a.payload));
+  }
+  const byId = new Map(W.approvals.map((a) => [a.id, a]));
+  for (const e of W.executions) {
+    const a = byId.get(e.approvalId);
+    expect(a, e.id).toBeDefined();
+    expect(e.idempotencyKey, e.id).toBe(await idempotencyKey({ businessId: e.businessId, subjectId: a?.subjectId ?? '', actionType: e.actionType, approvalId: e.approvalId }));
+  }
+  for (const d of W.messageDispatches) expect(d.idempotencyKey).toBe(W.executions.find((e) => e.id === d.executionId)?.idempotencyKey);
+  expect(W.bookingVerified.googleEventId).toBe(W.executions.find((e) => e.id === 'exe_demo_b02_0')?.idempotencyKey);
+}
+
+describe('materializeFixtures', () => {
+  it('the unshifted fixtures pass the same checks', async () => {
+    await checkWorld(F as unknown as FixtureWorld);
+  });
+
+  const times = [
+    ['the real current time', new Date()],
+    ['a time across the March 2027 daylight saving change', new Date('2027-03-14T18:00:00Z')],
+    ['a time far in the future', new Date('2099-06-30T23:59:59.250Z')],
+  ] as const;
+
+  it.each(times)('at %s: every object parses, every hash is real, PENDING approvals are live, the original is untouched', async (_label, now) => {
+    const before = JSON.stringify(F);
+    const W = await materializeFixtures(now);
+    expect(JSON.stringify(F)).toBe(before);
+
+    expect(ms(W.FIXTURE_NOW)).toBe(now.getTime());
+    await checkWorld(W);
+
+    const delta = now.getTime() - ms(F.FIXTURE_NOW);
+    expect(ms(W.orderAwaitingApproval.createdAt) - ms(F.orderAwaitingApproval.createdAt)).toBe(delta);
+    expect(ms(W.pizzaOrderTimeline.baseStartAt) - ms(F.pizzaOrderTimeline.baseStartAt)).toBe(delta);
+
+    expect(W.pendingApprovals.length).toBe(F.pendingApprovals.length);
+    expect(W.pendingApprovals.length).toBeGreaterThan(0);
+    for (const a of W.pendingApprovals) {
+      expect(a.state).toBe('PENDING');
+      expect(ms(a.expiresAt), a.id).toBeGreaterThan(now.getTime());
+      expect(ms(a.createdAt), a.id).toBeLessThanOrEqual(now.getTime());
+      expect(a.payload.expiresAt, a.id).toBe(toCanonicalTimestamp(a.payload.expiresAt));
+    }
+    // A payload timestamp moved, so the hash moved with it.
+    expect(W.approvalOrderPending.payloadHash).not.toBe(F.approvalOrderPending.payloadHash);
+    expect(W.approvalOrderPending).not.toBe(F.approvalOrderPending);
+  });
+
+  it('the demo appointment date follows the shifted booking', async () => {
+    const W = await materializeFixtures(new Date('2027-03-14T18:00:00Z'));
+    expect(W.BOOKING_DEMO_DATE).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(W.BOOKING_DEMO_DATE).not.toBe(F.BOOKING_DEMO_DATE);
+  });
+
+  it('shiftTimeline gives the same timeline as the world shift', async () => {
+    const W = await materializeFixtures(new Date('2027-01-05T09:00:00Z'));
+    expect(F.shiftTimeline(F.pizzaOrderTimeline, new Date(W.pizzaOrderTimeline.baseStartAt))).toEqual(W.pizzaOrderTimeline);
   });
 });

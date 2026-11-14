@@ -26,6 +26,17 @@ export function msBetween(from: string, to: string): number {
   return Date.parse(to) - Date.parse(from);
 }
 
+/**
+ * CONTRACTS 4: the one stored form of an instant, `Date.prototype.toISOString()` (UTC, `Z`, milliseconds).
+ * `2026-11-14T20:30:00+00:00` and `2026-11-14T20:30:00Z` are the same instant but hash differently, so
+ * every timestamp the package puts in an approval payload goes through this first. Throws on an invalid time.
+ */
+export function toCanonicalTimestamp(value: string | number | Date): string {
+  const ms = value instanceof Date ? value.getTime() : typeof value === 'number' ? value : Date.parse(value);
+  if (!Number.isFinite(ms)) throw new RangeError(`toCanonicalTimestamp: not a valid time: ${String(value)}`);
+  return new Date(ms).toISOString();
+}
+
 /** Any JSON value (jsonb columns). */
 export const JsonValueSchema = z.json();
 export type JsonValue = z.infer<typeof JsonValueSchema>;

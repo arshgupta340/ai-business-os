@@ -219,6 +219,20 @@ describe('other database checks', () => {
     fails(MessageDispatchSchema, { ...m, status: 'SENT' });
     passes(MessageDispatchSchema, { ...m, status: 'SENT', providerMessageId: 'p1', sentAt: createdAt });
   });
+  it('MessageDispatch: only whatsapp_sandbox can reach DELIVERED; SENT is the last state for every other channel', () => {
+    const m = { id: 'msg_1', businessId: 'biz_pizza_01', executionId: 'exe_2', subjectId: 'ord_1', channel: 'whatsapp_sandbox', recipient: '+15555550123',
+      template: 'checkout_link', status: 'DELIVERED', providerMessageId: 'p1', idempotencyKey: 'cd'.repeat(32), sentAt: createdAt, deliveredAt: createdAt,
+      createdAt, updatedAt: createdAt };
+    passes(MessageDispatchSchema, m);
+    fails(MessageDispatchSchema, { ...m, channel: 'surge' });
+    fails(MessageDispatchSchema, { ...m, channel: 'android_gateway' });
+    for (const channel of ['surge', 'android_gateway', 'whatsapp_sandbox']) {
+      passes(MessageDispatchSchema, { ...m, channel, status: 'SENT', deliveredAt: undefined });
+    }
+    // deliveredAt goes with DELIVERED only.
+    fails(MessageDispatchSchema, { ...m, deliveredAt: undefined });
+    fails(MessageDispatchSchema, { ...m, channel: 'surge', status: 'SENT' });
+  });
 });
 
 describe('server-only transitions from the review', () => {

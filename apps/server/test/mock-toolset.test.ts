@@ -25,7 +25,7 @@ import {
   serviceHaircut,
   slotConflictAlternatives,
 } from '@abos/contracts/fixtures';
-import { createMockToolset } from '../src/tools/mock/index';
+import { createMockToolset, createMockToolsetRegistry } from '../src/tools/mock/index';
 
 const PIZZA = 'biz_pizza_01';
 const BARBER = 'biz_barber_01';
@@ -399,5 +399,87 @@ describe('state is per instance', () => {
     await ts.tools.read_catalog({}, pizzaCtx);
     ts.trace().pop();
     expect(ts.trace().length).toBe(1);
+  });
+});
+
+describe('reset on one toolset', () => {
+  it('clears quotes, proposals, trace and ID counters', async () => {
+    const ts = createMockToolset({ businessId: PIZZA });
+    const q = await quote(ts, twoPizzas);
+    const p = await ts.tools.propose_order({ cart: twoPizzas, contact, fulfillment, quoteId: q.quoteId }, pizzaCtx);
+    expect(p).toMatchObject({ ok: true, proposalId: 'ord_mock_0001' });
+    ts.reset();
+    expect(ts.trace()).toEqual([]);
+    expect(await ts.tools.get_order_status({ orderId: 'ord_mock_0001' }, pizzaCtx)).toMatchObject({ ok: false, reason: 'NOT_FOUND' });
+    expect(await ts.tools.propose_order({ cart: twoPizzas, contact, fulfillment, quoteId: q.quoteId }, pizzaCtx)).toMatchObject({ ok: false, reason: 'NOT_FOUND' });
+    expect((await quote(ts, twoPizzas)).quoteId).toBe('qte_mock_0001');
+  });
+});
+
+describe('createMockToolsetRegistry', () => {
+  it('returns the same instance for a session and a separate one for each other session', () => {
+    const reg = createMockToolsetRegistry();
+    const a = reg.forSession('tst_a', PIZZA);
+    expect(reg.forSession('tst_a', PIZZA)).toBe(a);
+    expect(reg.forSession('tst_b', PIZZA)).not.toBe(a);
+    expect(() => reg.forSession('tst_a', BARBER)).toThrow();
+  });
+
+  it('two sessions never share proposals or traces', async () => {
+    const reg = createMockToolsetRegistry();
+    const a = reg.forSession('tst_a', PIZZA);
+    const b = reg.forSession('tst_b', PIZZA);
+    const qa = await quote(a, twoPizzas);
+    expect(await a.tools.propose_order({ cart: twoPizzas, contact, fulfillment, quoteId: qa.quoteId }, pizzaCtx)).toMatchObject({ ok: true, proposalId: 'ord_mock_0001' });
+    expect(await b.tools.propose_order({ cart: twoPizzas, contact, fulfillment, quoteId: qa.quoteId }, pizzaCtx)).toMatchObject({ ok: false, reason: 'NOT_FOUND' });
+    expect(await b.tools.get_order_status({ orderId: 'ord_mock_0001' }, pizzaCtx)).toMatchObject({ ok: false, reason: 'NOT_FOUND' });
+    expect(a.trace().map((e) => e.tool)).toEqual(['quote_order', 'propose_order']);
+    expect(b.trace().map((e) => e.tool)).toEqual(['propose_order', 'get_order_status']);
+  });
+
+  it('reset clears one session only; resetAll clears every session', async () => {
+    const reg = createMockToolsetRegistry();
+    const a = reg.forSession('tst_a', PIZZA);
+    const b = reg.forSession('tst_b', PIZZA);
+    const qa = await quote(a, twoPizzas);
+    const qb = await quote(b, twoPizzas);
+    reg.reset('tst_a');
+    reg.reset('tst_unknown');
+    expect(a.trace()).toEqual([]);
+    expect(await a.tools.propose_order({ cart: twoPizzas, contact, fulfillment, quoteId: qa.quoteId }, pizzaCtx)).toMatchObject({ ok: false, reason: 'NOT_FOUND' });
+    expect(b.trace().length).toBe(1);
+    expect(await b.tools.propose_order({ cart: twoPizzas, contact, fulfillment, quoteId: qb.quoteId }, pizzaCtx)).toMatchObject({ ok: true });
+    expect(reg.forSession('tst_a', PIZZA)).toBe(a);
+    reg.resetAll();
+    expect(a.trace()).toEqual([]);
+    expect(b.trace()).toEqual([]);
+  });
+
+  it('a barbershop session and a pizza session work side by side', async () => {
+    const reg = createMockToolsetRegistry();
+    const pizza = reg.forSession('tst_pizza', PIZZA);
+    const barber = reg.forSession('tst_barber', BARBER);
+    const q = await quote(pizza, twoPizzas);
+    const slots = await barber.tools.read_calendar_availability({ serviceId: serviceHaircut.id, date: '2026-11-17' }, barberCtx);
+    expect(slots).toMatchObject({ ok: true });
+    if (!slots.ok) throw new Error('no slots');
+    const slot = slots.slots[0];
+    if (slot === undefined) throw new Error('no free slot');
+    const booked = await barber.tools.propose_booking({ serviceId: serviceHaircut.id, startUtc: slot.startUtc, customer: { name: 'Ana', messageConsent: false } }, barberCtx);
+    expect(booked).toMatchObject({ ok: true, proposalId: 'bkg_mock_0001' });
+    const ordered = await pizza.tools.propose_order({ cart: twoPizzas, contact, fulfillment, quoteId: q.quoteId }, pizzaCtx);
+    expect(ordered).toMatchObject({ ok: true, proposalId: 'ord_mock_0001' });
+    // Each toolset reads only its own business.
+    expect(await pizza.tools.read_catalog({}, barberCtx)).toMatchObject({ ok: false, reason: 'CAPABILITY_NOT_ALLOWED' });
+    expect(await barber.tools.quote_order({ cart: twoPizzas }, barberCtx)).toMatchObject({ ok: false, reason: 'ITEM_UNAVAILABLE' });
+    expect(pizza.trace().map((e) => e.tool)).toEqual(['quote_order', 'propose_order', 'read_catalog']);
+    expect(barber.trace().map((e) => e.tool)).toEqual(['read_calendar_availability', 'propose_booking', 'quote_order']);
+  });
+
+  it('passes its clock to every session', async () => {
+    const c = clock('2026-11-14T19:00:00Z');
+    const reg = createMockToolsetRegistry({ now: c.now });
+    const q = await quote(reg.forSession('tst_a', PIZZA), twoPizzas);
+    expect(q.quotedAt).toBe('2026-11-14T19:00:00Z');
   });
 });

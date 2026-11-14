@@ -1,10 +1,12 @@
 // Approval requests, one or more per bundle type, pending and decided.
 // `expiresAt` is always `createdAt` plus 10 minutes (SPEC 2.9). Each `payloadHash` is the real hash of
-// its payload; the fixture test recomputes it.
+// its payload; the fixture test recomputes it. A payload holds exactly the material fields (CONTRACTS 4),
+// and every payload timestamp is in `toISOString()` form (`toCanonicalTimestamp`).
 import {
   APPROVAL_EXPIRY_MS,
   BUNDLE_ACTIONS,
   PIZZA_BUSINESS_ID,
+  toCanonicalTimestamp,
   type ApprovalRequest,
   type ApprovalState,
   type Booking,
@@ -50,7 +52,7 @@ function agentVersionOfCall(callId: string | undefined): string {
 function orderApproval(order: Order, channel: MessageChannelSetting, d: Decision): OrderApprovalRequest {
   const id = order.approvalId ?? '';
   const createdAt = order.createdAt;
-  const expiresAt = addMs(createdAt, APPROVAL_EXPIRY_MS);
+  const expiresAt = toCanonicalTimestamp(addMs(createdAt, APPROVAL_EXPIRY_MS));
   const actionBundle = [...BUNDLE_ACTIONS.order_bundle] as OrderApprovalRequest['actionBundle'];
   return {
     id,
@@ -66,9 +68,8 @@ function orderApproval(order: Order, channel: MessageChannelSetting, d: Decision
       cartHash: order.cartHash,
       totalMinor: order.totalMinor,
       currency: order.currency,
-      pickupAt: order.fulfillment.pickupAt,
+      pickupAt: toCanonicalTimestamp(order.fulfillment.pickupAt),
       ...(order.contact.messageRecipient === undefined ? {} : { messageRecipient: order.contact.messageRecipient }),
-      messageConsent: order.contact.messageConsent,
       messageChannel: channel,
       actionBundle,
       expiresAt,
@@ -83,7 +84,7 @@ function orderApproval(order: Order, channel: MessageChannelSetting, d: Decision
 function bookingApproval(booking: Booking, channel: MessageChannelSetting, d: Decision): BookingApprovalRequest {
   const id = booking.approvalId ?? '';
   const createdAt = booking.createdAt;
-  const expiresAt = addMs(createdAt, APPROVAL_EXPIRY_MS);
+  const expiresAt = toCanonicalTimestamp(addMs(createdAt, APPROVAL_EXPIRY_MS));
   const actionBundle = [...BUNDLE_ACTIONS.booking_bundle] as BookingApprovalRequest['actionBundle'];
   return {
     id,
@@ -98,11 +99,10 @@ function bookingApproval(booking: Booking, channel: MessageChannelSetting, d: De
       agentVersionId: agentVersionOfCall(booking.callId),
       serviceId: booking.serviceId,
       calendarId: booking.calendarId,
-      startUtc: booking.startUtc,
-      endUtc: booking.endUtc,
+      startUtc: toCanonicalTimestamp(booking.startUtc),
+      endUtc: toCanonicalTimestamp(booking.endUtc),
       timezone: booking.timezone,
       ...(booking.customer.messageRecipient === undefined ? {} : { messageRecipient: booking.customer.messageRecipient }),
-      messageConsent: booking.customer.messageConsent,
       messageChannel: channel,
       actionBundle,
       expiresAt,
@@ -133,7 +133,7 @@ export const approvalBookingConflict = bookingApproval(bookingSlotConflict, 'sur
 
 // ---- Owner edits (P-09) ----
 const FACT_EDIT_CREATED_AT = '2026-11-14T20:28:00Z';
-const FACT_EDIT_EXPIRES_AT = addMs(FACT_EDIT_CREATED_AT, APPROVAL_EXPIRY_MS);
+const FACT_EDIT_EXPIRES_AT = toCanonicalTimestamp(addMs(FACT_EDIT_CREATED_AT, APPROVAL_EXPIRY_MS));
 
 /** Flow D: Friday close 22:00 to 23:00, waiting for the owner to confirm. */
 export const approvalFactEditPending = {
@@ -161,7 +161,7 @@ export const approvalFactEditPending = {
 } satisfies FactEditApprovalRequest;
 
 const PRICE_EDIT_CREATED_AT = '2026-11-14T20:29:00Z';
-const PRICE_EDIT_EXPIRES_AT = addMs(PRICE_EDIT_CREATED_AT, APPROVAL_EXPIRY_MS);
+const PRICE_EDIT_EXPIRES_AT = toCanonicalTimestamp(addMs(PRICE_EDIT_CREATED_AT, APPROVAL_EXPIRY_MS));
 const largePepperoniRow = pizzaCatalogRows.find((r) => r.squareVariationId === SQ.varPepperoniLarge);
 
 /** Flow E (SHOULD): Large Pepperoni 2200 to 1900 in Square sandbox. */

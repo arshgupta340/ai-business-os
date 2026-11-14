@@ -16,7 +16,7 @@ import { bookingSlotConflict, bookingVerified } from './bookings';
 import { orderFulfilled } from './orders';
 import { barberVersionV1, pizzaVersionV2 } from './agents';
 import { storedKey } from './hashes';
-import { OWNER_USER_ID, addMs, isoUtc } from './world';
+import { OWNER_USER_ID, addMs, isoUtc, shiftIsoTimes } from './world';
 
 export type TimelineEntry = { offsetMs: number; event: ActivityEvent };
 
@@ -184,19 +184,6 @@ export const barberBookingTimeline: ScriptedTimeline = buildBookingTimeline();
 export const barberSlotConflictTimeline: ScriptedTimeline = buildSlotConflictTimeline();
 export const timelines: ScriptedTimeline[] = [pizzaOrderTimeline, barberBookingTimeline, barberSlotConflictTimeline];
 
-const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
-
-function shiftTimes(value: unknown, deltaMs: number): unknown {
-  if (typeof value === 'string') return ISO_UTC.test(value) ? isoUtc(Date.parse(value) + deltaMs) : value;
-  if (Array.isArray(value)) return value.map((v) => shiftTimes(v, deltaMs));
-  if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) out[k] = shiftTimes(v, deltaMs);
-    return out;
-  }
-  return value;
-}
-
 export type MaterializeOptions = {
   /** Also move timestamps inside payloads (expiresAt, startUtc, alternatives) by the same amount. Default true. */
   shiftPayloadTimes?: boolean;
@@ -212,7 +199,15 @@ export function materializeTimeline(timeline: ScriptedTimeline, startAt: Date, o
   const deltaMs = start - Date.parse(timeline.baseStartAt);
   const shift = options.shiftPayloadTimes ?? true;
   return timeline.entries.map(({ offsetMs, event }) => {
-    const payload = shift ? shiftTimes(event.payload, deltaMs) : event.payload;
+    const payload = shift ? shiftIsoTimes(event.payload, deltaMs) : event.payload;
     return { ...event, occurredAt: isoUtc(start + offsetMs), payload } as ActivityEvent;
   });
+}
+
+/**
+ * Moves a whole timeline so its offset 0 is `startAt`: `baseStartAt`, every `occurredAt` and every payload
+ * timestamp shift by the same amount, and offsets stay the same. `materializeFixtures` uses the same shift.
+ */
+export function shiftTimeline(timeline: ScriptedTimeline, startAt: Date): ScriptedTimeline {
+  return shiftIsoTimes(timeline, startAt.getTime() - Date.parse(timeline.baseStartAt));
 }

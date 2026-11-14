@@ -1,6 +1,8 @@
 // Every JSON example in docs/CONTRACTS.md and docs/API.md, parsed with its schema.
 // Changes from the docs are marked DOC-FIX: the docs abbreviate hashes ("sha256:9c1e...") and leave out
 // fields that CONTRACTS.md marks required; the examples here fill them in.
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   ActivityEventSchema,
@@ -30,6 +32,7 @@ import {
   PublishResponseSchema,
   RealtimeClientSecretSchema,
   TOOL_DEFINITIONS,
+  ACTIVITY_EVENT_PAYLOADS,
   ActivityPageSchema,
 } from './index';
 
@@ -255,5 +258,26 @@ describe('CONTRACTS.md examples', () => {
     }
     const kinds = TOOL_DEFINITIONS.find((d) => d.name === 'read_business_facts')?.parameters as { properties: { kinds: { items: { enum: string[] } } } };
     expect(kinds.properties.kinds.items.enum).toEqual(['hours', 'policy', 'service', 'contact', 'faq']);
+  });
+
+  const contractsDoc = readFileSync(fileURLToPath(new URL('../../../docs/CONTRACTS.md', import.meta.url)), 'utf8');
+  const section = (n: number) => {
+    const start = contractsDoc.indexOf(`\n## ${n}. `);
+    const end = contractsDoc.indexOf(`\n## ${n + 1}. `, start);
+    return contractsDoc.slice(start, end);
+  };
+
+  it('the section 8 JSON block equals TOOL_DEFINITIONS exactly', () => {
+    const block = /```json\n([\s\S]*?)\n```/.exec(section(8))?.[1];
+    expect(block).toBeDefined();
+    expect(JSON.parse(block ?? '[]')).toEqual(JSON.parse(JSON.stringify(TOOL_DEFINITIONS)));
+  });
+
+  it('the section 7 guardrail.refused row lists exactly the payload fields of the code', () => {
+    const row = section(7).split('\n').find((l) => l.startsWith('| `guardrail.refused` |')) ?? '';
+    const fields = /`\{ ([^}]*) \}`/.exec(row)?.[1]?.split(', ').map((f) => f.split(':')[0]?.trim() ?? '') ?? [];
+    const shape = ACTIVITY_EVENT_PAYLOADS['guardrail.refused'].shape;
+    const want = Object.keys(shape).map((k) => (shape[k as keyof typeof shape].safeParse(undefined).success ? `${k}?` : k));
+    expect([...fields].sort()).toEqual([...want].sort());
   });
 });
