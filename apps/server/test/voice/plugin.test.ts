@@ -443,3 +443,61 @@ it('never reflects private URLs or malformed bodies through HTTP errors on voice
   expect(malformed.body).not.toContain(secret);
   expect(logs.join('')).not.toMatch(/OpaqueStream|15555550123|bill.example|private-bearer/);
 });
+
+// PROPOSED text step (SPEC 2.9 "Consent evidence on a phone call"): the caller's number comes only from
+// the signed webhook's From, travels with the pinned call in memory, and is never logged.
+describe('voice plugin: the caller number for the text step', () => {
+  const pinnedVia = async (t: Awaited<ReturnType<typeof build>>, form: string) => {
+    const token = tokenOf((await t.post('good', form)).body);
+    const ws = await t.app.injectWS('/ws/phone');
+    ws.send(JSON.stringify({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ1', customParameters: { streamToken: token } } }));
+    await vi.waitFor(() => expect(t.sockets).toHaveLength(1));
+    t.sockets[0]?.open();
+    const update = t.sockets[0]?.ofType('session.update')[0] as { session: { instructions: string } };
+    ws.terminate();
+    return update.session.instructions;
+  };
+
+  it('a valid E.164 From is pinned: the prompt has the text step and only the last four digits', async () => {
+    const t = await build();
+    const text = await pinnedVia(t, FORM);
+    expect(text).toContain('The server asks once');
+    expect(text).toContain('ending in 0 1 2 3');
+    expect(text).not.toContain('+15555550123');
+    expect(text).not.toContain('5555550123');
+    expect(JSON.stringify(t.lines)).not.toContain('5555550123');
+    expect(t.calls.startCall).toHaveBeenCalledWith(expect.objectContaining({ callerLast4: '0123' }));
+  });
+
+  it.each([
+    ['anonymous', 'anonymous'],
+    ['restricted', 'Restricted'],
+    ['no plus sign', '15555550123'],
+    ['too short', '+1555'],
+    ['letters', '+1555CALLME'],
+    ['empty', ''],
+  ])('a %s From is not pinned: the call has no text step', async (_label, from) => {
+    const t = await build();
+    const text = await pinnedVia(t, `CallSid=CA123&From=${encodeURIComponent(from)}&To=%2B15555550199`);
+    expect(text).toContain('Do not ask for a number');
+    expect(text).not.toContain('The server asks once');
+  });
+
+  it('a missing From is not pinned', async () => {
+    const t = await build();
+    const text = await pinnedVia(t, 'CallSid=CA123&To=%2B15555550199');
+    expect(text).toContain('Do not ask for a number');
+  });
+
+  it('B1: a signed retry still gets the same token, and the pinned number is the first delivery\'s', async () => {
+    const authToken = 'test_auth_token_value';
+    const validator = createTwilioRequestValidator(authToken);
+    const first = { CallSid: 'CA123', From: '+15555550123', To: '+15555550199' };
+    const t = await build({ validator });
+    const a = await t.post(twilio.getExpectedTwilioSignature(authToken, `${PUBLIC_URL}/webhooks/twilio/voice`, first), new URLSearchParams(first).toString());
+    const b = await t.post(twilio.getExpectedTwilioSignature(authToken, `${PUBLIC_URL}/webhooks/twilio/voice`, first), new URLSearchParams(first).toString());
+    expect(tokenOf(b.body)).toBe(tokenOf(a.body));
+    expect(t.calls.startCall).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(t.lines)).not.toContain('5555550123');
+  });
+});

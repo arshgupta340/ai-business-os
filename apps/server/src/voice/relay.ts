@@ -1,6 +1,7 @@
 // One phone call: Twilio Media Stream <-> this server <-> OpenAI Realtime (FLOWS B4 to B30).
-// Audio is relayed as G.711 u-law both ways and never stored. No transcript is read or stored:
-// every Realtime event other than the few below is dropped unread. Every log line goes through
+// Audio is relayed as G.711 u-law both ways and never stored. No transcript is stored, and none is
+// read except the one caller turn that answers the PROPOSED text offer (SPEC 2.9), which is matched in
+// memory and dropped. Every Realtime event other than the few below is dropped unread. Every log line goes through
 // `safeLogger` (logic.ts), and only fixed codes, validated tool names and timings are logged.
 // Every stage has a deadline, every queue a bound, and every exit runs one idempotent shutdown.
 import WebSocket from 'ws';
@@ -30,14 +31,16 @@ import {
   type ToolInput,
   type ToolName,
 } from '@abos/contracts';
-import { AUDIO_FORMAT, OAI_CLIENT, OAI_ITEM, OAI_SERVER, OPENAI_REALTIME_URL, STREAM_TOKEN_PARAM, TURN_DETECTION, TWILIO_EVENT, VOICE } from './constants';
+import { AUDIO_FORMAT, OAI_CLIENT, OAI_ITEM, OAI_SERVER, OPENAI_REALTIME_URL, STREAM_TOKEN_PARAM, TRANSCRIBE_MODEL, TURN_DETECTION, TWILIO_EVENT, VOICE } from './constants';
+import { matchSpokenAnswer, textOfferAllowed, type SpokenAnswer } from './consent';
 import { PlaybackTracker, StreamTokenStore, TimingTracker, errorInfo, safeLogger, spokenText, ulawBase64DurationMs } from './logic';
-import { buildInstructions, decisionInstruction, pendingGoodbyeInstruction, proposalLimitInstruction, toolLimitGoodbyeInstruction } from './prompt';
+import { buildInstructions, consentOfferInstruction, consentResultInstruction, decisionInstruction, pendingGoodbyeInstruction, proposalLimitInstruction, toolLimitGoodbyeInstruction } from './prompt';
 import type {
   CallDecision,
   CallDecisionsPort,
   CallFinishesPort,
   CallsPort,
+  ConsentEvidence,
   DuplexSocket,
   OpenAISocketFactory,
   PinnedCall,
@@ -264,6 +267,7 @@ export const DEFAULT_LIMITS: RelayLimits = {
   maxBufferedBytes: 512 * 1024,
   pendingWaitMs: 90_000,
   goodbyeMaxMs: 20_000,
+  consentWindowMs: 20_000,
 };
 
 /** Model error events tolerated after the session is ready before the call is ended. */
@@ -356,6 +360,26 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
   const playback = new PlaybackTracker();
   const timing = new TimingTracker();
 
+  // ---------- PROPOSED text step (SPEC 2.9 "Consent evidence on a phone call") ----------
+  // The server offers one message once per call, at a fixed moment, and reads the caller's answer
+  // itself: the server's transcript of the one caller turn after the offer finished playing, or a
+  // keypad press. While it waits, the model does not answer on its own (create_response is off) and
+  // input transcription is on; both are restored as soon as the answer is known. The transcript is
+  // matched in memory and dropped. Every transcript outside that one turn is dropped unread.
+  type ConsentPhase =
+    | { kind: 'off' }
+    | { kind: 'ready' }
+    | { kind: 'offering'; attempt: 1 | 2; responseId?: string; responseDone: boolean; audioSent: boolean; timer: ReturnType<typeof setTimeout> }
+    | { kind: 'listening'; attempt: 1 | 2; offerSpokenAt: number; itemId?: string; timer: ReturnType<typeof setTimeout> }
+    | { kind: 'agreed'; evidence: ConsentEvidence }
+    | { kind: 'declined' };
+  let consent: ConsentPhase = { kind: 'off' };
+  /** Set while a proposal is in flight or once one was stored: the evidence it used is final. */
+  let consentLocked = false;
+  /** The evidence handed to the toolset, only for the duration of one propose call. */
+  let proposeEvidence: ConsentEvidence | undefined;
+  let windowOpen = false;
+
   const later = (ms: number, fn: () => void) => {
     const t = setTimeout(() => {
       timers.delete(t);
@@ -396,6 +420,9 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
   const shutdown = (endReason: CallEndReason | null, why: string) => {
     if (closed) return;
     closed = true;
+    // The evidence dies with the call.
+    consent = { kind: 'off' };
+    proposeEvidence = undefined;
     for (const t of timers) clearTimeout(t);
     timers.clear();
     unsubscribe?.();
@@ -455,9 +482,119 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
   };
 
   /** Only fixed server instructions are injected, with emphasis stripped before speech. */
-  const instruct = (text: string, generation?: number) => {
+  const instruct = (text: string, generation?: number, metadata?: Record<string, string>) => {
     sendOpenAI({ type: OAI_CLIENT.itemCreate, item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: spokenText(text) }] } });
-    sendOpenAI({ type: OAI_CLIENT.responseCreate, ...(generation === undefined ? {} : { response: { metadata: { voiceFinishGeneration: String(generation) } } }) });
+    const meta = { ...(generation === undefined ? {} : { voiceFinishGeneration: String(generation) }), ...metadata };
+    sendOpenAI({ type: OAI_CLIENT.responseCreate, ...(Object.keys(meta).length === 0 ? {} : { response: { metadata: meta } }) });
+  };
+
+  const consentWaiting = () => consent.kind === 'offering' || consent.kind === 'listening';
+  /** The window's session settings: no automatic reply and input transcription on, or the call's normal settings. */
+  const setWindow = (open: boolean) => {
+    if (windowOpen === open) return;
+    windowOpen = open;
+    sendOpenAI({ type: OAI_CLIENT.sessionUpdate, session: { type: 'realtime', audio: { input: {
+      format: AUDIO_FORMAT,
+      turn_detection: { ...TURN_DETECTION, create_response: !open },
+      transcription: open ? { model: TRANSCRIBE_MODEL } : null,
+    } } } });
+  };
+  const clearConsentTimer = () => {
+    if (consent.kind === 'offering' || consent.kind === 'listening') cancel(consent.timer);
+  };
+  const last4Of = (call: PinnedCall) => (call.callerNumber ?? '').slice(-4);
+
+  const startOffer = (attempt: 1 | 2) => {
+    const call = pinned;
+    if (call === undefined || closed) return;
+    clearConsentTimer();
+    setWindow(true);
+    const timer = later(limits.consentWindowMs, () => {
+      if (consent.kind === 'offering' && consent.attempt === attempt) settleConsent('declined', 'offer_not_played');
+    });
+    consent = { kind: 'offering', attempt, responseDone: false, audioSent: false, timer };
+    logger.info({ ...tag(), attempt }, 'voice: text offer queued');
+    instruct(consentOfferInstruction(call.spec.template, deps.messageChannel, last4Of(call), attempt), undefined, { voiceConsentOffer: String(attempt) });
+  };
+
+  /** Ends the window and tells the model the result with a fixed server line. */
+  const settleConsent = (outcome: 'agreed' | 'declined', why: string, evidence?: ConsentEvidence) => {
+    const call = pinned;
+    if (call === undefined || !consentWaiting()) return;
+    const offerStillPlaying = consent.kind === 'offering' && !consent.responseDone;
+    clearConsentTimer();
+    consent = outcome === 'agreed' && evidence !== undefined ? { kind: 'agreed', evidence } : { kind: 'declined' };
+    setWindow(false);
+    logger.info({ ...tag(), consent: consent.kind, method: evidence?.method ?? 'none', why }, 'voice: text consent outcome');
+    if (closed || toolLimitReached || finishing !== undefined) return;
+    if (offerStillPlaying) sendOpenAI({ type: 'response.cancel' });
+    instruct(consentResultInstruction(call.spec.template, deps.messageChannel, last4Of(call), consent.kind === 'agreed' ? 'agreed' : 'declined'));
+  };
+
+  /** The window ends with no line spoken: the call is saying goodbye for another reason. */
+  const abandonConsent = () => {
+    if (!consentWaiting()) return;
+    clearConsentTimer();
+    consent = { kind: 'declined' };
+    setWindow(false);
+    logger.info({ ...tag(), consent: 'declined', method: 'none', why: 'call_finishing' }, 'voice: text consent outcome');
+  };
+
+  const agree = (method: 'spoken' | 'keypad') => {
+    const call = pinned;
+    if (call === undefined || consent.kind !== 'listening' || call.callerNumber === undefined) return;
+    const at = now();
+    settleConsent('agreed', method, {
+      callId: call.callId, agentVersionId: call.agentVersionId, recipient: call.callerNumber,
+      offerSpokenAt: new Date(consent.offerSpokenAt).toISOString(), method, consentAt: new Date(at).toISOString(),
+    });
+  };
+
+  const onAnswer = (answer: SpokenAnswer) => {
+    if (consent.kind !== 'listening' && consent.kind !== 'offering') return;
+    if (answer === 'agreed' && consent.kind === 'listening') agree('spoken');
+    else if (answer === 'declined') settleConsent('declined', 'spoken_no');
+    else if (consent.attempt === 1) startOffer(2);
+    else settleConsent('declined', 'unclear_twice');
+  };
+
+  /** The offer counts as spoken once its response finished and Twilio played all of its audio. */
+  const checkOfferPlayed = () => {
+    if (consent.kind !== 'offering' || !consent.responseDone || playback.hasPendingAudio || closed) return;
+    const attempt = consent.attempt;
+    cancel(consent.timer);
+    const timer = later(limits.consentWindowMs, () => {
+      if (consent.kind === 'listening' && consent.attempt === attempt) settleConsent('declined', 'no_answer');
+    });
+    consent = { kind: 'listening', attempt, offerSpokenAt: now(), timer };
+  };
+
+  const onDigit = (digit: string) => {
+    if (consent.kind === 'off' || consent.kind === 'ready' || consent.kind === 'declined' || closed) return;
+    if (consentLocked) {
+      logger.info({ ...tag() }, 'voice: keypad press after the proposal; ignored');
+      return;
+    }
+    if (consent.kind === 'offering') settleConsent('declined', 'key_before_offer_played');
+    else if (consent.kind === 'listening') {
+      if (digit === '1') agree('keypad');
+      else settleConsent('declined', 'keypad_no');
+    } else if (consent.kind === 'agreed' && digit === '2') {
+      const call = pinned;
+      consent = { kind: 'declined' };
+      logger.info({ ...tag(), consent: 'withdrawn', method: 'keypad' }, 'voice: text consent outcome');
+      if (call === undefined || toolLimitReached || finishing !== undefined) return;
+      sendOpenAI({ type: 'response.cancel' });
+      instruct(consentResultInstruction(call.spec.template, deps.messageChannel, last4Of(call), 'withdrawn'));
+    }
+  };
+
+  /** FLOWS 3: the fixed moment of the offer. Orders: the first successful quote. Bookings: the first availability with a slot. */
+  const isOfferMoment = (template: AgentTemplate, tool: ToolName, r: JsonObject | undefined) => {
+    if (r?.ok !== true) return false;
+    if (template === 'restaurant_order_taker') return tool === 'quote_order';
+    if (template === 'appointment_booker') return tool === 'read_calendar_availability' && Array.isArray(r.slots) && r.slots.length > 0;
+    return false;
   };
 
   let pendingTimer: ReturnType<typeof setTimeout> | undefined;
@@ -486,18 +623,19 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     if (!closed && finishing?.complete && !playback.hasPendingAudio) shutdown('completed', 'goodbye played');
   };
 
-  const onProposed = (result: JsonObject) => {
+  const onProposed = (result: JsonObject, consented: boolean) => {
     if (pinned === undefined) return;
     cancel(pendingTimer);
     invalidateFinish();
-    // Until trusted consent is wired, the real toolset always creates QR-only proposals.
-    proposal = { proposalId: String(result.proposalId), approvalId: String(result.approvalId), channel: 'qr_only' };
+    // The proposal used the server's channel only when the toolset was handed consent evidence for it.
+    proposal = { proposalId: String(result.proposalId), approvalId: String(result.approvalId), channel: consented && deps.messageChannel !== 'qr_only' ? deps.messageChannel : 'qr_only' };
     const call = pinned;
+    const last4 = proposal.channel === 'qr_only' ? undefined : last4Of(call);
     pendingTimer = later(limits.pendingWaitMs, () => {
       pendingTimer = undefined;
       if (closed) return;
       const generation = beginFinish();
-      instruct(pendingGoodbyeInstruction(call.spec.template, proposal?.channel ?? 'qr_only', call.businessName), generation);
+      instruct(pendingGoodbyeInstruction(call.spec.template, proposal?.channel ?? 'qr_only', call.businessName, last4), generation);
     });
     if (deps.decisions !== undefined && unsubscribe === undefined) {
       unsubscribe = deps.decisions.subscribe(call.callId, (decision: CallDecision) => {
@@ -507,12 +645,12 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
         invalidateFinish();
         sendOpenAI({ type: 'response.cancel' });
         logger.info({ ...tag(), state: decision.kind }, 'voice: owner decision instruction queued');
-        instruct(decisionInstruction(call.spec.template, decision, proposal.channel));
+        instruct(decisionInstruction(call.spec.template, decision, proposal.channel, proposal.channel === 'qr_only' ? undefined : last4Of(call)));
       });
     }
   };
 
-  const runFunctionCall = async (name: string, argsJson: string): Promise<{ result: unknown; tool: ToolName | null; proposalLimit?: true }> => {
+  const runFunctionCall = async (name: string, argsJson: string): Promise<{ result: unknown; tool: ToolName | null; proposalLimit?: true; consented?: boolean }> => {
     const parsedName = ToolNameSchema.safeParse(name);
     if (!parsedName.success) {
       // The name came from the model: it is never logged or stored, only its length.
@@ -537,6 +675,8 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
       guardrail({ callId: pinned.callId, rule: 'unsupported_request', reasonCode: 'proposal_limit', toolName: tool });
       return { result: toolFailure('VALIDATION_FAILED', LIMIT_REACHED), tool, proposalLimit: true };
     }
+    // The text question is open: no proposal until the server has the caller's answer.
+    if (isProposeTool(tool) && consentWaiting()) return { result: toolFailure('VALIDATION_FAILED', 'Wait for the server status about the message.'), tool };
     const ctx: ToolContext = { businessId: pinned.businessId, agentVersionId: pinned.agentVersionId, callId: pinned.callId, correlationId: pinned.callId };
     const timeoutMs = limits.toolTimeoutMs ?? CAPABILITIES[TOOL_CAPABILITY[tool]].timeoutMs;
     const handler = toolset.handler as CancellableToolHandler;
@@ -545,6 +685,10 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     let result: unknown;
     let unknownOutcome = false;
+    // The evidence is fixed when the proposal starts; a keypad press during it changes nothing.
+    const evidence = isProposeTool(tool) && consent.kind === 'agreed' ? consent.evidence : undefined;
+    const lockedBefore = consentLocked;
+    if (isProposeTool(tool)) { consentLocked = true; proposeEvidence = evidence; }
     try {
       const aborted = new Promise<ToolFailure>((resolve) => controller.signal.addEventListener('abort', () => { unknownOutcome = true; resolve(toolFailure('INTEGRATION_UNAVAILABLE', UNAVAILABLE)); }, { once: true }));
       result = await Promise.race([
@@ -557,24 +701,28 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     } finally {
       clearTimeout(timeout);
       activeInvocations.delete(controller);
+      if (isProposeTool(tool)) proposeEvidence = undefined;
     }
     const r = asObject(result);
     if (isProposeTool(tool)) {
       if (isProposal(r) && r !== undefined) storedApprovals.add(String(r.approvalId));
       // A proposal that timed out or threw may still have been stored, so it uses one place.
       else if (unknownOutcome) uncertainProposals++;
+      // A proposal that was surely not stored leaves the evidence open to the caller's keypad.
+      else consentLocked = lockedBefore;
     }
     if (r?.ok === false && r.reason === 'CAPABILITY_NOT_ALLOWED') guardrail({ callId: pinned.callId, rule: 'no_cross_business', reasonCode: 'CAPABILITY_NOT_ALLOWED', toolName: tool });
-    return { result, tool };
+    return { result, tool, ...(isProposeTool(tool) ? { consented: evidence !== undefined } : {}) };
   };
 
   const handleCalls = async (calls: JsonObject[]) => {
     let tellProposalLimit = false;
+    let offerDue = false;
     for (const call of calls) {
       if (closed) return;
       const callId = str(call, 'call_id');
       const t0 = now();
-      const { result, tool, proposalLimit } = await runFunctionCall(str(call, 'name') ?? '', str(call, 'arguments') ?? '{}');
+      const { result, tool, proposalLimit, consented } = await runFunctionCall(str(call, 'name') ?? '', str(call, 'arguments') ?? '{}');
       if (proposalLimit && !proposalLimitTold) tellProposalLimit = true;
       // A result that arrives after the call ended changes nothing.
       if (closed || pinned === undefined) return;
@@ -584,7 +732,8 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
       logger.info({ ...tag(), tool: tool ?? 'unknown_tool', ok: r?.ok === true, reason: code(r?.reason), latencyMs: now() - t0 }, 'voice: tool call');
       if (tool !== null) {
         setStage(nextStage(pinned.spec.template, stage, tool, result));
-        if ((tool === 'propose_order' || tool === 'propose_booking') && isProposal(r) && r !== undefined) onProposed(r);
+        if ((tool === 'propose_order' || tool === 'propose_booking') && isProposal(r) && r !== undefined) onProposed(r, consented === true);
+        if (consent.kind === 'ready' && !consentLocked && isOfferMoment(pinned.spec.template, tool, r)) offerDue = true;
       }
       if (callId !== undefined) sendOpenAI({ type: OAI_CLIENT.itemCreate, item: { type: OAI_ITEM.functionCallOutput, call_id: callId, output: JSON.stringify(result) } });
     }
@@ -596,6 +745,13 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
       instruct(proposalLimitInstruction(pinned.spec.template, proposal !== undefined));
       return;
     }
+    // The offer is spoken instead of the next ordinary reply, once per call.
+    if (offerDue && consent.kind === 'ready' && !consentLocked) {
+      startOffer(1);
+      return;
+    }
+    // While the server waits for the caller's answer, only its own lines create a response.
+    if (consentWaiting()) return;
     sendOpenAI({ type: OAI_CLIENT.responseCreate });
   };
 
@@ -627,6 +783,7 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     // After the tool work already queued, so its outputs come first.
     toolChain = toolChain.then(() => {
       if (closed) return;
+      abandonConsent();
       sendOpenAI({ type: 'response.cancel' });
       const generation = beginFinish();
       instruct(toolLimitGoodbyeInstruction(call.businessName, proposal !== undefined), generation);
@@ -642,6 +799,13 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     // The raw status, not the logged code: a response with no status field is treated as complete.
     const raw = typeof response?.status === 'string' ? response.status : undefined;
     const incomplete = raw !== undefined && raw !== 'completed';
+    if (consent.kind === 'offering' && consent.responseId !== undefined && consent.responseId === str(response, 'id')) {
+      // An offer cut off by the caller or the model was not fully spoken: that attempt is unclear.
+      if (incomplete) onAnswer('unclear');
+      // An offer response that played no audio was not spoken either.
+      else if (!consent.audioSent) onAnswer('unclear');
+      else { consent.responseDone = true; checkOfferPlayed(); }
+    }
     const calls = incomplete ? [] : output.map(asObject).filter((o): o is JsonObject => o !== undefined && o.type === OAI_ITEM.functionCall);
     if (calls.length === 0) {
       if (finishing?.responseId !== undefined && finishing.responseId === str(response, 'id') && response?.status === 'completed') {
@@ -682,6 +846,10 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     switch (ev.type) {
       case 'response.created': {
         const response = asObject(ev.response);
+        if (consent.kind === 'offering' && consent.responseId === undefined && str(asObject(response?.metadata), 'voiceConsentOffer') === String(consent.attempt)) {
+          const id = str(response, 'id');
+          if (id !== undefined) consent.responseId = id;
+        }
         if (finishing !== undefined && finishing.responseId === undefined && str(asObject(response?.metadata), 'voiceFinishGeneration') === String(finishing.generation)) {
           const id = str(response, 'id');
           if (id !== undefined) finishing.responseId = id;
@@ -711,6 +879,7 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
           break;
         }
         sendTwilio({ event: TWILIO_EVENT.media, streamSid, media: { payload: delta } });
+        if (consent.kind === 'offering' && consent.responseId !== undefined && (str(ev, 'response_id') ?? consent.responseId) === consent.responseId) consent.audioSent = true;
         const mark = playback.onAudioSent(itemId, ulawBase64DurationMs(delta));
         sendTwilio({ event: TWILIO_EVENT.mark, streamSid, mark: { name: mark } });
         const m = timing.onAudioSent(now());
@@ -719,6 +888,11 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
         break;
       }
       case OAI_SERVER.speechStarted: {
+        // The first caller turn that starts after the offer played is the one answer the server reads.
+        if (consent.kind === 'listening' && consent.itemId === undefined) {
+          const id = str(ev, 'item_id');
+          if (id !== undefined) consent.itemId = id;
+        }
         // Barge-in (SPEC 4): clear Twilio's buffer, cut the item being heard where the caller last
         // heard it, and cut every later item the caller has not heard at all.
         timing.onSpeechStarted();
@@ -738,6 +912,20 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
       case OAI_SERVER.responseDone:
         onResponseDone(ev);
         break;
+      case OAI_SERVER.audioCommitted:
+        if (consent.kind === 'listening' && consent.itemId === undefined) {
+          const id = str(ev, 'item_id');
+          if (id !== undefined) consent.itemId = id;
+        }
+        break;
+      case OAI_SERVER.transcriptionCompleted:
+      case OAI_SERVER.transcriptionFailed: {
+        // Read only for the one answer turn; every other transcript is dropped unread. The text is
+        // matched here and goes out of scope: it is never logged, stored or sent anywhere.
+        if (consent.kind !== 'listening' || consent.itemId === undefined || str(ev, 'item_id') !== consent.itemId) break;
+        onAnswer(ev.type === OAI_SERVER.transcriptionCompleted ? matchSpokenAnswer(str(ev, 'transcript')) : 'unclear');
+        break;
+      }
       case OAI_SERVER.error: {
         // Only the error's type and code are logged; its message can echo input or a key.
         const e = asObject(ev.error);
@@ -762,8 +950,12 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
       return;
     }
     allowedTools = check.tools;
+    // The full number is redacted from every log line, as a second guard: no line is meant to carry it.
+    if (call.callerNumber !== undefined) secrets.push(call.callerNumber);
+    consent = textOfferAllowed(call.spec, deps.messageChannel, call.callerNumber) ? { kind: 'ready' } : { kind: 'off' };
     try {
-      toolset = deps.toolsetFactory({ businessId: call.businessId, agentVersionId: call.agentVersionId, callId: call.callId, capabilities: call.spec.capabilities, facts: call.facts });
+      toolset = deps.toolsetFactory({ businessId: call.businessId, agentVersionId: call.agentVersionId, callId: call.callId, capabilities: call.spec.capabilities, facts: call.facts,
+        consent: { callId: call.callId, agentVersionId: call.agentVersionId, read: () => proposeEvidence } });
       openai = deps.openaiSocketFactory({ model });
     } catch (err) {
       logger.error({ ...tag(), ...errorInfo(err) }, 'voice: could not open the model session');
@@ -774,12 +966,14 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
       unsubscribeFinish = deps.finishes.subscribe(call.callId, (event) => {
         if (closed || event.callId !== call.callId || event.agentVersionId !== call.agentVersionId || event.responseId === '') return;
         cancel(pendingTimer); pendingTimer = undefined;
+        abandonConsent();
         beginFinish(event.responseId);
       });
     }
     stage = 'CALL_STARTED';
     setStage(initialStage(call.spec.template));
-    const instructions = buildInstructions(call.spec, { businessName: call.businessName, messageChannel: deps.messageChannel, facts: call.facts, menu: call.menu, nowMs: now() });
+    const instructions = buildInstructions(call.spec, { businessName: call.businessName, messageChannel: deps.messageChannel, facts: call.facts, menu: call.menu, nowMs: now(),
+      ...(consent.kind === 'ready' ? { textOffer: { last4: last4Of(call) } } : {}) });
     const session = buildSessionUpdate({ model, voice: deps.voice ?? VOICE, instructions, tools: allowedTools });
     const socket = openai;
     socket.onOpen(() => {
@@ -885,6 +1079,13 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
         const name = str(asObject(msg.mark), 'name');
         if (name !== undefined) playback.onMark(name);
         finishWhenPlayed();
+        checkOfferPlayed();
+        break;
+      }
+      case TWILIO_EVENT.dtmf: {
+        if (pinned === undefined) return;
+        const digit = str(asObject(msg.dtmf), 'digit');
+        if (digit !== undefined && /^[0-9*#A-D]$/.test(digit)) onDigit(digit);
         break;
       }
       case TWILIO_EVENT.stop:

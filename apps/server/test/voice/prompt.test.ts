@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { barberSpecV1, pizzaSpecV2 } from '@abos/contracts/fixtures';
-import { buildInstructions, channelWord, decisionInstruction, orderWaitScript, pendingGoodbyeInstruction } from '../../src/voice/prompt';
+import { CONSENT_REASK, buildInstructions, channelWord, consentOfferInstruction, consentResultInstruction, decisionInstruction, orderWaitScript, pendingGoodbyeInstruction } from '../../src/voice/prompt';
 import { specWith } from './helpers';
 
 const pizza = { businessName: 'Demo Pizza Co.', messageChannel: 'surge' as const };
@@ -83,4 +83,42 @@ it('requires plain spoken sentences without phone-hostile formatting', () => {
   const text = buildInstructions(pizzaSpecV2, { businessName: 'Shop', messageChannel: 'qr_only' });
   expect(text).toContain('plain spoken sentences');
   for (const forbidden of ['no Markdown', 'no asterisks', 'no lists', 'no headings']) expect(text).toContain(forbidden);
+});
+
+// PROPOSED text step: the server asks, the agent never does.
+describe('voice prompt: the text step', () => {
+  const offer = { ...pizza, textOffer: { last4: '3716' } };
+
+  it('replaces the number question with the server-led offer, and the consented wait script only after the server said yes', () => {
+    const text = buildInstructions(pizzaSpecV2, offer);
+    expect(text).toContain('Never ask for a phone number and never ask on your own whether the caller wants a message');
+    expect(text).toContain('tell them to press 2 on the keypad');
+    expect(text).not.toContain('Ask what number');
+    expect(text).not.toContain('Do not ask for a number');
+    expect(text).toContain('if a server status said the caller agreed to a text message');
+    expect(text).toContain('to the number ending in 3 7 1 6');
+    expect(text).toContain(orderWaitScript('surge').declined);
+    expect(text).toContain('Never claim a message will follow unless a server status said the caller agreed');
+    expect(text).not.toContain('{last4}');
+    expect(text.length).toBeLessThan(5000);
+  });
+
+  it('under qr_only a text offer is ignored and the prompt is exactly the counter-only prompt', () => {
+    const plain = buildInstructions(pizzaSpecV2, { ...pizza, messageChannel: 'qr_only' });
+    expect(buildInstructions(pizzaSpecV2, { ...pizza, messageChannel: 'qr_only', textOffer: { last4: '3716' } })).toBe(plain);
+    expect(buildInstructions(barberSpecV1, { businessName: 'B', messageChannel: 'qr_only', textOffer: { last4: '3716' } })).toBe(buildInstructions(barberSpecV1, { businessName: 'B', messageChannel: 'qr_only' }));
+  });
+
+  it('without a text offer the prompt is unchanged whatever the channel', () => {
+    expect(buildInstructions(pizzaSpecV2, pizza)).toContain('Do not ask for a number');
+  });
+
+  it('the offer and result lines are fixed and carry the spaced last four only', () => {
+    expect(consentOfferInstruction('restaurant_order_taker', 'surge', '3716', 1)).toContain('"Would you like one text message with your payment link, sent to the number you are calling from, ending in 3 7 1 6?"');
+    expect(consentOfferInstruction('appointment_booker', 'whatsapp_sandbox', '3716', 1)).toContain('one WhatsApp message with your booking confirmation');
+    expect(consentOfferInstruction('restaurant_order_taker', 'surge', '3716', 2)).toContain(CONSENT_REASK);
+    expect(consentResultInstruction('restaurant_order_taker', 'surge', '3716', 'agreed')).toContain('ending in 3 7 1 6');
+    expect(consentResultInstruction('restaurant_order_taker', 'surge', '3716', 'declined')).toContain('shown at the counter');
+    expect(decisionInstruction('restaurant_order_taker', { kind: 'approved', messageSent: true }, 'surge', '3716')).toContain('ending in 3 7 1 6');
+  });
 });

@@ -19,6 +19,7 @@ import {
   last4,
   safeLogger,
 } from './logic';
+import { callerNumberFrom } from './consent';
 import { adaptWs, checkSessionCapabilities, runPhoneRelay, withDeadline } from './relay';
 import type { CatalogItem } from '@abos/contracts';
 import type { FactsSnapshot, PinnedCall, TwilioRequestValidator, VoicePluginOptions } from './types';
@@ -166,8 +167,12 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
       providerCallId,
       callerLast4: last4(from),
     });
+    // PROPOSED text step: the full number from the signed webhook, kept in memory with the call only.
+    // Twilio sends a non-E.164 string such as "anonymous" when it cannot normalize the caller ID; such a
+    // call has no text step. The number is never logged: only callerLast4 is.
+    const callerNumber = callerNumberFrom(from);
     const token = tokens.mint(
-      { callId, providerCallId, businessId: resolution.businessId, businessName: resolution.businessName, agentId: resolution.agentId, agentVersionId: resolution.agentVersionId, spec: resolution.spec, facts, ...(menu !== undefined ? { menu } : {}) },
+      { callId, providerCallId, businessId: resolution.businessId, businessName: resolution.businessName, agentId: resolution.agentId, agentVersionId: resolution.agentVersionId, spec: resolution.spec, facts, ...(menu !== undefined ? { menu } : {}), ...(callerNumber !== undefined ? { callerNumber } : {}) },
       now(),
     );
     if (token === null) {

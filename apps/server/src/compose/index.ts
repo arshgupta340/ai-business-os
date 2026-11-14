@@ -86,7 +86,8 @@ export interface ComposedServer {
   providers: Providers;
   calls: CallsStore;
   toolsetPorts: RealToolsetPorts;
-  toolsetFor(ctx: { businessId: string; agentVersionId: string; callId: string; capabilities: readonly import('@abos/contracts').CapabilityId[]; facts?: FactsSnapshot | undefined }): RealToolset;
+  /** `consent` is the phone relay's trusted evidence reader (PROPOSED text step). Sim-call never passes it, so its proposals stay qr_only. */
+  toolsetFor(ctx: { businessId: string; agentVersionId: string; callId: string; capabilities: readonly import('@abos/contracts').CapabilityId[]; facts?: FactsSnapshot | undefined; consent?: import('../tools/real/types').ConsentSource | undefined }): RealToolset;
   agentModel: AgentModel;
   /** Options for the builder plugin's own seams (auth, stores, knowledge, live agent). */
   builder: BuilderPluginOptions;
@@ -171,7 +172,9 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     };
     const ports: RealToolsetPorts = { ...toolsetPorts, facts: { readVerified: ({ businessId }) => pinned(businessId) },
       proposals: engineProposalPort(engine, pinned, providers, now), availability: calendarAvailabilityPort(providers, pinned) };
-    const ts = createRealToolset({ businessId: ctx.businessId, messageChannel, ports, capabilities: ctx.capabilities, now, ...(ctx.facts ? { factsSnapshot: ctx.facts } : {}) });
+    // The evidence reader is bound to this call; the toolset also refuses evidence for any other call or version.
+    const consent = ctx.consent !== undefined && ctx.consent.callId === ctx.callId && ctx.consent.agentVersionId === ctx.agentVersionId ? ctx.consent : undefined;
+    const ts = createRealToolset({ businessId: ctx.businessId, messageChannel, ports, capabilities: ctx.capabilities, now, ...(ctx.facts ? { factsSnapshot: ctx.facts } : {}), ...(consent ? { consent } : {}) });
     // The fourth argument (the relay's cancellation and deadline) is passed through unchanged (voice NOTES 7).
     const call: RealToolset['handler']['call'] = (name, input, c, control) => {
       const stop = telemetry.time('tool_latency', { businessId: ctx.businessId, correlationId: ctx.callId });

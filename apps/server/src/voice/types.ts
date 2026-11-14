@@ -1,9 +1,9 @@
 // Ports the phone voice worker needs. Each is implemented elsewhere (the live_agent, calls and
 // activity_events tables, the real toolset, Twilio, OpenAI) and injected, so tests can pass fakes.
 import type { ActivityEventPayloads, AgentSpec, CallEndReason, CatalogItem, CallStage, CallStatus, CapabilityId, MessageChannelSetting, ToolHandler } from '@abos/contracts';
-import type { FactsSnapshot } from '../tools/real/types';
+import type { ConsentEvidence, ConsentSource, FactsSnapshot } from '../tools/real/types';
 
-export type { FactsSnapshot };
+export type { ConsentEvidence, ConsentSource, FactsSnapshot };
 
 /** Which published agent version answers a phone number (SPEC 2.9 `live_agent`, P-06). */
 export type LiveAgentResolution =
@@ -73,6 +73,11 @@ export type VoiceToolsetContext = {
   capabilities: readonly CapabilityId[];
   /** The fact snapshot taken when the version was pinned. The toolset must not read facts again. */
   facts: FactsSnapshot;
+  /**
+   * PROPOSED (SPEC 2.9): the relay's trusted reader of this call's consent evidence. Pass it to the real
+   * toolset as `consent`. It returns evidence only while a proposal for this call is being made.
+   */
+  consent?: ConsentSource | undefined;
 };
 
 /** The per-call toolset. `dispose` runs when the call ends and clears every per-call state. */
@@ -126,6 +131,13 @@ export type PinnedCall = {
   facts: FactsSnapshot;
   /** The menu read when the call was pinned, for the prompt only. Absent when it could not be read. */
   menu?: readonly CatalogItem[] | undefined;
+  /**
+   * The caller's full E.164 number from the signed webhook's `From`, for the text step only. Held in
+   * memory with the call. Never logged, never in an event, never sent to the model (only its last four
+   * digits), and stored only inside a proposal after the caller consented. Absent for anonymous,
+   * restricted or malformed callers: those calls have no text step.
+   */
+  callerNumber?: string | undefined;
 };
 
 /** Deadlines and bounds of one relay, in milliseconds or counts. */
@@ -159,6 +171,11 @@ export type RelayLimits = {
   pendingWaitMs: number;
   /** After the goodbye instruction, the longest wait for the goodbye to finish playing. */
   goodbyeMaxMs: number;
+  /**
+   * PROPOSED text step: the longest wait, per attempt, for the offer to finish playing, and again for
+   * the caller's answer after it. Past it the caller has declined.
+   */
+  consentWindowMs: number;
 };
 
 /** The cached menu of a business (`catalog_items`, P-10). */
