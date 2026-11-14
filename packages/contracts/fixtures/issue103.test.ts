@@ -191,13 +191,8 @@ describe('issue 103, item 5: menu_item drafts and price conflicts have the docum
   });
 });
 
-describe('issue 103, item 6: no two agents of one business have the same name (not fixed here: a web test pins the shared name)', () => {
-  // The fix is one line in agents.ts: give pausedSpec and pausedAgent a name of their own. It is held back
-  // because apps/web/app/(dashboard)/agents/[id]/preview/_components/AgentPreviewScreen.test.tsx line 362
-  // expects "The other Pizza Order Assistant (version 2) answers" for agt_pizza_paused_88, that is, it uses
-  // this fixture as its same-name case. Rename the agent and change that test in one pull request, then
-  // turn `it.fails` below into `it`.
-  it.fails('My Agents and Overview show different names', () => {
+describe('issue 103, item 6: no two agents of one business have the same name', () => {
+  it('My Agents and Overview show different names', () => {
     for (const business of F.businesses) {
       const names = F.agents.filter((a) => a.businessId === business.id).map((a) => a.name);
       expect(new Set(names).size, `${business.id}: ${names.join(' | ')}`).toBe(names.length);
@@ -296,11 +291,8 @@ describe('issue 103, item 10: a file lists every draft and every conflict that c
   });
 });
 
-describe('issue 103, item 11: integration detail lines are written one way (not fixed here: a web test pins the period)', () => {
-  // The fix is to drop the last character of integrationHealthDisconnected.google_sheets.detail. It is held
-  // back because apps/web/mocks/controls.test.ts line 138 expects the text with the period. Change both in
-  // one pull request, then turn `it.fails` below into `it`.
-  it.fails('no detail ends with a period', () => {
+describe('issue 103, item 11: integration detail lines are written one way', () => {
+  it('no detail ends with a period', () => {
     for (const health of [F.integrationHealth, F.integrationHealthDisconnected]) {
       for (const [name, entry] of Object.entries(health)) {
         const detail = (entry as { detail?: string }).detail;

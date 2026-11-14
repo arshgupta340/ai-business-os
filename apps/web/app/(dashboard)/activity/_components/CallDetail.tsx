@@ -72,7 +72,7 @@ function ApprovalCallout({journey}: {journey: Journey}) {
   );
 }
 
-function OrderProposal({journey, timeZone}: {journey: Journey; timeZone: string}) {
+function OrderProposal({journey, timeZone, qrOnly}: {journey: Journey; timeZone: string; qrOnly: boolean}) {
   const order = journey.order!;
   const q = order.quote;
   return (
@@ -80,7 +80,9 @@ function OrderProposal({journey, timeZone}: {journey: Journey; timeZone: string}
       <HStack gap={2} wrap="wrap" vAlign="center">
         <Text type="body">
           For {order.contact.name}, pickup at {formatTime(order.fulfillment.pickupAt, timeZone)}.{' '}
-          {recipientSentence('Link goes to', journey.approval?.recipientLast4 ?? lastFourOrUndefined(order.contact.messageRecipient))}
+          {qrOnly
+            ? 'No message is sent. The customer scans the QR code.'
+            : recipientSentence('Link goes to', journey.approval?.recipientLast4 ?? lastFourOrUndefined(order.contact.messageRecipient))}
         </Text>
       </HStack>
       <List hasDividers density="balanced">
@@ -330,7 +332,7 @@ export function CallDetail({
         </Panel>
       ) : null}
 
-      {journey.order ? <OrderProposal journey={journey} timeZone={timeZone} /> : null}
+      {journey.order ? <OrderProposal journey={journey} timeZone={timeZone} qrOnly={qrOnly} /> : null}
       {journey.booking ? <BookingProposal journey={journey} /> : null}
       {journey.kind !== 'call_only' ? <BundleSteps journey={journey} /> : null}
       <EventLog journey={journey} timeZone={timeZone} />

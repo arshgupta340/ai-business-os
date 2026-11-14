@@ -382,6 +382,7 @@ Checked against official documentation on 2026-11-13. Anything marked "spike" mu
 - Sandbox takes cards only. Test card `4111 1111 1111 1111`, CVV `111`, any future expiry. Declined card `4000 0000 0000 0002`.
 - Changing a catalog price needs the full current object and its current `version`.
 - Spike: a forum staff reply says payment links are not fully supported in sandbox. If the link cannot be paid, the fallback is `CreateOrder` plus `CreatePayment` with the sandbox test nonce, labelled as simulated.
+- Tested in the sandbox on 2026-11-14: an order created by a payment link stays in `DRAFT`, so CreatePayment on it fails with "The order must be OPEN to be paid" until the order is updated to `OPEN`. See `docs/notes-arsh.md`, "Live results on 2026-11-14".
 
 **Twilio and messaging**
 - US SMS from a new Twilio account does not deliver in this window (errors 30034 and 30032). Telnyx and other API providers have the same carrier rule.

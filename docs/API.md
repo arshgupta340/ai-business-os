@@ -26,7 +26,7 @@ This file defines every REST endpoint, webhook and WebSocket of `apps/server`. S
 
 ### Error body
 
-Every non-2xx response from `/api` is an `ApiError`. `details` is sanitized: it never holds secrets, tokens, full phone numbers or raw provider responses.
+Every non-2xx response from `/api` is an `ApiError`. `message` is a plain sentence the owner can read and never contains the code; clients branch on `code`. `details` is sanitized: it never holds secrets, tokens, full phone numbers or raw provider responses.
 
 ```json
 { "code": "PAYLOAD_HASH_MISMATCH", "message": "The approval payload changed since you loaded it.", "correlationId": "6f1c2b9e-8f2a-4c1d-9b77-3e5a0d2c4f10", "retryable": false, "details": { "approvalId": "apv_123" } }

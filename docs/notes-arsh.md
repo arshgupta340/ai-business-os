@@ -43,6 +43,37 @@ Builder model: one strict structured-output call on `gpt-6-astra` through the Re
 | Test outbound call | Pass. API call with inline TwiML `<Say>` to a team phone: status Completed, 6 seconds, STIR/SHAKEN attestation B. Proves the account SID, auth token and number work for voice. |
 | Emergency address | Not set. Twilio warns of a 75 dollar charge per emergency call without one. |
 
+### Live results on 2026-11-14
+
+These serve B-03 (#10) and B-02 (#9).
+
+**Phone calls.** Two real calls to the Twilio number reached the voice model on the deployed server.
+
+| | Call 1 | Call 2 |
+|---|---|---|
+| Length | 134 seconds | 123 seconds |
+| First audio | 2.0 seconds | 1.1 seconds |
+| Turns | 7 | 9 |
+| Turn latency, median | 552 ms | 694 ms |
+| Turn latency, maximum | 2051 ms | 1116 ms |
+| Tool calls | 5 | 4 |
+| Barge-ins | 4 handled | 5 |
+
+- Call 1 dropped 27 early audio chunks. It ended cleanly with `call.started` and `call.ended`.
+- In call 2 the caller ordered one large pepperoni. `propose_order` succeeded. The owner approved in the web dashboard. The Square sandbox payment link was created one second after approval. The order reached `PAYMENT_PENDING`.
+
+**Square sandbox.** An order created by a payment link stays in `DRAFT` in the sandbox. A payment through the API fails with "The order must be OPEN to be paid" until the order is updated to `OPEN`. The scripted live run therefore SIMULATED the payment: it updated the order to `OPEN`, then called CreatePayment with the sandbox test nonce. Two signed Square webhook events were received, verified and processed. The order went to `PAID_VERIFIED`, then `FULFILLMENT_READY`. No person has yet paid through the hosted checkout page on a second device.
+
+**Message channel.** The server runs with `MESSAGE_CHANNEL=qr_only`. SMS is not deliverable on Twilio, because the 10DLC number is unregistered, or on AgentPhone, which requires registration. The WhatsApp sandbox has not been joined. No customer message has been sent.
+
+**Not done.**
+- The barbershop agent on a live phone call.
+- A payment through the hosted checkout page by a person.
+- Rehearsals.
+- A live transfer to a person (human fallback).
+
+The go or no-go for B-02 is still to be recorded by Arsh.
+
 ## Found while preparing the spikes
 
 - Square: `CreatePayment` caps the idempotency key at 45 characters, `CreatePaymentLink` at 192 (official reference). Recorded in SPEC 2.9.

@@ -27,7 +27,7 @@ export const integrationHealth = {
 } satisfies IntegrationHealth;
 
 export const integrationHealthDisconnected: IntegrationHealth = {
-  ...integrationHealth, google_sheets: { state: 'disconnected', lastCheckedAt: CHECKED_AT, detail: 'Reconnect Google Sheets to resume sync.' },
+  ...integrationHealth, google_sheets: { state: 'disconnected', lastCheckedAt: CHECKED_AT, detail: 'Reconnect Google Sheets to resume sync' },
 };
 /**
  * The Sheets row of the paid order, still retrying. It was queued when the payment was verified

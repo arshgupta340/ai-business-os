@@ -88,7 +88,7 @@ No store was constructed internally without an option. The publish lock and the 
 - `session/service.ts`: if the write that records approval IDs fails, the turn still returns `proposedChange`, and the records are kept in the process and written with the next turn. A restart before that still allows a duplicate.
 - `session/fact-values.ts`: a length with a second bare number ("15 to 20 minutes", "between 1 and 2 hours") is refused with the minutes hint.
 - `publish/integrations.ts`: comment fixed. A required provider left out of the health result is taken as down.
-- `route-auth.test.ts` now calls every registered route with no token and expects 401 `UNAUTHENTICATED`. `GET /api/builder/ping` is the one listed exception. It should be removed, but two server tests outside this folder (`apps/server/test/app.test.ts` and `apps/server/test/adversarial/access.test.ts`) call it, so the route and those tests have to go in one pull request.
+- `route-auth.test.ts` now calls every registered route with no token and expects 401 `UNAUTHENTICATED`. `GET /api/builder/ping` was the one listed exception until #118 removed the route. The exception list is now empty.
 - `session/service.ts`: `VALIDATION_FAILED` and `CAPABILITY_NOT_ALLOWED` from the engine are treated as refused, like `INVALID_STATE` and `NOT_FOUND`, so the chat does not promise a retry that cannot work.
 - `publish/service.ts`: rollback also checks open required conflicts from the business knowledge (the database), like publish.
 - `index.ts`: the session service gets `app.log` for those error codes.

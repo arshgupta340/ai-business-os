@@ -14,11 +14,20 @@ import type { Providers } from './providers';
 type Row = Record<string, unknown>;
 const iso = (v: unknown) => (v instanceof Date ? v.toISOString() : new Date(String(v)).toISOString());
 
+// The author's display name for the version history, read in the same query as the version. The name
+// is joined only when the author is the owner of the version's business (as `ownerDisplayNames` in
+// api/display.ts does), so a read never names a user outside that business. The email is never read.
+const VERSION_SELECT = `select v.*, u.display_name as created_by_name from public.agent_versions v
+  left join public.businesses b on b.id = v.business_id
+  left join public.users u on u.id = v.created_by and u.id = b.owner_id`;
+
 function versionFromRow(r: Row): AgentVersionRecord {
+  const name = typeof r.created_by_name === 'string' ? r.created_by_name.trim() : '';
   return {
     id: String(r.id), businessId: String(r.business_id), agentId: String(r.agent_id), version: Number(r.version),
     spec: r.spec as AgentSpec, knowledgeSnapshotRef: (r.knowledge_snapshot_ref ?? {}) as KnowledgeSnapshotRef,
     guardrailVersion: 'v1', createdBy: String(r.created_by), createdAt: iso(r.created_at), publishedAt: iso(r.published_at ?? r.created_at),
+    ...(name ? { createdByName: name } : {}),
   };
 }
 
@@ -30,11 +39,11 @@ export function dbAgentVersionStore(db: Db): AgentVersionStore {
       [v.id, v.businessId, v.agentId, v.version, JSON.stringify(v.spec), JSON.stringify(v.knowledgeSnapshotRef), v.guardrailVersion, v.createdBy, v.createdAt, v.publishedAt]);
     },
     async get(businessId, id) {
-      const r = (await db.query('select * from public.agent_versions where id = $1 and business_id = $2', [id, businessId])).rows[0] as Row | undefined;
+      const r = (await db.query(`${VERSION_SELECT} where v.id = $1 and v.business_id = $2`, [id, businessId])).rows[0] as Row | undefined;
       return r ? versionFromRow(r) : undefined;
     },
     async listByAgent(businessId, agentId) {
-      return ((await db.query('select * from public.agent_versions where business_id = $1 and agent_id = $2 order by version desc', [businessId, agentId])).rows as Row[]).map(versionFromRow);
+      return ((await db.query(`${VERSION_SELECT} where v.business_id = $1 and v.agent_id = $2 order by v.version desc`, [businessId, agentId])).rows as Row[]).map(versionFromRow);
     },
     async maxVersion(businessId, agentId) {
       const r = (await db.query('select coalesce(max(version), 0)::int as max from public.agent_versions where business_id = $1 and agent_id = $2', [businessId, agentId])).rows[0] as Row | undefined;
