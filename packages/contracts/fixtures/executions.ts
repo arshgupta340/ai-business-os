@@ -12,6 +12,8 @@ import {
 import {
   approvalBookingConflict,
   approvalBookingVerified,
+  approvalBookingRetry,
+  approvalBookingUnknown,
   approvalOrderFulfilled,
   approvalOrderPaid,
   approvalOrderPaymentFailed,
@@ -101,6 +103,14 @@ export const executionsBookingConflict = executionsFor(approvalBookingConflict, 
 });
 
 export const executions: ActionExecution[] = [
+  ...executionsFor(approvalBookingRetry, {
+    'calendar.event.create': { status: 'NEEDS_REVIEW', attempts: 1, lastError: 'Calendar request timed out. Check the event before retrying.', doneAfterMs: 8000 },
+  }),
+  ...executionsFor(approvalBookingUnknown, {
+    'calendar.event.create': ok(3000, storedKey('idem:exe_demo_b88u_0')),
+    'message.booking.confirm': { status: 'NEEDS_REVIEW', attempts: 1, lastError: 'Message result is unknown. Do not resend automatically.', doneAfterMs: 8000 },
+    'local.booking.record': ok(9000),
+  }),
   ...executionsOrderFulfilled,
   ...executionsOrderPaid,
   ...executionsOrderPaymentPending,
@@ -148,6 +158,9 @@ function dispatch(d: DispatchInput): MessageDispatch {
 
 // Only whatsapp_sandbox can reach DELIVERED; these are all surge, so SENT is their last state.
 export const messageDispatches: MessageDispatch[] = [
+  { id: 'msg_demo_b88u', businessId: approvalBookingUnknown.businessId, executionId: 'exe_demo_b88u_1', subjectId: approvalBookingUnknown.subjectId,
+    channel: 'surge', recipient: approvalBookingUnknown.payload.messageRecipient ?? '', template: 'booking_confirmed', status: 'UNKNOWN',
+    idempotencyKey: storedKey('idem:exe_demo_b88u_1'), createdAt: '2026-11-14T17:33:00Z', updatedAt: '2026-11-14T17:33:08Z' },
   dispatch({ id: 'msg_demo_01', executionId: 'exe_demo_01_1', subjectId: 'ord_demo_01', channel: 'surge', recipient: '+15555550123',
     template: 'checkout_link', status: 'SENT', providerMessageId: 'surge_demo_01' }),
   dispatch({ id: 'msg_demo_03', executionId: 'exe_demo_03_1', subjectId: 'ord_demo_03', channel: 'surge', recipient: '+15555550125',

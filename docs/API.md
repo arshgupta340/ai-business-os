@@ -44,7 +44,7 @@ This is the one canonical list (SPEC 2.9). `packages/contracts` exports exactly 
 | `VALIDATION_FAILED` | 400 | no | Body, query or upload failed validation. `details.issues` lists `{ path, message }`. |
 | `INVALID_STATE` | 409 | no | The resource's state does not allow this call, for example pausing a draft agent. `details.state` gives the current state. |
 | `CONFLICT_UNRESOLVED` | 409 | no | Publish blocked by an open required `FactConflict`. `details.conflictIds` lists them. |
-| `APPROVAL_EXPIRED` | 409 | no | The approval passed `expiresAt` (10 minutes after creation). |
+| `APPROVAL_EXPIRED` | 409 | no | The approval reached `expiresAt` (10 minutes after creation) before it was decided. |
 | `APPROVAL_ALREADY_DECIDED` | 409 | no | A different decision was already recorded. `details.state` gives it. |
 | `PAYLOAD_HASH_MISMATCH` | 409 | no | The `payloadHash` sent does not match the stored hash. The UI reloads the approval. |
 | `CAPABILITY_NOT_ALLOWED` | 422 | no | A spec names a capability that is not in the registry, or lists a `write` or `external_message` capability as a tool. |
@@ -136,7 +136,7 @@ Response `201 { "approval": {...} }` with `payload` holding the `price_edit` fie
 **`POST /api/builder/sessions?businessId=`**. Starts an interview. Body `{}`, or `{ "agentId": "agt_pizza_01" }` to revise an existing agent; that session writes its draft spec to the agent's draft. Response `201`. Errors: `NOT_FOUND` (agent). Events: none. Screens: Build an Agent, Agent details (change instruction field).
 
 ```json
-{ "id": "bld_01", "businessId": "biz_pizza_01", "status": "active", "messages": [ { "id": "bmsg_01", "role": "assistant", "text": "What would you like an agent to do for your business?", "createdAt": "2026-11-13T19:00:00Z" } ],
+{ "id": "bld_01", "businessId": "biz_pizza_01", "status": "active", "messages": [ { "id": "bmsg_01", "sessionId": "bld_01", "role": "assistant", "inputMode": "text", "text": "What would you like an agent to do for your business?", "createdAt": "2026-11-13T19:00:00Z" } ],
   "draftSpec": {}, "missingFields": [], "progress": { "answered": 0, "required": 0 }, "createdAt": "2026-11-13T19:00:00Z", "updatedAt": "2026-11-13T19:00:00Z" }
 ```
 
@@ -149,13 +149,14 @@ Response `201 { "approval": {...} }` with `payload` holding the `price_edit` fie
 ```
 
 ```json
-{ "reply": { "id": "bmsg_02", "role": "assistant", "text": "I can do that. What is the latest pickup time you accept on weekdays?", "evidenceRefs": ["fact_hours_fri"], "createdAt": "2026-11-13T19:01:00Z" },
+{ "reply": { "id": "bmsg_02", "sessionId": "bld_01", "role": "assistant", "inputMode": "text", "text": "I can do that. What is the latest pickup time you accept on weekdays?", "evidenceRefs": ["fact_hours_fri"], "createdAt": "2026-11-13T19:01:00Z" },
   "draftSpec": { "template": "restaurant_order_taker", "name": "Pizza Order Assistant", "channel": "phone",
     "capabilities": ["catalog.read", "business.facts.read", "order.quote", "order.propose", "order.status.read", "order.checkout.prepare", "message.checkout.send", "sheets.rows.append"] },
-  "missingFields": ["policy.pickup_window"], "suggestions": ["Upload menu", "Use Square catalog"], "stopConditions": [], "progress": { "answered": 3, "required": 6 } }
+  "missingFields": ["policy.pickup_window"], "suggestions": ["Upload menu", "Use Square catalog"], "stopConditions": [], "progress": { "answered": 3, "required": 6 },
+  "unsupportedRequests": [] }
 ```
 
-`stopConditions` lists PRD section 6 stop conditions that block a draft, for example `{ "code": "missing_timezone" }`.
+Every builder message carries `sessionId` and `inputMode`; the server fills them on assistant messages (SPEC 2.9). `unsupportedRequests` is always present and may be empty (SPEC 2.9, section 3.12). `stopConditions` lists PRD section 6 stop conditions that block a draft, for example `{ "code": "missing_timezone" }`.
 
 ### 3.4 Agents (owner: Saina, except `sim-call`: Arsh)
 
@@ -248,12 +249,12 @@ One phone number serves both businesses, so this route is owner-scoped (P-06).
   "payloadHash": "sha256:77fe...", "state": "PENDING", "expiresAt": "2026-11-13T19:52:00Z", "createdAt": "2026-11-13T19:42:00Z" }
 ```
 
-**`POST /api/approvals/:id/decision?businessId=`**. Body `{ "decision": "approve" | "reject", "payloadHash": "sha256:77fe..." }`, with the hash the UI displayed. Optional `Idempotency-Key` header. Checks, in one transaction with a row lock:
+**`POST /api/approvals/:id/decision?businessId=`**. Body `{ "decision": "approve" | "reject", "payloadHash": "sha256:77fe..." }`, with the hash the UI displayed. Optional `Idempotency-Key` header. The database routine `private.decide_and_enqueue` (migration 0004) makes these checks in one transaction with a row lock:
 1. Approval exists in this business, else `NOT_FOUND`.
 2. `payloadHash` equals the stored hash, else `PAYLOAD_HASH_MISMATCH`.
-3. If `state` already equals the requested outcome, return `200` with the current approval and do nothing. A double click or retry is safe (AC-10).
-4. If `state` is the other outcome, `APPROVAL_ALREADY_DECIDED`. If `state` is `EXPIRED` or `now > expiresAt`, `APPROVAL_EXPIRED`.
-5. Record the decision. On approve, enqueue one execution per action type except the Sheets step, each with the SPEC 2.9 idempotency key, and return at once. The Sheets sync job is created later, when the subject reaches `PAID_VERIFIED` or `BOOKED_VERIFIED` (SPEC 2.9). On reject, move the subject to `REJECTED`; no external call is made (AC-08).
+3. If the approval is already decided and the request repeats the same outcome from the same owner with the same `reason`, return `200` with the current approval. The routine updates nothing and writes no second `approval.decided` event. The one thing it may still do is create execution rows that an earlier, partly completed approval left missing. A double click or retry is safe (AC-10).
+4. If `state` is the other outcome, `APPROVAL_ALREADY_DECIDED`. The routine also refuses a repeat whose `reason` differs from the recorded one. If `state` is `EXPIRED`, or the approval is `PENDING` and `now >= expiresAt`, `APPROVAL_EXPIRED`. A late decision does not change the row: it stays `PENDING` until the expiry job runs.
+5. Record the decision. On approve, enqueue one execution per action type except the Sheets step, each with the SPEC 2.9 idempotency key, and return at once. The message step is created already `SKIPPED` when the approval's `messageChannel` is `qr_only`. The Sheets sync job is created later, when the subject reaches `PAID_VERIFIED` or `BOOKED_VERIFIED` (SPEC 2.9). On reject, move the subject to `REJECTED`; no external call is made (AC-08).
 
 Response `200`. Execution progress arrives only as activity events; the response never waits for a provider.
 
@@ -261,12 +262,12 @@ Response `200`. Execution progress arrives only as activity events; the response
 { "approval": { "id": "apv_123", "state": "APPROVED", "decidedBy": "usr_owner_01", "decidedAt": "2026-11-13T19:44:10Z" } }
 ```
 
-Errors: `NOT_FOUND`, `PAYLOAD_HASH_MISMATCH`, `APPROVAL_ALREADY_DECIDED`, `APPROVAL_EXPIRED`, `ENVIRONMENT_MISMATCH` (approve of an `order_bundle` or `price_edit`). Events: `approval.decided` always, plus `order.status_changed` or `booking.status_changed` on every transition of the subject. Then from the executor:
+Errors: `NOT_FOUND`, `PAYLOAD_HASH_MISMATCH`, `APPROVAL_ALREADY_DECIDED`, `APPROVAL_EXPIRED`, `ENVIRONMENT_MISMATCH` (approve of an `order_bundle` or `price_edit`). Events: `approval.decided` when the decision is recorded (an identical repeat writes no second one), plus `order.status_changed` or `booking.status_changed` on every transition of the subject. Then from the executor:
 - `order_bundle`: `execution.started`, `checkout.created`, `message.sent` or `message.failed`, `execution.succeeded` or `execution.failed`, later `payment.verified` or `payment.failed` from the webhook job, then `sync.queued` and `sync.succeeded` or `sync.failed` once the order is `PAID_VERIFIED` (SPEC 2.3).
 - `booking_bundle`: `execution.started` and `execution.succeeded` for each step, or `booking.slot_conflict` with `execution.failed` if the slot is taken; `message.sent` or `message.failed`; `booking.verified` when `local.booking.record` moves the booking to `BOOKED_VERIFIED`; then the Sheets `sync.*` events.
 - `fact_edit`: see 3.1. `price_edit`: see 3.1.
 
-A background job sets past-due approvals to `EXPIRED` and emits `approval.expired` and the subject's status event. Screens: Approvals, Live operations, Knowledge review (confirm dialog).
+A background job calls `private.expire_approvals`, which sets each `PENDING` approval that has reached `expiresAt` to `EXPIRED` and emits `approval.expired`. It emits the subject's status event only when an order or booking still in `AWAITING_OWNER_APPROVAL` actually moves. Screens: Approvals, Live operations, Knowledge review (confirm dialog).
 
 ### 3.8 Orders (owner: Arsh)
 
@@ -346,7 +347,7 @@ The UI lead's review of every screen found these missing. All are in `packages/c
 
 Details:
 - `POST /api/conflicts/:id/resolve` takes `{ "resolution": "keep_authoritative" }`. It marks the conflict `resolved` and the draft fact `superseded`. It writes nothing external, so it needs no approval. Choosing the uploaded value over a Square price is not a fact edit: it is a price change and goes through `POST /api/businesses/:id/catalog/prices/propose` (SHOULD). Until that exists, the screen tells the owner to change the price in Square and sync.
-- `POST /api/executions/:id/resolve` takes `{ "action": "retry" | "abandon" }`. It covers a step in `NEEDS_REVIEW`, a booking in `RETRY_REQUIRED` and a message in `UNKNOWN`. A retry reuses the original idempotency key. This and the cancel route are proposal P-19 in `docs/SPEC.md`. Until they exist, leave these buttons out.
+- `POST /api/executions/:id/resolve` takes `{ "action": "retry" | "abandon" }`. It covers a step in `NEEDS_REVIEW`, a booking in `RETRY_REQUIRED` and a message in `UNKNOWN`. A retry reuses the original idempotency key. This and the cancel route are proposal P-19 in `docs/SPEC.md`. Until they exist, leave these buttons out. The database cannot serve this route today: migration 0004 has no routine that moves a step out of `NEEDS_REVIEW`, and `update_dispatch` refuses every change to a dispatch in `UNKNOWN`. Migration 0005, not yet applied, adds the routine for resolving a `NEEDS_REVIEW` step.
 - There is no "mark ready" route. The server sets `FULFILLMENT_READY` itself.
 - Telemetry metric names: `call_answer_latency`, `first_audio`, `tool_latency`, `approval_time`, `webhook_delay`.
 

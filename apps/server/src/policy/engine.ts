@@ -85,6 +85,28 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
     await emitActivity(tx, { id: deps.newId('evt_'), businessId, correlationId, type, payload, actorType, occurredAt: at.toISOString() });
   }
 
+  /**
+   * FLOWS X1 for an approval refused by the overlap rule: AWAITING_OWNER_APPROVAL -> SLOT_CONFLICT (a move
+   * the contract machine and 0005's bookings_runtime_guard allow), with booking.status_changed and
+   * booking.slot_conflict. Alternatives (FLOWS X2) need a free/busy read, which the engine has no port
+   * for, so the event carries none.
+   */
+  async function markSlotConflict(a: ApprovalRequest): Promise<void> {
+    await db.transaction(async (tx) => {
+      const row = await one(tx, 'select status, call_id, start_utc from public.bookings where id=$1 and business_id=$2 for update', [a.subjectId, a.businessId]);
+      if (!row || row.status !== 'AWAITING_OWNER_APPROVAL') return;
+      const moved = await tx.query("update public.bookings set status='SLOT_CONFLICT' where id=$1 and business_id=$2 and status='AWAITING_OWNER_APPROVAL' returning id", [a.subjectId, a.businessId]);
+      if (moved.rows.length !== 1) return;
+      const at = await dbNow(tx);
+      const callId = row.call_id ? String(row.call_id) : undefined;
+      const correlationId = callId ?? a.id;
+      await event(tx, at, a.businessId, correlationId, 'booking.status_changed',
+        { bookingId: a.subjectId, ...(callId ? { callId } : {}), from: 'AWAITING_OWNER_APPROVAL', to: 'SLOT_CONFLICT' });
+      const startUtc = row.start_utc instanceof Date ? row.start_utc.toISOString() : new Date(String(row.start_utc)).toISOString();
+      await event(tx, at, a.businessId, correlationId, 'booking.slot_conflict', { bookingId: a.subjectId, approvalId: a.id, startUtc, alternatives: [] });
+    });
+  }
+
   async function assertOwner(tx: QueryInterface, businessId: string, ownerUserId: string) {
     BusinessIdSchema.parse(businessId);
     UserIdSchema.parse(ownerUserId);
@@ -368,7 +390,12 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
         }));
       } catch (error) {
         // Issue #93 item 4: approving a booking whose slot overlaps an approved one trips bookings_no_overlap.
-        if (error && typeof error === 'object' && 'code' in error && (error as { code: unknown }).code === '23P01') throw new PolicyError('SLOT_CONFLICT');
+        // FLOWS X1: the booking moves to SLOT_CONFLICT with a booking.slot_conflict event (the decision
+        // routine rolled back, so the approval itself stays PENDING and later expires).
+        if (error && typeof error === 'object' && 'code' in error && (error as { code: unknown }).code === '23P01') {
+          if (target === 'APPROVED' && pending.bundleType === 'booking_bundle') await markSlotConflict(pending);
+          throw new PolicyError('SLOT_CONFLICT');
+        }
         const code = routineErrorCode(error);
         if (code !== 'APPROVAL_ALREADY_DECIDED') return rethrow(error);
         // A repeat that differs only in its reason is still the same decision (AC-10).

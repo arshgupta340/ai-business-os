@@ -67,7 +67,8 @@ export async function hashCanonical(value: unknown): Promise<string> {
 }
 
 /** SPEC 2.9 payload hash. Pass the payload exactly as stored (material fields only; see `pickMaterialFields`). */
-export async function payloadHash(payload: ApprovalPayload): Promise<string> {
+export async function payloadHash(payload: ApprovalPayload, explicitBundleType?: BundleType): Promise<string> {
+  if (explicitBundleType !== undefined) return hashCanonical(PAYLOAD_SCHEMAS[explicitBundleType].parse(payload));
   const bundleType = 'cartHash' in payload ? 'order_bundle' : 'serviceId' in payload ? 'booking_bundle' : 'squareItemId' in payload ? 'price_edit' : 'fact_edit';
   return approvalPayloadHash(bundleType, payload);
 }

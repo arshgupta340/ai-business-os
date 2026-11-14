@@ -29,6 +29,7 @@ import {
   EventIdSchema,
   ExecutionIdSchema,
   FactIdSchema,
+  FactConflictIdSchema,
   FileIdSchema,
   JobIdSchema,
   MessageDispatchIdSchema,
@@ -207,6 +208,7 @@ export const ACTIVITY_EVENT_PAYLOADS = {
     z.object({ ...catalogSyncFields, ...syncFailedFields }),
   ]),
   'fact.changed': z.object({
+    resolvedConflictId: FactConflictIdSchema.optional(),
     factId: FactIdSchema,
     kind: FactKindSchema,
     key: z.string().min(1),

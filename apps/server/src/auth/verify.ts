@@ -1,6 +1,6 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import type { FastifyPluginAsync, FastifyPluginOptions, FastifyRequest } from 'fastify';
-import { ENDPOINTS, type EndpointDefinition } from '@abos/contracts';
+import { BusinessIdSchema, ENDPOINTS, type EndpointDefinition } from '@abos/contracts';
 import type { Db } from '../db/index';
 import type { Env } from '../env';
 import { AppError } from '../errors';
@@ -61,6 +61,14 @@ export function routeAuthPolicy(request: FastifyRequest): RouteAuthPolicy | unde
 }
 
 const definitions = Object.values(ENDPOINTS) as EndpointDefinition[];
+
+/** True when a string anywhere in a parsed JSON value (object keys included) holds a NUL byte. */
+function hasNul(value: unknown, depth = 0): boolean {
+  if (typeof value === 'string') return value.includes('\u0000');
+  if (depth > 32 || value === null || typeof value !== 'object' || Buffer.isBuffer(value)) return false;
+  if (Array.isArray(value)) return value.some((v) => hasNul(v, depth + 1));
+  return Object.entries(value as Record<string, unknown>).some(([k, v]) => k.includes('\u0000') || hasNul(v, depth + 1));
+}
 const record = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === 'object' ? value as Record<string, unknown> : {};
 
@@ -90,7 +98,13 @@ export function createAuthGuard(db: Db, verifier: TokenVerifier) {
     request.ownerUserId = user.id;
     const params = record(request.params);
     const query = record(request.query);
+    // IDs are validated at the edge, before any query uses them: a malformed ID (a NUL byte, a path
+    // fragment, the wrong prefix) is VALIDATION_FAILED, never a database error answered as a 500.
+    if (endpoint?.params && !endpoint.params.safeParse(params).success) throw new AppError('VALIDATION_FAILED', 'Request validation failed.');
+    // Postgres refuses a NUL byte in any text value. No ID, filter, cursor or field may carry one.
+    if (hasNul(params) || hasNul(query) || hasNul(request.body)) throw new AppError('VALIDATION_FAILED', 'Request validation failed.');
     const businessId = url.startsWith('/api/businesses/:id') ? params.id : query.businessId;
+    if (typeof businessId === 'string' && !BusinessIdSchema.safeParse(businessId).success) throw new AppError('VALIDATION_FAILED', 'Request validation failed.');
     if (typeof businessId === 'string') {
       const owned = await db.query('select id from public.businesses where id = $1 and owner_id = $2', [businessId, user.id]);
       if (!owned.rows.length) throw new AppError('FORBIDDEN_BUSINESS', 'This business is not owned by you.');

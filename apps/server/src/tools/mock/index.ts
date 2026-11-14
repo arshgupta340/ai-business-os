@@ -37,6 +37,7 @@ import {
   FIXTURE_NOW,
   allFacts,
   barberBusyBlocks,
+  materializeBusyBlocks,
   businesses,
   messageDispatches,
   orders,
@@ -96,6 +97,7 @@ type MockProposal = { orderId: string; approvalId: string; status: OrderStatus }
 export function createMockToolset(options: MockToolsetOptions): MockToolset {
   const { businessId } = options;
   const now = options.now ?? (() => new Date(FIXTURE_NOW));
+  const busyBlocks = options.now === undefined ? barberBusyBlocks : materializeBusyBlocks(now());
   const unavailable = new Set(options.unavailableItemIds ?? []);
   const business = businesses.find((b) => b.id === businessId);
   const timezone = business?.timezone ?? 'America/Los_Angeles';
@@ -183,7 +185,7 @@ export function createMockToolset(options: MockToolsetOptions): MockToolset {
   // ---- Calendar ----
 
   function isBusy(start: number, end: number): boolean {
-    return barberBusyBlocks.some((b) => b.calendarId === BARBER_CALENDAR_ID && Date.parse(b.startUtc) < end && Date.parse(b.endUtc) > start);
+    return busyBlocks.some((b) => b.calendarId === BARBER_CALENDAR_ID && Date.parse(b.startUtc) < end && Date.parse(b.endUtc) > start);
   }
 
   /** FLOWS C3: 15 minute grid, start plus duration plus buffer free, ends within hours, after minimum notice. */
