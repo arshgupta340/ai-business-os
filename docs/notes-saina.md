@@ -135,3 +135,28 @@ A custom agent is any valid subset of registered capabilities (P-13). `CAPABILIT
 ### Not verified
 
 - The real OpenAI paths (no key). Publish (B-17) and the simulated call (B-31) do not exist yet, so "can be published and answers on a call" is shown only as far as a valid spec that runs in preview and test on the mock toolset.
+
+## B-21 document extraction and conflict detection (2026-11-13)
+
+Routes: `POST /api/businesses/:id/files`, `GET /api/files/:id`, `POST /api/conflicts/:id/resolve`. Everything is in `apps/server/src/builder/extraction`. Storage, facts, conflicts, the catalog reader and the event sink are in-memory stand-ins behind interfaces until the database and Supabase Storage exist.
+
+An open required conflict from an upload reaches the builder interview as the `open_conflict` stop condition, and goes away when the conflict is resolved.
+
+### Choices made where the docs were silent or disagreed
+
+- A conflict is `required: true` for a menu price or a service price that differs. It is `false` for hours, policies and other differences. The API.md 3.1 example shows a `pickup_window` conflict with `required: true`, which disagrees. Arsh should rule on it.
+- `sha256` on a file is stored as `sha256:<hex>` (DATA-MODEL check). The API.md example shows bare hex.
+- Uploading the same bytes twice for one business returns the existing record and does not extract again. A file that failed before is run again.
+- The declared MIME type must be one of the six listed. `application/vnd.ms-excel` for a CSV, which some Windows browsers send, is refused.
+- A menu item that is not in the catalog opens no conflict. A second disagreeing draft for a key that already has an open conflict opens no new one.
+- Fact keys: `item:variation` slugs for menu items, the matching `svc_` ID for a service, snake_case slugs for policies and FAQ, and `phone`, `email` or `address` for contact.
+- Resolving a conflict writes `fact.changed` with the `cfl_` ID as `correlationId` and `actorType: "owner"`. `extraction.completed` uses the `file_` ID and `actorType: "system"`.
+- A failed extraction stores a fixed safe reason on the server record. It is not in the API response because `FileRecord` has no field for it.
+- Extraction uses `OPENAI_BUILDER_MODEL`. SPEC names no separate model.
+- Caps I chose: 60 MB uncompressed for a spreadsheet archive, 5 sheets, 1000 rows, 30 cells per row, 200 characters per cell, 200 facts per file.
+
+### Not verified
+
+- The real OpenAI path has never run. The request shapes for file and image input come from the official docs and are tested against a fake client.
+- The recorded outputs were written by hand. A document is recognized by a marker phrase, so an unknown document extracts to zero facts until there is a key.
+- New dependency `exceljs` pulls in `uuid@8`, which `npm audit` flags as moderate. The advisory is about a caller-supplied buffer, which exceljs does not use.
