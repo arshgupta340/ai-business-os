@@ -43,6 +43,8 @@ import { createDbRecoveryPorts } from './recovery';
 import { createDbFallback, type FallbackDeps } from './fallback';
 import { catalogOwnedElsewhere, dbAgentVersionStore, dbLiveAgentStore, dbPublishEventSink, squareCatalogSync } from './builder-publish';
 import { createCallDecisions, type CallDecisionsBus } from './decisions';
+import { dbExtractionOptions } from './builder-extraction';
+import type { DocumentExtractor } from '../builder/extraction/index';
 import { createProposeFactFromChat, dbAgentDraftStore, dbBuilderSessionStore, dbBusinessKnowledge, dbDraftFactStore, dbLiveAgentReader, type ProposeFactFromChat } from './builder';
 import { notWiredExecutor, notWiredWebhooks, type Executor, type ExecutorFactory, type SeamDeps, type WebhooksFactory } from './seams';
 import { buildTelephony, type Telephony } from '../telephony/index';
@@ -60,6 +62,8 @@ export interface ComposeOptions {
   catalog?: RouteCatalogPort;
   providers?: Partial<Providers>;
   agentModel?: AgentModel;
+  /** Replaces the builder's document extractor (tests pass a fake, so no provider is called). */
+  documentExtractor?: DocumentExtractor;
   now?: () => Date;
   newId?: (prefix: string) => string;
   /** Defaults to the database executor (executor.ts) when a database is present. */
@@ -273,8 +277,9 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   // A publish runs the bounded read-only probes now, so a provider never checked is not taken as down
   // and a provider that went down since the last check is caught.
   const integrations = { read: () => health.read({ refresh: true }) };
-  // Extraction keeps its in-memory stores: uploaded bytes have no database column or storage bucket
-  // wired, and upload facts reference their files row, so the set moves together (see the report).
+  // Extraction (uploads, the draft facts drawn from them, their conflicts) is on the database too
+  // (builder-extraction.ts). File contents have no column and no bucket: they stay in this process
+  // only while one extraction runs. Without a database the builder keeps its in-memory defaults.
   // With a database but no way to verify tokens, the builder answers INTEGRATION_UNAVAILABLE (a server
   // setting is missing), not UNAUTHENTICATED, so the web app does not sign a valid owner out. The
   // explicit local opt-in BUILDER_DEV_AUTH=1 keeps the builder's own loopback-only stand-in.
@@ -288,12 +293,13 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     ...(authConfigured ? { auth: createBuilderAuth(db, verifier) } : devAuth ? {} : { auth: unconfiguredAuth }),
     liveAgent: dbLiveAgentReader(db), sessions: dbBuilderSessionStore(db), agents: dbAgentDraftStore(db),
     draftFacts: dbDraftFactStore(db), knowledge: dbBusinessKnowledge(db), proposeFactFromChat,
+    extraction: dbExtractionOptions(db, options.documentExtractor),
     publish: {
       versions: dbAgentVersionStore(db), events: dbPublishEventSink(db), syncCatalog: squareCatalogSync(db, providers, now), integrations,
       // D-12: publish binds the live agent to the number of the selected telephony provider.
       ...(phoneLine ? { liveAgents: dbLiveAgentStore(db, phoneLine) } : {}),
     },
-  } : { proposeFactFromChat, publish: { integrations } };
+  } : { proposeFactFromChat, publish: { integrations }, ...(options.documentExtractor ? { extraction: { extractor: options.documentExtractor } } : {}) };
 
   const fallback = createDbFallback({ db, providers, ownedNumber: env.TWILIO_PHONE_NUMBER, newId,
     ...(options.versionEnablesFallback ? { versionEnablesFallback: options.versionEnablesFallback } : {}) });
