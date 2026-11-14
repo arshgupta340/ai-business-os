@@ -247,3 +247,52 @@ describe('calendar adapter: provider failures', () => {
     expect(s.insert).not.toHaveBeenCalled();
   });
 });
+
+describe('calendar adapter: findEventForRecovery (issue #54, owner recovery)', () => {
+  const key = 'a'.repeat(64);
+  const q = { bookingId: input.bookingId, calendarId: 'cal', eventId: key, startUtc: input.startUtc, endUtc: input.endUtc };
+  const put = async (s: ReturnType<typeof setup>, over: Partial<GoogleEvent> = {}) =>
+    s.events.set(key, { id: key, status: 'confirmed', property: await bookingPropertyValue(input.bookingId),
+      start: { dateTime: input.startUtc }, end: { dateTime: input.endUtc }, ...over });
+
+  it('finds the event under the deterministic ID at the approved slot, and never inserts', async () => {
+    const s = setup(); await put(s);
+    expect(await s.adapter.findEventForRecovery!(q)).toEqual({ outcome: 'found', googleEventId: key });
+    expect(s.insert).not.toHaveBeenCalled();
+  });
+  it('answers absent only when the property search and the ID read both find nothing', async () => {
+    const s = setup();
+    expect(await s.adapter.findEventForRecovery!(q)).toEqual({ outcome: 'absent' });
+    expect(s.list).toHaveBeenCalled(); expect(s.get).toHaveBeenCalled(); expect(s.insert).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['another slot', { start: { dateTime: '2026-11-16T18:00:00Z' } }],
+    ['no times', { start: null, end: null }],
+    ['another ID', { id: 'b'.repeat(64) }],
+  ] as const)('is unknown for an event at %s', async (_name, over) => {
+    const s = setup(); await put(s, over);
+    expect(await s.adapter.findEventForRecovery!(q)).toEqual({ outcome: 'unknown' });
+  });
+  it('is unknown on a provider error, a timeout or a non-404 read error', async () => {
+    const s = setup();
+    s.list.mockRejectedValueOnce(new Error('boom'));
+    expect(await s.adapter.findEventForRecovery!(q)).toEqual({ outcome: 'unknown' });
+    s.get.mockRejectedValueOnce(Object.assign(new Error('forbidden'), { response: { status: 403 } }));
+    expect(await s.adapter.findEventForRecovery!(q)).toEqual({ outcome: 'unknown' });
+    s.get.mockImplementationOnce(() => new Promise(() => {}));
+    expect(await s.adapter.findEventForRecovery!(q)).toEqual({ outcome: 'unknown' });
+  });
+  it('is unknown, not absent, for a cancelled or deleted event under the step ID, so nothing recreates it', async () => {
+    const s = setup(); await put(s, { status: 'cancelled' });
+    expect(await s.adapter.findEventForRecovery!(q)).toEqual({ outcome: 'unknown' });
+    const gone = setup();
+    gone.get.mockRejectedValueOnce(Object.assign(new Error('Gone'), { response: { status: 410 } }));
+    expect(await gone.adapter.findEventForRecovery!(q)).toEqual({ outcome: 'unknown' });
+    expect(s.insert).not.toHaveBeenCalled(); expect(gone.insert).not.toHaveBeenCalled();
+  });
+  it('is unknown for malformed input without calling Google', async () => {
+    const s = setup();
+    expect(await s.adapter.findEventForRecovery!({ ...q, eventId: 'not-a-key' })).toEqual({ outcome: 'unknown' });
+    expect(s.list).not.toHaveBeenCalled();
+  });
+});

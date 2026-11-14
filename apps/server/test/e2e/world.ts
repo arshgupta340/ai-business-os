@@ -146,13 +146,13 @@ export function fakeCalendarClient() {
         const wanted = (input.privateExtendedProperty ?? []).map((p) => { const at = p.indexOf('='); return [p.slice(0, at), p.slice(at + 1)] as const; });
         const items = [...events.values()]
           .filter((e) => wanted.every(([key, value]) => e.extendedProperties?.private?.[key] === value))
-          .map((e): GoogleEvent => ({ id: e.id, status: 'confirmed', htmlLink: `https://calendar.example.test/${e.id}` }));
+          .map((e): GoogleEvent => ({ id: e.id, status: 'confirmed', htmlLink: `https://calendar.example.test/${e.id}`, start: e.start, end: e.end }));
         return { data: { items } };
       },
       async get({ eventId }) {
         const e = events.get(eventId);
         if (!e) throw Object.assign(new Error('not found'), { code: 404 });
-        return { data: { id: e.id, status: 'confirmed', htmlLink: `https://calendar.example.test/${e.id}` } };
+        return { data: { id: e.id, status: 'confirmed', htmlLink: `https://calendar.example.test/${e.id}`, start: e.start, end: e.end } };
       },
       async insert(input) {
         writes.push('events.insert');

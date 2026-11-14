@@ -213,6 +213,37 @@ export function resolveExecution(db: QueryExecutor, args: {
   return row(db, 'select * from private.resolve_execution($1,$2,$3,$4,$5,$6)',
     [args.businessId,args.executionId,args.status,args.externalRef ?? null,args.nothingWritten,args.checkout ? JSON.stringify(args.checkout) : null]);
 }
+/** What the server read from the provider before an owner recovery decision (0008 recovery_decisions.provider_read). */
+export type RecoveryProviderRead = 'none' | 'checkout_found' | 'calendar_event_found' | 'calendar_event_absent' | 'message_sent';
+export interface RecoveryDecisionRow {
+  business_id: string; execution_id: string; attempt: number; action: 'retry' | 'abandon'; decided_by: string;
+  provider_read: RecoveryProviderRead; result_status: 'SUCCEEDED' | 'QUEUED' | 'FAILED'; decided_at: Date;
+}
+/**
+ * 0008. The signed-in owner's retry or abandon of a NEEDS_REVIEW step, and the only writer of its
+ * decision (one per step attempt). An identical repeat returns the step; another action for the same
+ * attempt, or a step not in NEEDS_REVIEW, is refused. Every move goes through 0005's resolve_execution:
+ * - retry + a found read: SUCCEEDED; `externalRef` and `checkout` are passed straight to resolve_execution.
+ * - retry + `calendar_event_absent`: requeues the same row with the same idempotency key.
+ * - abandon: FAILED; a message's QUEUED or UNKNOWN dispatch becomes FAILED (read `none`).
+ * The owner ID and the evidence are the trusted server's (DATA-MODEL, "Trust boundary").
+ */
+export function ownerResolveExecution(db: QueryExecutor, args: {
+  businessId: string; executionId: string; ownerUserId: string; action: 'retry' | 'abandon'; providerRead: RecoveryProviderRead;
+  externalRef?: string | null; checkout?: CheckoutReferences;
+}): Promise<ExecutionRow> {
+  return row(db, 'select * from private.owner_resolve_execution($1,$2,$3,$4,$5,$6,$7)',
+    [args.businessId,args.executionId,args.ownerUserId,args.action,args.providerRead,args.externalRef ?? null,
+      args.checkout ? JSON.stringify(args.checkout) : null]);
+}
+/** 0008. The recorded owner decision for this step attempt, if any. */
+export function recoveryDecision(db: QueryExecutor, args: { businessId: string; executionId: string; attempt: number }): Promise<RecoveryDecisionRow | null> {
+  return optional(db, 'select * from public.recovery_decisions where business_id=$1 and execution_id=$2 and attempt=$3', [args.businessId,args.executionId,args.attempt]);
+}
+/** 0008. A QUEUED dispatch of a message step in NEEDS_REVIEW (a crash during the send) becomes UNKNOWN. */
+export async function markStaleDispatchesUnknown(db: QueryExecutor, args: { businessId: string }): Promise<DispatchRow[]> {
+  return (await db.query('select * from private.mark_stale_dispatches_unknown($1)', [args.businessId])).rows as DispatchRow[];
+}
 export function renewSyncLease(db: QueryExecutor, args: {
   businessId: string; syncJobId: string; workerId: string; attempt: number; durationMs: number;
 }): Promise<SyncJobRow> {

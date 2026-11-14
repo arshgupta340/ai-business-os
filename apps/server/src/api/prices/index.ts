@@ -29,13 +29,6 @@ export const pricesPlugin: FastifyPluginAsync<PricesDependencies> = async (app, 
       if (!params.success) throw apiFailure('VALIDATION_FAILED', 'The business path is invalid.');
       const owner = await deps.auth.requireOwner(request, params.data.id);
       if (!owner) throw apiFailure('UNAUTHENTICATED', 'An owner session is required.');
-      // The contract accepts resolvesConflictId on this body (issue #108), but the price_edit payload
-      // cannot carry it and no column stores it, so an approved price edit could not find its conflict
-      // (NOTES.md). Refuse and say what works, instead of accepting a link that would be dropped.
-      if (request.body && typeof request.body === 'object' && 'resolvesConflictId' in request.body) {
-        return reply.code(ERROR_CODE_INFO.VALIDATION_FAILED.httpStatus).send(makeApiError('VALIDATION_FAILED',
-          'A price change cannot resolve a conflict yet. Change the price, sync, then keep the current value on the conflict.', correlationId));
-      }
       const parsed = endpoint.body.safeParse(request.body);
       if (!parsed.success) throw apiFailure('VALIDATION_FAILED', 'The price proposal is invalid.');
       const input = parsed.data;
@@ -55,6 +48,9 @@ export const pricesPlugin: FastifyPluginAsync<PricesDependencies> = async (app, 
       const created = await deps.approvals.createPendingPriceEditApproval({
         ownerUserId: owner.ownerUserId, actorType: 'owner', bundleType: 'price_edit', payload,
         payloadHash: hash, createdAt,
+        // Issue #96: stored beside the hashed material, as for a fact edit (policy/engine.ts). The approval
+        // port checks that the conflict is open and about this catalog row; the approved change resolves it.
+        ...(input.resolvesConflictId ? { resolvesConflictId: input.resolvesConflictId } : {}),
       });
       if (created.kind === 'conflict') throw apiFailure('INVALID_STATE', 'A different price proposal is already pending for this item.');
       // Display names from the catalog cache row (issue #108). They are outside the payload and the hash.

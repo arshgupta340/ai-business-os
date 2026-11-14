@@ -44,7 +44,10 @@ export async function runReset(db: SeedDb, opts: ResetOptions): Promise<ResetSum
   }
   const before = await countRows(db);
   const world = await inTransaction(db, async () => {
-    await db.query(`truncate table ${TRUNCATED_TABLES.map((t) => `public.${t}`).join(', ')}`);
+    // Migration 0008's recovery_decisions references action_executions, so it is emptied with them. It is
+    // named only when it exists, so the reset still works on a database without 0008.
+    const recovery = (await db.query<{ t: string | null }>("select to_regclass('public.recovery_decisions')::text as t")).rows[0]?.t ? ['recovery_decisions'] : [];
+    await db.query(`truncate table ${[...recovery, ...TRUNCATED_TABLES].map((t) => `public.${t}`).join(', ')}`);
     // Drafts, owner edits and upload facts go; the seeded rows are rewritten to verified below.
     await db.query('delete from public.business_facts where not (id = any($1::text[]))', [[...SEEDED_FACT_IDS]]);
     await db.query('delete from public.files');

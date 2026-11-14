@@ -1,23 +1,37 @@
 // The recovery routes (B-32, API 3.12) wired to the database and the provider reads.
 //
-// Resolution of a NEEDS_REVIEW step goes through resolve_execution (migration 0005), which locks the
-// approval and the step, re-checks the signed material and, from the evidence given, completes the
-// step with its subject (checkout references and PAYMENT_LINK_READY, the verified booking and its one
-// Sheets job, a sent dispatch), requeues it after proven absence, or abandons it. It writes its own
-// execution event. Lookups are provider reads only and fail to "unknown" on any doubt.
+// Resolution of a NEEDS_REVIEW step (migration 0008) is one call to owner_resolve_execution. It checks the
+// owner in the database and requires NEEDS_REVIEW, then moves the step through 0005's resolve_execution,
+// which re-checks the signed material: a found effect completes the step with its subject (checkout
+// references and PAYMENT_LINK_READY, the verified booking and its one Sheets job, a sent dispatch). It
+// records the owner's decision in recovery_decisions in the same call. With the calendar absence read it requeues
+// the same step; abandon ends it FAILED (a message's UNKNOWN dispatch with it). A message is never requeued
+// and a checkout is never requeued or abandoned. Lookups are provider reads only and fail to "unknown".
 import { MessageDispatchSchema, type Order } from '@abos/contracts';
-import { resolveExecution } from '@abos/db';
-import type { RecoveryLookup, RecoveryPorts, RecoveryRecord, RecoveryTransaction } from '../api/recovery/index';
+import { ownerResolveExecution, recoveryDecision, type RecoveryProviderRead } from '@abos/db';
+import type { RecoveryLookup, RecoveryPorts, RecoveryRecord, RecoveryScope, RecoveryTransaction } from '../api/recovery/index';
 import { mapRow } from '../api/rows';
 import type { Db, QueryDb } from '../db/index';
 import { emitActivity } from '../policy/activity';
-import { approvalFromRow, executionFromRow } from '../policy/engine';
+import { approvalFromRow, executionFromRow, routineErrorCode } from '../policy/engine';
 import { bookingFromDbRow, orderFromDbRow } from './executor';
 import type { Providers } from './providers';
 import type { SeamDeps } from './seams';
 
 type Row = Record<string, unknown>;
 const one = async (q: QueryDb, text: string, params: unknown[]) => (await q.query(text, params)).rows[0] as Row | undefined;
+
+/**
+ * A routine refusal as a contract code. The routine's own text never reaches the response. An overlap
+ * on the way back to RECHECKING_SLOT (bookings_no_overlap) is a slot conflict.
+ */
+export function recoveryRefusal(error: unknown): 'INVALID_STATE' | 'SLOT_CONFLICT' | ReturnType<typeof routineErrorCode> | 'INTERNAL' {
+  if (error && typeof error === 'object' && 'code' in error && (error as { code: unknown }).code === '23P01') return 'SLOT_CONFLICT';
+  const mapped = routineErrorCode(error);
+  if (mapped) return mapped;
+  const message = error && typeof error === 'object' && 'message' in error ? String((error as { message: unknown }).message) : '';
+  return /^(LEASE|RESULT|TRANSITION|PREDECESSOR):/.test(message) ? 'INVALID_STATE' : 'INTERNAL';
+}
 
 /** A provider read that does not answer in time is "unknown", never a verdict. */
 export const RECOVERY_LOOKUP_TIMEOUT_MS = 8000;
@@ -40,7 +54,7 @@ export function createDbRecoveryPorts(deps: Pick<SeamDeps, 'db' | 'now' | 'newId
   // with the record, in the transaction, and kept here for the lookup.
   const savedRefs = new WeakMap<RecoveryRecord, { squareOrderId?: string | undefined; paymentLinkId?: string | undefined }>();
 
-  function transaction(tx: QueryDb, scope: { businessId: string; id: string }): RecoveryTransaction {
+  function transaction(tx: QueryDb, scope: RecoveryScope): RecoveryTransaction {
     return {
       async loadOrder() {
         const row = await one(tx, 'select * from public.orders where id = $1 and business_id = $2 for update', [scope.id, scope.businessId]);
@@ -66,9 +80,14 @@ export function createDbRecoveryPorts(deps: Pick<SeamDeps, 'db' | 'now' | 'newId
         if (d) record.dispatch = MessageDispatchSchema.parse(mapRow(d));
         return record;
       },
-      // INTEGRATION GAP: there is no durable recovery receipt table. The execution row itself is the
-      // record: once resolved it is no longer NEEDS_REVIEW, so any repeat is refused as INVALID_STATE.
-      async recoveryDecision() { return undefined; },
+      // 0008 recovery_decisions: one decision per step attempt. The route consults it before any state
+      // check, so an identical repeat answers what the first request answered.
+      async recoveryDecision() {
+        const e = await one(tx, 'select * from public.action_executions where id = $1 and business_id = $2', [scope.id, scope.businessId]);
+        if (!e) return undefined;
+        const r = await recoveryDecision(tx, { businessId: scope.businessId, executionId: scope.id, attempt: Number(e.attempts) });
+        return r ? { action: r.action, generation: r.attempt, execution: executionFromRow(e) } : undefined;
+      },
       async cancelOrder(order: Order) {
         // Fence work in flight: a running step may be about to write to a provider.
         const running = order.approvalId ? await one(tx, "select 1 from public.action_executions where approval_id = $1 and status = 'RUNNING' limit 1", [order.approvalId]) : undefined;
@@ -79,14 +98,25 @@ export function createDbRecoveryPorts(deps: Pick<SeamDeps, 'db' | 'now' | 'newId
         return orderFromDbRow(row);
       },
       async resolveNeedsReview({ record, action, status, lookup }) {
-        const row = await resolveExecution(tx, {
-          businessId: record.execution.businessId, executionId: record.execution.id, status,
-          externalRef: lookup.outcome === 'exists' ? lookup.externalRef : null,
-          nothingWritten: lookup.outcome === 'absent',
-          ...(lookup.outcome === 'exists' && lookup.checkout ? { checkout: lookup.checkout } : {}),
-        });
-        // resolve_execution writes the execution.succeeded or execution.failed event itself.
-        return { action, generation: record.execution.attempts, execution: executionFromRow(row) };
+        const e = record.execution;
+        const message = e.actionType === 'message.checkout.send' || e.actionType === 'message.booking.confirm';
+        // What the server read, as the code recorded with the decision (0008). The route chose `status`
+        // from the same lookup; the routine refuses any pair the state machines do not allow.
+        const read: RecoveryProviderRead | undefined = lookup.outcome === 'exists'
+          ? (e.actionType === 'square.checkout.create' ? 'checkout_found' : e.actionType === 'calendar.event.create' ? 'calendar_event_found' : message ? 'message_sent' : undefined)
+          : lookup.outcome === 'absent' && e.actionType === 'calendar.event.create' ? 'calendar_event_absent'
+            : action === 'abandon' && message ? 'none' : undefined;
+        if (!read) throw { code: 'INVALID_STATE' };
+        // One call: owner_resolve_execution checks the owner and NEEDS_REVIEW, moves the step through 0005's
+        // resolve_execution (a found effect with its evidence, passed straight through to the 0005 checks on
+        // the approved material) and records the decision, all in this transaction.
+        const evidence = status === 'SUCCEEDED' && lookup.outcome === 'exists' && !message
+          ? { externalRef: lookup.externalRef, ...(lookup.checkout ? { checkout: lookup.checkout } : {}) } : {};
+        const row = await ownerResolveExecution(tx, { businessId: e.businessId, executionId: e.id, ownerUserId: scope.ownerUserId, action, providerRead: read, ...evidence })
+          .catch((error: unknown) => { throw { code: recoveryRefusal(error) }; });
+        if (row.status !== status) throw { code: 'INTERNAL' };
+        // The routines write the execution.succeeded or execution.failed event (and message.failed) themselves.
+        return { action, generation: e.attempts, execution: executionFromRow(row) };
       },
       activity: { write: (event) => emitActivity(tx, event) },
     };
@@ -120,7 +150,19 @@ export function createDbRecoveryPorts(deps: Pick<SeamDeps, 'db' | 'now' | 'newId
           if ((d.status === 'SENT' || d.status === 'DELIVERED') && d.providerMessageId) return { outcome: 'exists', externalRef: d.providerMessageId };
           return unknown;
         }
-        // Calendar: the adapter has no read-only lookup of the event by the step's key yet.
+        if (e.actionType === 'calendar.event.create' && record.booking && record.approval.bundleType === 'booking_bundle') {
+          // Read only, by the step's deterministic event ID (its idempotency key) and the approved slot.
+          const calendar = providers.calendar;
+          if (!calendar?.findEventForRecovery) return unknown;
+          const approved = record.approval.payload;
+          const found = await bounded(deps.lookupTimeoutMs ?? RECOVERY_LOOKUP_TIMEOUT_MS, () => calendar.findEventForRecovery!({
+            bookingId: record.booking!.id, calendarId: approved.calendarId, eventId: e.idempotencyKey, startUtc: approved.startUtc, endUtc: approved.endUtc }));
+          if (found?.outcome === 'found') return { outcome: 'exists', externalRef: found.googleEventId };
+          if (found?.outcome === 'absent') return { outcome: 'absent' };
+          return unknown;
+        }
+        // A checkout with no saved Square order cannot be proven absent: the adapter has no read by
+        // idempotency key (SPEC section 4 lists none). Price steps have no recovery read here either.
         return unknown;
       } catch {
         return unknown;

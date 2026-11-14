@@ -131,14 +131,16 @@ describe('a worker that dies between claim and finish', () => {
       // One Square link by worker A (the world's Square), and no send through the world's message channel.
       expect(delta(w, before)).toEqual({ square: 1, messages: 0, calendar: 0, sheets: 0 });
     });
-    // DEFECT 5, crash case, left open: FLOWS section 4 says an unknown send leaves the dispatch UNKNOWN.
-    // After crash recovery the step is NEEDS_REVIEW but its dispatch row stays QUEUED. No routine can
-    // correct it: private.update_dispatch needs the step's live lease (gone after recovery) and
-    // private.update_dispatch_status takes only SENT, DELIVERED or FAILED. It needs a migration
-    // (private.recover_stale_executions marking the step's QUEUED dispatch UNKNOWN); migrations are frozen.
-    // Meanwhile it fails closed: nothing resends a QUEUED dispatch, and the checkout view shows it UNKNOWN.
-    it.fails('the dispatch of the recovered step is recorded as UNKNOWN, not left QUEUED', async () => {
+    // DEFECT 5, crash case (issue #93): FLOWS section 4 says an unknown send leaves the dispatch UNKNOWN.
+    // Migration 0008's private.mark_stale_dispatches_unknown runs in the executor's stale recovery, right
+    // after recover_stale_executions, and moves the recovered step's QUEUED dispatch to UNKNOWN.
+    it('the dispatch of the recovered step is recorded as UNKNOWN, not left QUEUED, with one message.failed event', async () => {
+      expect((await w.t.db.query('select status, provider_message_id from message_dispatches where approval_id = $1', [ids.approvalId])).rows).toEqual([{ status: 'UNKNOWN', provider_message_id: null }]);
+      expect(await count(w, "activity_events where type = 'message.failed' and payload->>'status' = 'UNKNOWN' and payload->>'subjectId' = $1", [ids.orderId])).toBe(1);
+      // Another recovery pass changes nothing and sends nothing.
+      await createDbExecutor(seamDeps(), { workerId: 'worker-c-message' }).drain();
       expect((await w.t.db.query('select status from message_dispatches where approval_id = $1', [ids.approvalId])).rows).toEqual([{ status: 'UNKNOWN' }]);
+      expect(await count(w, "activity_events where type = 'message.failed' and payload->>'status' = 'UNKNOWN' and payload->>'subjectId' = $1", [ids.orderId])).toBe(1);
     });
   });
 });

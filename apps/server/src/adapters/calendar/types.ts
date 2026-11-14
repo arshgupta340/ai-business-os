@@ -41,13 +41,27 @@ export type CreateEventInput = Pick<Booking, 'calendarId' | 'startUtc' | 'endUtc
 
 export type EventReference = { googleEventId: string; link?: string };
 
+/** Input of the owner-recovery read: the step's deterministic event ID and the approved slot. */
+export type RecoveryEventQuery = Pick<Booking, 'calendarId' | 'startUtc' | 'endUtc'> & { bookingId: Booking['id']; eventId: string };
+/**
+ * "found": one live event for this booking under the step's ID, at exactly the approved slot.
+ * "absent": the property search and the ID read both answered with no event.
+ * "unknown": anything else (an error, a timeout, another slot, more than one event).
+ */
+export type RecoveryEventResult = { outcome: 'found'; googleEventId: string } | { outcome: 'absent' } | { outcome: 'unknown' };
+
 export interface CalendarAdapter {
   getAvailability(input: AvailabilityQuery): Promise<AdapterResult<{ slots: AvailabilitySlot[] }>>;
   createEvent(input: CreateEventInput): Promise<AdapterResult<EventReference>>;
   deleteEventForBooking(bookingId: Booking['id'], calendarId: string): Promise<AdapterResult<{ deleted: boolean }>>;
+  /** Read only, for owner recovery of a calendar step in review (issue #54). Never inserts. */
+  findEventForRecovery?(input: RecoveryEventQuery): Promise<RecoveryEventResult>;
 }
 
-export type GoogleEvent = { id?: string | null; htmlLink?: string | null; status?: string | null };
+export type GoogleEvent = {
+  id?: string | null; htmlLink?: string | null; status?: string | null;
+  start?: { dateTime?: string | null } | null; end?: { dateTime?: string | null } | null;
+};
 
 export type FreeBusyResponse = {
   data: {

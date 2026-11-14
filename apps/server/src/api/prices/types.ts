@@ -26,6 +26,8 @@ export interface ApprovalPort {
     payload: PriceEditApprovalPayload;
     payloadHash: PriceEditApprovalRequest['payloadHash'];
     createdAt: string;
+    /** Issue #96: the open price conflict this change settles. Stored beside the material, never hashed. */
+    resolvesConflictId?: string;
   }): Promise<{ kind: 'created' | 'existing'; approval: PriceEditApprovalRequest } | { kind: 'conflict' }>;
 }
 export interface CatalogSyncPort {

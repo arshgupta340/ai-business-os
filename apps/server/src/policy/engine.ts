@@ -61,7 +61,8 @@ export function approvalFromRow(row: unknown): ApprovalRequest {
  * and nothing a later request carries can set or change it.
  */
 const RESOLVES_CONFLICT = 'resolvesConflictId';
-function namedConflictId(row: Row | undefined): string | undefined {
+/** Also read by the executor for a price edit's conflict (issue #96), from the stored approval row. */
+export function namedConflictId(row: Row | undefined): string | undefined {
   const payload = row?.payload;
   const id = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Row)[RESOLVES_CONFLICT] : undefined;
   return typeof id === 'string' && FactConflictIdSchema.safeParse(id).success ? id : undefined;
@@ -412,12 +413,25 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
      * returned as it is; a different one pending for the same row is a conflict. Nothing is written to
      * Square until the owner approves and the executor runs the step.
      */
-    async createPriceEditApproval(input: { ownerUserId: string; payload: PriceEditApprovalPayload; payloadHash: string }):
+    async createPriceEditApproval(input: { ownerUserId: string; payload: PriceEditApprovalPayload; payloadHash: string; resolvesConflictId?: string | undefined }):
       Promise<{ kind: 'created' | 'existing'; approval: ApprovalRequest } | { kind: 'conflict' }> {
       const p = PriceEditApprovalPayloadSchema.parse(input.payload);
+      if (input.resolvesConflictId !== undefined && !FactConflictIdSchema.safeParse(input.resolvesConflictId).success) throw new PolicyError('VALIDATION_FAILED');
       try {
         return await db.transaction(async (tx) => {
           await assertOwner(tx, p.businessId, input.ownerUserId);
+          // Issue #96: "use the uploaded price" in one step. The conflict must be open, in this business, a
+          // menu_item conflict, and one whose Square candidate is this catalog row (the builder's
+          // conflicts.ts stores the catalog row ID as that candidate's sourceRef). As for a fact edit (#118)
+          // the ID is stored beside the hashed material, never hashed and never returned, and the executor
+          // resolves that one conflict when local.catalog.sync succeeds.
+          if (input.resolvesConflictId) {
+            const conflict = await one(tx, 'select kind, state, candidates @> $3::jsonb as names_row from public.fact_conflicts where id=$1 and business_id=$2',
+              [input.resolvesConflictId, p.businessId, JSON.stringify([{ sourceType: 'square', sourceRef: p.subjectId }])]);
+            if (!conflict) throw new PolicyError('NOT_FOUND');
+            if (conflict.state !== 'open') throw new PolicyError('INVALID_STATE', 'The conflict is already resolved.');
+            if (conflict.kind !== 'menu_item' || conflict.names_row !== true) throw new PolicyError('VALIDATION_FAILED', 'The conflict is not about this item.');
+          }
           const pending = await one(tx, `select * from public.approval_requests where business_id=$1 and subject_id=$2 and bundle_type='price_edit' and state='PENDING'
             order by created_at desc limit 1`, [p.businessId, p.subjectId]);
           if (pending) {
@@ -425,10 +439,17 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
             // The same proposal again differs only in its expiry (read from the clock): return the pending one.
             const { expiresAt: _a, ...had } = existing.payload as Record<string, unknown>;
             const { expiresAt: _b, ...asked } = p as unknown as Record<string, unknown>;
-            return canonicalJson(had) === canonicalJson(asked) ? { kind: 'existing' as const, approval: existing } : { kind: 'conflict' as const };
+            if (canonicalJson(had) !== canonicalJson(asked)) return { kind: 'conflict' as const };
+            // The stored approval is frozen: it can never gain a conflict it was not proposed with.
+            const named = namedConflictId(pending);
+            if (input.resolvesConflictId && input.resolvesConflictId !== named) {
+              throw new PolicyError('INVALID_STATE', 'This price change is already waiting for confirmation without the conflict. Decide it first.');
+            }
+            return { kind: 'existing' as const, approval: existing };
           }
           const at = await dbNow(tx);
-          const approval = await storeApproval(tx, 'price_edit', p as unknown as Record<string, unknown>, 'owner', input.ownerUserId);
+          const approval = await storeApproval(tx, 'price_edit', p as unknown as Record<string, unknown>, 'owner', input.ownerUserId,
+            input.resolvesConflictId ? { [RESOLVES_CONFLICT]: input.resolvesConflictId } : {});
           if (approval.payloadHash !== input.payloadHash) throw new PolicyError('PAYLOAD_HASH_MISMATCH');
           await requested(tx, at, approval, approval.id);
           return { kind: 'created' as const, approval };
