@@ -5,6 +5,7 @@ import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {ErrorState} from '@/components/ErrorState';
 import {isApiError} from '@/lib/api';
+import {errorText} from '@/lib/error-text';
 
 /**
  * Same pattern as the Overview block error: the safe ApiError message, the
@@ -13,7 +14,8 @@ import {isApiError} from '@/lib/api';
  */
 export function TelemetryError({error, onRetry}: {error: unknown; onRetry: () => void}) {
   const api = isApiError(error) ? error : null;
-  const message = api?.message ?? 'Could not load telemetry.';
+  // The server message can carry an error code. The owner reads the sentence for the code.
+  const message = api ? errorText(api) : 'Could not load telemetry.';
   const canRetry = api ? api.retryable : true;
   return (
     <VStack gap={2}>

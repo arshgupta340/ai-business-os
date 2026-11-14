@@ -18,16 +18,16 @@ import {StatusBadge} from '@/components/StatusBadge';
 import {useApproval, useCreateAgent, type AgentSpec} from '@/lib/api';
 import {statusView} from '@/lib/status';
 import {useBuilderThreadContext} from '../_hooks/useBuilderThread';
+import {errorText} from '@/lib/error-text';
+import {agentTemplateLabel, bundleLabel} from '@/lib/labels';
 import {
-  BUNDLE_LABELS,
   CHANNEL_LABELS,
   continueState,
   ESCALATION_LABELS,
   groupCapabilities,
   groupStopConditions,
   missingFieldQuestion,
-  SCOPE_LABELS,
-  TEMPLATE_LABELS,
+  scopeLabel,
   type StopLine,
   WRITE_POLICY_LABELS,
 } from '../_lib/spec';
@@ -55,12 +55,12 @@ function SectionTitle({title, end}: {title: string; end?: ReactNode}) {
 }
 
 function SpecDetails({spec}: {spec: Partial<AgentSpec>}) {
-  const scopes = (spec.knowledgeScopes ?? []).map((s) => SCOPE_LABELS[s] ?? s);
+  const scopes = (spec.knowledgeScopes ?? []).map(scopeLabel);
   return (
     <VStack gap={3}>
       <Detail label="Name">{spec.name || NOT_SET}</Detail>
       <Detail label="Goal">{spec.goal || NOT_SET}</Detail>
-      <Detail label="Template">{spec.template ? TEMPLATE_LABELS[spec.template] : NOT_SET}</Detail>
+      <Detail label="Template">{spec.template ? agentTemplateLabel(spec.template) : NOT_SET}</Detail>
       <Detail label="Channel">{spec.channel ? CHANNEL_LABELS[spec.channel] : NOT_SET}</Detail>
       <Detail label="Greeting">{spec.greeting || NOT_SET}</Detail>
       <Detail label="Knowledge it can use">{scopes.length ? scopes.join(', ') : NOT_SET}</Detail>
@@ -133,7 +133,7 @@ function ProposedChangeRow({businessId, approvalId, bundleType}: {businessId: st
   return (
     <Banner
       status="warning"
-      title={`${BUNDLE_LABELS[bundleType] ?? 'Change'} waits for your decision`}
+      title={`${bundleLabel(bundleType)} waits for your decision`}
       description="Nothing changes until you approve it in Approvals."
       collapsible={false}
       endContent={<Button label="Review in Approvals" variant="primary" size="sm" href={`/approvals?id=${encodeURIComponent(approvalId)}`} />}>
@@ -297,7 +297,7 @@ export function SpecPanel({businessId}: {businessId: string}) {
               description={
                 createError.code === 'CAPABILITY_NOT_ALLOWED'
                   ? 'This spec asks for a capability that is not allowed.'
-                  : createError.message
+                  : errorText(createError)
               }
               endContent={createError.retryable ? <Button label="Try again" size="sm" onClick={() => void onContinue()} /> : undefined}>
               {createError.correlationId ? <Text type="supporting">Reference: {createError.correlationId}</Text> : null}

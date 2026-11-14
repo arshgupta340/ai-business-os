@@ -24,7 +24,8 @@ import {formatDateTime, formatRelative} from '@/lib/format';
 import {useBusiness} from '@/lib/session';
 import {statusView} from '@/lib/status';
 import {SCOPE_LABELS, groupCapabilities} from '../../../build/_lib/spec';
-import {callTitle, templateLabel, versionLabel} from '../../../overview/_components/overview-logic';
+import {agentTemplateLabel} from '@/lib/labels';
+import {callTitle, versionLabel} from '../../../overview/_components/overview-logic';
 import {ErrorNotice} from '../../_components/ErrorNotice';
 import {answersNumber, canOfferPause, shownSpec} from '../../_lib/agents-view';
 import {ChangeAgentField} from './ChangeAgentField';
@@ -160,7 +161,7 @@ export function AgentDetailScreen({agentId}: {agentId: string}) {
     <VStack gap={6}>
       <PageHeader
         title={data.name}
-        description={`${templateLabel(data.template)}, ${business.name}`}
+        description={`${agentTemplateLabel(data.template)}, ${business.name}`}
         actions={
           <>
             <Button label="Preview and test" href={`${base}/preview`} />

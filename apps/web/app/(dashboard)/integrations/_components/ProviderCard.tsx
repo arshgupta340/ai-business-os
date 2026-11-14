@@ -7,9 +7,9 @@ import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {SandboxBadge} from '@/components/SandboxBadge';
 import {StatusBadge} from '@/components/StatusBadge';
-import {PROVIDER_LABELS} from '@/components/shell/ConnectionHealth';
 import type {IntegrationHealthEntry, IntegrationProvider} from '@/lib/api';
 import {formatDateTime, formatRelative} from '@/lib/format';
+import {providerLabel} from '@/lib/labels';
 import {statusView} from '@/lib/status';
 import {PROVIDER_PURPOSE, channelText, consequenceFor} from '../_lib/integrations-view';
 
@@ -32,7 +32,7 @@ export function ProviderCard({
       <VStack gap={2}>
         <HStack gap={2} justify="between" vAlign="center" wrap="wrap">
           <Heading level={3}>
-            {PROVIDER_LABELS[provider]}
+            {providerLabel(provider)}
           </Heading>
           <HStack gap={2} vAlign="center">
             {/* Square always runs in sandbox; the label shows even when environment is missing. */}

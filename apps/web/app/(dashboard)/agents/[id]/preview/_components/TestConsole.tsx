@@ -23,7 +23,9 @@ import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {StatusBadge} from '@/components/StatusBadge';
 import {isApiError, useAgentConversation, type AgentSpec, type ApiError, type ConversationTurn} from '@/lib/api';
-import {activityHref, CONFIRM_REPLY, guardrailLabel, startersFor, type ConsoleMode, type SimCallGate} from '../_lib/preview';
+import {errorText} from '@/lib/error-text';
+import {guardrailLabel, providerLabel} from '@/lib/labels';
+import {activityHref, CONFIRM_REPLY, startersFor, type ConsoleMode, type SimCallGate} from '../_lib/preview';
 import {ToolTrace} from './ToolTrace';
 
 const MODE_LABELS: Record<ConsoleMode, string> = {
@@ -66,15 +68,15 @@ function OwnerTurn({text, status}: {text: string; status?: 'sending' | 'error'})
 }
 
 function errorCopy(error: ApiError | Error, mode: ConsoleMode): {title: string; description: string} {
-  if (!isApiError(error)) return {title: 'Your message was not sent', description: error.message};
+  if (!isApiError(error)) return {title: 'Your message was not sent', description: errorText(error)};
   if (error.code === 'INVALID_STATE' && mode === 'sim-call') {
     return {
       title: 'A simulated call is not possible now',
-      description: `${error.message} A simulated call needs a published, live agent, and a call that has not ended.`,
+      description: 'A simulated call needs a published, live agent, and a call that has not ended.',
     };
   }
   if (error.code === 'INTEGRATION_UNAVAILABLE') {
-    const provider = typeof error.details?.provider === 'string' ? error.details.provider : 'A provider';
+    const provider = typeof error.details?.provider === 'string' ? providerLabel(error.details.provider) : 'A provider';
     return {
       title: 'The agent is not available right now',
       description: `${provider} is not responding.`,
@@ -86,7 +88,7 @@ function errorCopy(error: ApiError | Error, mode: ConsoleMode): {title: string; 
       description: 'Start a new one with Reset conversation.',
     };
   }
-  return {title: 'Your message was not sent', description: error.message};
+  return {title: 'Your message was not sent', description: errorText(error)};
 }
 
 type Failed = {text: string; error: ApiError | Error; isEnd: boolean};

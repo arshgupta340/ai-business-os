@@ -13,7 +13,8 @@ import {
   type IntegrationHealthEntry,
   type IntegrationProvider,
 } from '@/lib/api';
-import {PROVIDER_LABELS} from '@/components/shell/ConnectionHealth';
+import {errorCodeText, errorText as sharedErrorText, NETWORK_ERROR_TEXT} from '@/lib/error-text';
+import {actionProgressLabel, eventTypeLabel, messageChannelLabel, providerLabel} from '@/lib/labels';
 import {statusView} from '@/lib/status';
 
 /** The event types this screen lists as integration events. */
@@ -31,13 +32,7 @@ export const PROVIDER_PURPOSE: Record<IntegrationProvider, string> = {
 
 export type Channel = NonNullable<IntegrationHealthEntry['channel']>;
 
-export const CHANNEL_LABEL: Record<Channel, string> = {
-  surge: 'Surge text message',
-  android_gateway: 'Text message from the Android phone',
-  whatsapp_sandbox: 'WhatsApp sandbox',
-  qr_only: 'QR code only',
-  agentphone: 'AgentPhone text message',
-};
+// Channel names come from MESSAGE_CHANNEL_LABELS in '@/lib/labels'.
 
 /** The sentence about the active message channel. */
 export function channelText(channel: Channel | undefined): string {
@@ -45,7 +40,7 @@ export function channelText(channel: Channel | undefined): string {
   if (channel === 'qr_only') {
     return 'Active channel: QR code only. Links are shown as a QR code on the Live operations screen and no message is sent.';
   }
-  return `Active channel: ${CHANNEL_LABEL[channel] ?? channel}.`;
+  return `Active channel: ${messageChannelLabel(channel)}.`;
 }
 
 export type Consequence = {
@@ -125,22 +120,13 @@ const CONSEQUENCES: Record<IntegrationProvider, Record<'degraded' | 'disconnecte
 /** What the owner notices and what to do, or null when the provider is connected. */
 export function consequenceFor(provider: IntegrationProvider, state: IntegrationHealthEntry['state']): Consequence | null {
   if (state === 'connected') return null;
-  return CONSEQUENCES[provider]?.[state] ?? null;
+  // Object.hasOwn keeps inherited names such as "constructor" from passing as a provider or a state.
+  if (typeof provider !== 'string' || !Object.hasOwn(CONSEQUENCES, provider)) return null;
+  const byState: Record<string, Consequence> = CONSEQUENCES[provider];
+  return typeof state === 'string' && Object.hasOwn(byState, state) ? byState[state] : null;
 }
 
-const STEP_LABEL: Record<string, string> = {
-  'square.checkout.create': 'Creating the Square checkout link (sandbox)',
-  'message.checkout.send': 'Sending the payment link to the customer',
-  'calendar.event.create': 'Creating the calendar booking',
-  'message.booking.confirm': 'Sending the booking confirmation',
-  'sheets.order.append': 'Adding the order to the report sheet',
-  'sheets.booking.append': 'Adding the booking to the report sheet',
-  'square.catalog.price.update': 'Changing the price in Square (sandbox)',
-  'local.order.record': 'Saving the order',
-  'local.booking.record': 'Saving the booking',
-  'local.fact.update': 'Saving the business fact',
-  'local.catalog.sync': 'Refreshing the menu from Square',
-};
+// Step names come from actionProgressLabel in '@/lib/labels'.
 
 export type IntegrationEventLine = {title: string; payment: boolean};
 
@@ -149,10 +135,9 @@ export function describeIntegrationEvent(event: ActivityEvent): IntegrationEvent
   switch (event.type) {
     case 'webhook.rejected': {
       const p = payloadOf({...event, type: 'webhook.rejected'});
-      // AgentPhone sends webhooks but has no health card of its own, so it is not in PROVIDER_LABELS.
-      const provider = p.provider === 'agentphone' ? 'AgentPhone' : PROVIDER_LABELS[p.provider] ?? p.provider;
+      const provider = providerLabel(p.provider);
       const why = p.reason === 'signature_invalid' ? 'its signature did not match' : 'it was malformed';
-      return {title: `Rejected a ${provider} webhook because ${why}. Nothing changed.`, payment: p.provider === 'square'};
+      return {title: `Rejected a webhook from ${provider} because ${why}. Nothing changed.`, payment: p.provider === 'square'};
     }
     case 'sync.failed': {
       const p = payloadOf({...event, type: 'sync.failed'});
@@ -172,22 +157,25 @@ export function describeIntegrationEvent(event: ActivityEvent): IntegrationEvent
     case 'message.failed': {
       const p = payloadOf({...event, type: 'message.failed'});
       const label = statusView('messageDispatch', p.status).label;
-      const channel = CHANNEL_LABEL[p.channel as Channel];
-      return {title: channel ? `${label} (${channel}).` : `${label}.`, payment: false};
+      return {title: `${label} (${messageChannelLabel(p.channel)}).`, payment: false};
     }
     case 'execution.failed': {
       const p = payloadOf({...event, type: 'execution.failed'});
-      const step = STEP_LABEL[p.actionType] ?? p.actionType;
-      return {title: `Step failed: ${step}.`, payment: p.actionType.startsWith('square.')};
+      return {title: `Step failed: ${actionProgressLabel(p.actionType)}.`, payment: p.actionType.startsWith('square.')};
     }
     default:
-      return {title: event.type, payment: false};
+      // Only INTEGRATION_EVENT_TYPES reach this today. Any other type gets its short title, never the raw type.
+      return {title: `${eventTypeLabel((event as ActivityEvent).type)}.`, payment: false};
   }
 }
 
-/** Owner-facing text for an error (screen data map, rule 9). */
+/**
+ * Owner-facing text for an error (screen data map, rule 9). The codes this
+ * screen handles keep their own sentence. Every other code reads the shared
+ * sentence for the code, never the server message.
+ */
 export function errorText(error: unknown): string {
-  if (!isApiError(error)) return 'Something went wrong. Try again.';
+  if (!isApiError(error)) return sharedErrorText(error);
   switch (error.code) {
     case 'UNAUTHENTICATED':
       return 'You are signed out. Sign in again.';
@@ -197,12 +185,12 @@ export function errorText(error: unknown): string {
       return 'Not found in this business.';
     case 'INTEGRATION_UNAVAILABLE': {
       const raw = error.details?.provider;
-      const name = typeof raw === 'string' ? (PROVIDER_LABELS[raw as IntegrationProvider] ?? raw) : 'A provider';
+      const name = typeof raw === 'string' ? providerLabel(raw) : 'A provider';
       return `${name} is not responding.`;
     }
     default:
-      if (error.kind === 'network') return 'Could not reach the server.';
-      return error.message;
+      if (error.kind === 'network') return NETWORK_ERROR_TEXT;
+      return errorCodeText(error.code);
   }
 }
 

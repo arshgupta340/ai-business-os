@@ -3,6 +3,7 @@ import {cleanup, fireEvent, render, screen, waitFor} from '@testing-library/reac
 import {http, HttpResponse} from 'msw';
 import {QueryClientProvider} from '@tanstack/react-query';
 import {afterEach, describe, expect, it} from 'vitest';
+import {ERROR_TEXT} from '@/lib/error-text';
 import {createApiQueryClient} from '@/lib/api';
 import {BusinessProvider} from '@/lib/session';
 import {BUSINESS_STORAGE_KEY} from '@/lib/session/business-selection';
@@ -113,7 +114,8 @@ describe('TelemetryScreen', () => {
     );
     renderScreen();
     expect(await screen.findByText('Could not load telemetry', {}, {timeout: 8000})).toBeTruthy();
-    expect(screen.getByText('Telemetry is not available.')).toBeTruthy();
+    expect(screen.getByText(ERROR_TEXT.INTERNAL)).toBeTruthy();
+    expect(screen.queryByText('Telemetry is not available.')).toBeNull();
     failing = false;
     fireEvent.click(screen.getByRole('button', {name: 'Try again'}));
     expect(await screen.findByRole('heading', {name: 'Time to first audio'})).toBeTruthy();

@@ -1,4 +1,5 @@
 import {describe, expect, it} from 'vitest';
+import {ERROR_TEXT} from '@/lib/error-text';
 import {ApiError, type ActivityEvent, type AgentSpec, type AgentVersion} from '@/lib/api';
 import {
   canRollBack,
@@ -247,7 +248,8 @@ describe('rollbackErrorView with the real builder answers', () => {
     const view = rollbackErrorView(
       real('VALIDATION_FAILED', 'The agent spec is not complete.', {issues: [{path: 'greeting', message: 'Required'}]}, 400, false),
     );
-    expect(view.message).toMatch(/The agent spec is not complete\./);
-    expect(view.message).toMatch(/Nothing changed/);
+    // The main text is the sentence for the code. The server message is not shown.
+    expect(view.message).toBe(`${ERROR_TEXT.VALIDATION_FAILED} Nothing changed.`);
+    expect(view.message).not.toMatch(/The agent spec is not complete/);
   });
 });

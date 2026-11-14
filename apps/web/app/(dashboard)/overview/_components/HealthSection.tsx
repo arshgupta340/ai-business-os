@@ -10,25 +10,23 @@ import {VStack} from '@astryxdesign/core/VStack';
 import {LoadingState} from '@/components/LoadingState';
 import {SandboxBadge} from '@/components/SandboxBadge';
 import {StatusBadge} from '@/components/StatusBadge';
-import {PROVIDER_LABELS, summarizeHealth} from '@/components/shell/ConnectionHealth';
+import {HEALTH_PROVIDERS, summarizeHealth} from '@/components/shell/ConnectionHealth';
 import {useIntegrationsHealth, type IntegrationHealthEntry, type IntegrationProvider} from '@/lib/api';
 import {formatRelative} from '@/lib/format';
+import {messageChannelLabel, providerLabel} from '@/lib/labels';
 import {statusView} from '@/lib/status';
 import {BlockError} from './BlockError';
 
-const CHANNEL_LABEL: Record<NonNullable<IntegrationHealthEntry['channel']>, string> = {
-  surge: 'Surge',
-  android_gateway: 'Android gateway',
-  whatsapp_sandbox: 'WhatsApp sandbox',
-  qr_only: 'QR code only, no message is sent',
-  agentphone: 'AgentPhone',
-};
+/** The active channel, named as on the Integrations screen. QR only says that no message is sent. */
+export function healthChannelText(channel: unknown): string {
+  return channel === 'qr_only' ? 'QR code only, no message is sent' : messageChannelLabel(channel);
+}
 
 function describeEntry(provider: IntegrationProvider, entry: IntegrationHealthEntry, timeZone: string): string {
   const parts: string[] = [];
   // A server note may end with its own period; the parts are joined with one.
   if (entry.detail) parts.push(entry.detail.replace(/\.+$/, ''));
-  if (provider === 'message_channel' && entry.channel) parts.push(CHANNEL_LABEL[entry.channel] ?? entry.channel);
+  if (provider === 'message_channel' && entry.channel) parts.push(healthChannelText(entry.channel));
   parts.push(`Checked ${formatRelative(entry.lastCheckedAt, timeZone)}`);
   return parts.join('. ');
 }
@@ -50,14 +48,14 @@ export function HealthSection({businessId, timeZone}: {businessId: string; timeZ
       <VStack gap={2}>
         <Text type="supporting">{summary.detail}</Text>
         <List hasDividers edge="bleed" density="compact">
-          {(Object.keys(PROVIDER_LABELS) as IntegrationProvider[]).map((provider) => {
+          {HEALTH_PROVIDERS.map((provider) => {
             const entry = health.data[provider];
             if (!entry) return null;
             const view = statusView('integration', entry.state);
             return (
               <ListItem
                 key={provider}
-                label={PROVIDER_LABELS[provider]}
+                label={providerLabel(provider)}
                 description={describeEntry(provider, entry, timeZone)}
                 endContent={
                   <HStack gap={2} vAlign="center">

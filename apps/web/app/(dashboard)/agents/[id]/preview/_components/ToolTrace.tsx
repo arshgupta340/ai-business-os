@@ -14,14 +14,13 @@ import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {SandboxBadge} from '@/components/SandboxBadge';
 import {StatusBadge} from '@/components/StatusBadge';
+import {effectLabel, toolLabel} from '@/lib/labels';
 import {
   approvalHref,
-  EFFECT_LABELS,
   isMockApproval,
   prettyJson,
   summarizeInput,
   summarizeOutput,
-  toolLabel,
   type ConsoleMode,
   type TraceEntry,
 } from '../_lib/preview';
@@ -39,7 +38,7 @@ function TraceRow({entry, mode}: {entry: TraceEntry; mode: ConsoleMode}) {
             <Text type="label" weight="semibold">
               {toolLabel(entry.tool)}
             </Text>
-            <StatusBadge label={EFFECT_LABELS[entry.effect] ?? entry.effect} tone={entry.effect === 'propose' ? 'info' : 'neutral'} />
+            <StatusBadge label={effectLabel(entry.effect)} tone={entry.effect === 'propose' ? 'info' : 'neutral'} />
             {entry.mocked ? <StatusBadge label="Mock" tone="neutral" /> : <StatusBadge label="Real tool" tone="info" />}
           </HStack>
           <Text type="supporting">

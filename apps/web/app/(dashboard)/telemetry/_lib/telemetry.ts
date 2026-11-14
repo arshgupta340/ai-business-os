@@ -7,6 +7,9 @@
  * docs/PRD.md section 2 (the only latency goals the PRD states).
  */
 
+import type {TelemetryMetricName} from '@abos/contracts';
+import {readableLabel} from '@/lib/status';
+
 /** The fields of one metric as the API returns it. `name` is a string so an unknown name still renders. */
 export type MetricInput = {name: string; p50Ms: number; p95Ms: number; count: number};
 
@@ -32,7 +35,7 @@ type MetricInfo = {label: string; description: string; goal?: MetricGoal};
  * states no goal for answer time, approval time or webhook delay, so those
  * show none.
  */
-export const METRIC_INFO: Record<string, MetricInfo> = {
+export const METRIC_INFO: Record<TelemetryMetricName, MetricInfo> = {
   call_answer_latency: {
     label: 'Time to answer a call',
     description: 'How long a caller waits for the agent to answer.',
@@ -122,7 +125,10 @@ export type MetricView = {
 };
 
 export function metricView(metric: MetricInput): MetricView {
-  const info = METRIC_INFO[metric.name];
+  // Object.hasOwn keeps inherited names such as "constructor" from passing as a metric.
+  const info: MetricInfo | undefined = Object.hasOwn(METRIC_INFO, metric.name)
+    ? METRIC_INFO[metric.name as TelemetryMetricName]
+    : undefined;
   const count = Math.max(0, Math.floor(metric.count));
   const hasData = count > 0;
   const goal = info?.goal;
@@ -135,7 +141,8 @@ export function metricView(metric: MetricInput): MetricView {
   const scaleMaxMs = Math.max(metric.p50Ms, metric.p95Ms, goal?.maxMs ?? 0, 1) * 1.1;
   return {
     name: metric.name,
-    label: info?.label ?? metric.name,
+    // A metric this app does not know shows in a readable form, never by its raw name.
+    label: info?.label ?? readableLabel(metric.name, 'Other metric'),
     description: info?.description,
     isKnown: !!info,
     hasData,

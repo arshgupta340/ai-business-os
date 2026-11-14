@@ -15,12 +15,13 @@ import {
   type Effect,
   type CapabilityId,
 } from '@/lib/api';
+import {errorText} from '@/lib/error-text';
 import type {Tone} from '@/lib/status';
 import {
   ESCALATION_LABELS,
   groupCapabilities,
   isRegisteredCapability,
-  SCOPE_LABELS,
+  scopeLabel,
   WRITE_POLICY_LABELS,
   type CapabilityGroupKey,
 } from '../../../../build/_lib/spec';
@@ -75,7 +76,7 @@ const text = (value: string | undefined) => (value && value.trim() ? value : NOT
 
 function scopesText(scopes: Spec['knowledgeScopes']): string {
   if (!scopes || scopes.length === 0) return NOT_SET;
-  return scopes.map((s) => SCOPE_LABELS[s] ?? s).join(', ');
+  return scopes.map(scopeLabel).join(', ');
 }
 
 function sameSet(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
@@ -368,7 +369,7 @@ export function rollbackErrorView(error: ApiError): RollbackErrorView {
     case 'VALIDATION_FAILED':
       return {
         title: 'The rollback request was not accepted',
-        message: `${error.message ? `${error.message} ` : ''}Nothing changed.`,
+        message: `${errorText(error)} Nothing changed.`,
         next: 'none',
         correlationId,
       };
@@ -387,7 +388,7 @@ export function rollbackErrorView(error: ApiError): RollbackErrorView {
       }
       return {
         title: 'The rollback did not go through',
-        message: error.message || 'Something went wrong on the server.',
+        message: errorText(error),
         next: error.retryable ? 'retry' : 'none',
         correlationId,
       };

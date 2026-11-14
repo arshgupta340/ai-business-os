@@ -4,6 +4,7 @@
  */
 import {payloadOf, type ActivityEvent, type Agent, type Booking, type Call, type Order} from '@/lib/api';
 import {formatDateTime, formatMoney} from '@/lib/format';
+import {actionLabel, eventTypeLabel, factKeyLabel, factKindLabel, providerLabel} from '@/lib/labels';
 import {statusView} from '@/lib/status';
 
 // ------------------------------------------------------------- time zones
@@ -193,15 +194,7 @@ export function businessFlow(category: string | undefined): BusinessFlow {
 
 // ------------------------------------------------------------------ agents
 
-const TEMPLATE_LABEL: Record<Agent['template'], string> = {
-  restaurant_order_taker: 'Order taker',
-  appointment_booker: 'Appointment booker',
-  custom: 'Custom agent',
-};
-
-export function templateLabel(template: Agent['template']): string {
-  return TEMPLATE_LABEL[template] ?? template;
-}
+// Template names come from agentTemplateLabel in '@/lib/labels'.
 
 /** "Version 2" from the active version, or a note when nothing is published. */
 export function versionLabel(agent: Agent): string {
@@ -269,11 +262,11 @@ export function describeEvent(
     case 'approval.expired':
       return {title: 'Approval expired, nothing was done', payment: false};
     case 'execution.started':
-      return {title: `Step started: ${humanize(payloadOf({...event, type: 'execution.started'}).actionType)}`, payment: false};
+      return {title: `Step started: ${actionLabel(payloadOf({...event, type: 'execution.started'}).actionType)}`, payment: false};
     case 'execution.succeeded':
-      return {title: `Step done: ${humanize(payloadOf({...event, type: 'execution.succeeded'}).actionType)}`, payment: false};
+      return {title: `Step done: ${actionLabel(payloadOf({...event, type: 'execution.succeeded'}).actionType)}`, payment: false};
     case 'execution.failed':
-      return {title: `Step failed: ${humanize(payloadOf({...event, type: 'execution.failed'}).actionType)}`, payment: false};
+      return {title: `Step failed: ${actionLabel(payloadOf({...event, type: 'execution.failed'}).actionType)}`, payment: false};
     case 'checkout.created': {
       const p = payloadOf({...event, type: 'checkout.created'});
       const total = money(p.totalMinor, p.currency);
@@ -322,7 +315,7 @@ export function describeEvent(
     }
     case 'fact.changed': {
       const p = payloadOf({...event, type: 'fact.changed'});
-      return {title: `Business fact updated: ${p.kind} ${p.key}`, payment: false};
+      return {title: `Business fact updated: ${factKindLabel(p.kind)}, ${factKeyLabel(p.kind, p.key)}`, payment: false};
     }
     case 'extraction.completed': {
       const p = payloadOf({...event, type: 'extraction.completed'});
@@ -347,15 +340,10 @@ export function describeEvent(
       return {title: 'The agent refused a request it may not handle', payment: false};
     case 'webhook.rejected': {
       const p = payloadOf({...event, type: 'webhook.rejected'});
-      const provider = p.provider === 'square' ? 'Square' : p.provider === 'twilio' ? 'Twilio' : 'A';
-      return {title: `${provider} webhook rejected, nothing changed`, payment: p.provider === 'square'};
+      return {title: `${providerLabel(p.provider)} webhook rejected, nothing changed`, payment: p.provider === 'square'};
     }
     default:
-      return {title: humanize(String((event as ActivityEvent).type)), payment: false};
+      // A type this app does not know gets a generic title, never the raw type.
+      return {title: eventTypeLabel((event as ActivityEvent).type), payment: false};
   }
-}
-
-/** "create_checkout" -> "create checkout". */
-function humanize(value: string): string {
-  return value.replace(/[._]/g, ' ');
 }

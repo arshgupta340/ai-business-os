@@ -1,4 +1,5 @@
 import {describe, expect, it} from 'vitest';
+import {ERROR_TEXT} from '@/lib/error-text';
 import {ApiError, type BuilderTurnResponse} from '@/lib/api';
 import {
   builderSendErrorView,
@@ -228,9 +229,9 @@ describe('builder turn answers from the real server', () => {
     expect(view.canRetry).toBe(true);
   });
 
-  it('falls back to the server message for anything else', () => {
-    const view = builderSendErrorView(err('INTERNAL', 'Something went wrong.', {}, 500, true));
-    expect(view.description).toBe('Something went wrong.');
+  it('shows the sentence for the code for anything else, never the server message', () => {
+    const view = builderSendErrorView(err('INTERNAL', 'Operation failed: INTERNAL.', {}, 500, true));
+    expect(view.description).toBe(ERROR_TEXT.INTERNAL);
     expect(view.canRetry).toBe(true);
   });
 });
