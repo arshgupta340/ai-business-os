@@ -35,6 +35,10 @@ export function createDbRecoveryPorts(deps: Pick<SeamDeps, 'db' | 'now' | 'newId
   lookupTimeoutMs?: number;
 }): RecoveryPorts {
   const { db, providers } = deps;
+  // The module looks up provider evidence inside withRecovery, so the lookup must not open its own
+  // database query (one connection per transaction). The step's saved Square references are read
+  // with the record, in the transaction, and kept here for the lookup.
+  const savedRefs = new WeakMap<RecoveryRecord, { squareOrderId?: string | undefined; paymentLinkId?: string | undefined }>();
 
   function transaction(tx: QueryDb, scope: { businessId: string; id: string }): RecoveryTransaction {
     return {
@@ -49,6 +53,8 @@ export function createDbRecoveryPorts(deps: Pick<SeamDeps, 'db' | 'now' | 'newId
         if (!a) return undefined;
         const approval = approvalFromRow(a);
         const record: RecoveryRecord = { execution: executionFromRow(e), approval };
+        const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
+        savedRefs.set(record, { squareOrderId: str(e.square_order_id) ?? str(e.external_ref), paymentLinkId: str(e.square_payment_link_id) });
         if (approval.bundleType === 'order_bundle') {
           const o = await one(tx, 'select * from public.orders where id = $1 and business_id = $2 for update', [approval.subjectId, scope.businessId]);
           if (o) record.order = orderFromDbRow(o);
@@ -97,11 +103,11 @@ export function createDbRecoveryPorts(deps: Pick<SeamDeps, 'db' | 'now' | 'newId
       try {
         if (e.actionType === 'square.checkout.create' && record.order) {
           // Evidence needs the Square order the step created: saved by save_checkout, or kept on the step.
-          const raw = await one(db, 'select square_order_id, square_payment_link_id, external_ref from public.action_executions where id = $1', [e.id]);
-          const squareOrderId = typeof raw?.square_order_id === 'string' ? raw.square_order_id : typeof raw?.external_ref === 'string' ? raw.external_ref : record.order.squareOrderId;
+          const raw = savedRefs.get(record);
+          const squareOrderId = raw?.squareOrderId ?? record.order.squareOrderId;
           if (!squareOrderId || !providers.square) return unknown;
           const square = providers.square;
-          const paymentLinkId = typeof raw?.square_payment_link_id === 'string' ? raw.square_payment_link_id : record.order.squarePaymentLinkId;
+          const paymentLinkId = raw?.paymentLinkId ?? record.order.squarePaymentLinkId;
           // Read only: reads the link back and checks its total against the approved total.
           const refs = await bounded(deps.lookupTimeoutMs ?? RECOVERY_LOOKUP_TIMEOUT_MS, () => square.resumeCheckout({
             squareOrderId, ...(paymentLinkId ? { paymentLinkId } : {}), approvedTotalMinor: record.order!.totalMinor, currency: record.order!.currency, idempotencyKey: e.idempotencyKey }));

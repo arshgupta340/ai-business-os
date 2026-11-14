@@ -308,7 +308,10 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
             order by created_at desc limit 1`, [p.businessId, p.subjectId]);
           if (pending) {
             const existing = approvalFromRow(pending);
-            return existing.payloadHash === input.payloadHash ? { kind: 'existing' as const, approval: existing } : { kind: 'conflict' as const };
+            // The same proposal again differs only in its expiry (read from the clock): return the pending one.
+            const { expiresAt: _a, ...had } = existing.payload as Record<string, unknown>;
+            const { expiresAt: _b, ...asked } = p as unknown as Record<string, unknown>;
+            return canonicalJson(had) === canonicalJson(asked) ? { kind: 'existing' as const, approval: existing } : { kind: 'conflict' as const };
           }
           const at = await dbNow(tx);
           const approval = await storeApproval(tx, 'price_edit', p as unknown as Record<string, unknown>, 'owner', input.ownerUserId);
