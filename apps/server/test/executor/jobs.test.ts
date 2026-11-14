@@ -98,10 +98,13 @@ describe('background timers', () => {
   it('executor start and concurrent tick calls never overlap, and stop drains the claim', async () => {
     vi.useFakeTimers(); const h = harness(); let release: () => void = () => {};
     const pending = new Promise<void>((resolve) => { release = resolve; });
-    vi.mocked(h.deps.checkout.createCheckout).mockImplementation(async () => { await pending;
+    let started: () => void = () => {};
+    const checkoutStarted = new Promise<void>((resolve) => { started = resolve; });
+    vi.mocked(h.deps.checkout.createCheckout).mockImplementation(async () => { started(); await pending;
       return { squareOrderId: 'order', paymentLinkId: 'link', url: 'https://example.test/pay' }; });
     const e = createExecutor(h.deps); e.start({ intervalMs: 10 }); e.start({ intervalMs: 10 });
-    await vi.advanceTimersByTimeAsync(50); expect(h.deps.checkout.createCheckout).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(50); await checkoutStarted;
+    expect(h.deps.checkout.createCheckout).toHaveBeenCalledTimes(1);
     const a = e.tick(); const b = e.tick(); expect(a).toBe(b);
     const stop = e.stop(); release(); await stop; await a;
     await vi.advanceTimersByTimeAsync(100); expect(h.deps.queue.claimNext).toHaveBeenCalledTimes(1);
