@@ -204,14 +204,20 @@ function conflictFromRow(r: Row): FactConflict {
 /**
  * `fact_conflicts` rows: the ones GET /api/businesses/:id/facts lists, publish refuses on, and
  * POST /api/conflicts/:id/resolve (api/conflicts.ts) resolves. One open conflict per business, kind
- * and key is the table's own unique index; a second insert fails there.
+ * and key is the table's own unique index (fact_conflicts_one_open). The builder looks for the open
+ * conflict and then inserts, in two calls, so two extractions that disagree on the same key can both
+ * find none. The second insert then writes nothing instead of failing its whole file: the key already
+ * has its open conflict, which is the state the builder wants ("a second disagreeing draft for the
+ * same key stays a draft without its own"). Any other violation (a repeated ID, fewer than two
+ * candidates) still fails.
  */
 export function dbConflictStore(db: Db): ConflictStore {
   const list = async (sql: string, params: unknown[]) => ((await db.query(sql, params)).rows as Row[]).map(conflictFromRow);
   return {
     async insert(c) {
       await db.query(`insert into public.fact_conflicts (id, business_id, kind, key, candidates, required, state, resolved_fact_id, resolved_by, resolved_at, created_at)
-        values ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11)`,
+        values ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11)
+        on conflict (business_id, kind, key) where state = 'open' do nothing`,
       [c.id, c.businessId, c.kind, c.key, JSON.stringify(c.candidates), c.required, c.state, c.resolvedFactId ?? null, c.resolvedBy ?? null, c.resolvedAt ?? null, c.createdAt]);
     },
     async get(businessId, id) {
