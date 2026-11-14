@@ -179,7 +179,7 @@ export type PreviewResponse = z.infer<typeof PreviewResponseSchema>;
 export const PublishBodySchema = z.strictObject({ confirm: z.literal(true), makeLive: z.boolean().optional() });
 export type PublishBody = z.infer<typeof PublishBodySchema>;
 
-export const RollbackBodySchema = z.strictObject({ toVersionId: AgentVersionIdSchema, confirm: z.literal(true) });
+export const RollbackBodySchema = z.strictObject({ toVersionId: AgentVersionIdSchema, confirm: z.literal(true), makeLive: z.boolean().optional() });
 export type RollbackBody = z.infer<typeof RollbackBodySchema>;
 
 /** The `agent` here may be a subset of the summary; `id` and `state` are always present. */

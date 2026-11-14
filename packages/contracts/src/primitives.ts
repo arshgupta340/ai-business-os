@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
-/** CONTRACTS 1: ISO 8601 UTC ending in `Z`. Offsets are refused. */
-export const IsoDateTimeSchema = z.iso.datetime();
+/** ISO 8601 timestamp with `Z` or a numeric offset; a zone is required. */
+export const IsoDateTimeSchema = z.iso.datetime({ offset: true });
 /** `YYYY-MM-DD`, read in the business timezone. */
 export const LocalDateSchema = z.iso.date();
 /** Local wall-clock time `HH:MM` (24 hour), used in hours facts. */
@@ -21,7 +21,7 @@ export const CurrencySchema = z.literal('USD');
 export type Currency = z.infer<typeof CurrencySchema>;
 /** Integer minor units, never negative. */
 export const MinorAmountSchema = z.int().min(0);
-/** Milliseconds from `from` to `to` (both ISO UTC strings already validated by `IsoDateTimeSchema`). */
+/** Milliseconds from `from` to `to` (both zoned ISO strings already validated by `IsoDateTimeSchema`). */
 export function msBetween(from: string, to: string): number {
   return Date.parse(to) - Date.parse(from);
 }

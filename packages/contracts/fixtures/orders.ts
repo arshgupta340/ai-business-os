@@ -157,7 +157,16 @@ export const orderPaymentFailed = order({
   square: { checkout: true },
 });
 
+/** A caller who declined messages can still place an order through the dashboard QR code. */
+export const orderQrOnly: Order = {
+  ...orderAwaitingApproval,
+  id: 'ord_demo_qr',
+  approvalId: 'apv_demo_qr',
+  contact: { name: 'Sam', messageConsent: false },
+};
+
 export const orders: Order[] = [
+  orderQrOnly,
   orderAwaitingApproval,
   orderPaymentFailed,
   orderRejected,

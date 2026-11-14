@@ -40,10 +40,10 @@ export const BusinessFactBaseSchema = z.object({
   updatedAt: IsoDateTimeSchema,
 });
 
-// DATA-MODEL 2.6 check: verifiedAt is absent exactly while the fact is a draft.
-export const BusinessFactSchema = BusinessFactBaseSchema.refine((f) => (f.status === 'draft') === (f.verifiedAt === undefined), {
+// Drafts have no verifiedAt; verified facts require it; superseded facts may retain it.
+export const BusinessFactSchema = BusinessFactBaseSchema.refine((f) => f.status === 'superseded' || (f.status === 'draft') === (f.verifiedAt === undefined), {
   path: ['verifiedAt'],
-  message: 'verifiedAt must be absent for a draft and present otherwise',
+  message: 'verifiedAt must be absent for a draft and present for a verified fact',
 });
 export type BusinessFact = z.infer<typeof BusinessFactSchema>;
 

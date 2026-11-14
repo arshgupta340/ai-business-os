@@ -206,7 +206,6 @@ export const liveAgentBarber = {
 export const liveAgentEmpty = {
   phoneNumber: DEMO_PHONE_NUMBER,
   businessId: PIZZA_BUSINESS_ID,
-  updatedAt: SEEDED_AT,
 } satisfies LiveAgent;
 
 // ---- Builder session, partway through (Flow A) ----

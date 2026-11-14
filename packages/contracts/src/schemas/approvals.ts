@@ -22,6 +22,7 @@ import {
   msBetween,
 } from '../primitives';
 import { APPROVAL_EXPIRY_MS } from '../constants';
+import { checkMessageConsent } from './orders';
 
 // SPEC 2.3: each bundle type carries exactly its own ordered action list.
 export const OrderBundleActionsSchema = z.tuple([
@@ -39,8 +40,18 @@ export const BookingBundleActionsSchema = z.tuple([
 export const FactEditActionsSchema = z.tuple([z.literal('local.fact.update')]);
 export const PriceEditActionsSchema = z.tuple([z.literal('square.catalog.price.update'), z.literal('local.catalog.sync')]);
 
-// CONTRACTS 4: the payload holds only material fields, all required, all hashed.
-export const OrderApprovalPayloadSchema = z.object({
+// Consent is optional validation metadata; SPEC 2.9 material fields remain unchanged.
+function checkMessageChannel(payload: { messageConsent?: boolean | undefined; messageRecipient?: string | undefined; messageChannel: string }, ctx: z.RefinementCtx): void {
+  checkMessageConsent(payload, ctx);
+  if (payload.messageChannel !== 'qr_only' && payload.messageRecipient === undefined) {
+    ctx.addIssue({ code: 'custom', path: ['messageRecipient'], message: 'A message channel requires messageRecipient' });
+  }
+  if (payload.messageConsent === false && payload.messageChannel !== 'qr_only') {
+    ctx.addIssue({ code: 'custom', path: ['messageChannel'], message: 'Declined messages require qr_only' });
+  }
+}
+
+export const OrderApprovalPayloadBaseSchema = z.object({
   businessId: BusinessIdSchema,
   subjectId: OrderIdSchema,
   agentVersionId: AgentVersionIdSchema, // always from the calls row (SPEC 2.9)
@@ -48,14 +59,16 @@ export const OrderApprovalPayloadSchema = z.object({
   totalMinor: MinorAmountSchema,
   currency: CurrencySchema,
   pickupAt: IsoDateTimeSchema,
-  messageRecipient: E164Schema,
+  messageRecipient: E164Schema.optional(),
+  messageConsent: z.boolean().optional(),
   messageChannel: MessageChannelSettingSchema, // the server's MESSAGE_CHANNEL at proposal time
   actionBundle: OrderBundleActionsSchema,
   expiresAt: IsoDateTimeSchema,
 });
+export const OrderApprovalPayloadSchema = OrderApprovalPayloadBaseSchema.superRefine(checkMessageChannel);
 export type OrderApprovalPayload = z.infer<typeof OrderApprovalPayloadSchema>;
 
-export const BookingApprovalPayloadSchema = z.object({
+export const BookingApprovalPayloadBaseSchema = z.object({
   businessId: BusinessIdSchema,
   subjectId: BookingIdSchema,
   agentVersionId: AgentVersionIdSchema,
@@ -64,11 +77,14 @@ export const BookingApprovalPayloadSchema = z.object({
   startUtc: IsoDateTimeSchema,
   endUtc: IsoDateTimeSchema,
   timezone: TimezoneSchema,
-  messageRecipient: E164Schema,
+  messageRecipient: E164Schema.optional(),
+  messageConsent: z.boolean().optional(),
   messageChannel: MessageChannelSettingSchema,
   actionBundle: BookingBundleActionsSchema,
   expiresAt: IsoDateTimeSchema,
-}).refine((p) => msBetween(p.startUtc, p.endUtc) > 0, { path: ['endUtc'], message: 'endUtc must be after startUtc' });
+});
+export const BookingApprovalPayloadSchema = BookingApprovalPayloadBaseSchema.superRefine(checkMessageChannel)
+  .refine((p) => msBetween(p.startUtc, p.endUtc) > 0, { path: ['endUtc'], message: 'endUtc must be after startUtc' });
 export type BookingApprovalPayload = z.infer<typeof BookingApprovalPayloadSchema>;
 
 export const FactEditApprovalPayloadSchema = z.object({
@@ -165,15 +181,18 @@ type ApprovalRequestShape = {
 /** Cross-field rules shared by the four request variants. */
 function checkApprovalRequest(a: ApprovalRequestShape, ctx: z.RefinementCtx): void {
   // The outer copies must be the fields that are hashed, or the UI could show one subject while the hash covers another.
-  for (const field of ['businessId', 'subjectId', 'expiresAt'] as const) {
+  for (const field of ['businessId', 'subjectId'] as const) {
     if (a[field] !== a.payload[field]) ctx.addIssue({ code: 'custom', path: [field], message: `${field} must equal payload.${field}` });
+  }
+  if (Math.abs(msBetween(a.expiresAt, a.payload.expiresAt)) > 2000) {
+    ctx.addIssue({ code: 'custom', path: ['expiresAt'], message: 'expiresAt must equal payload.expiresAt within 2 seconds' });
   }
   if (a.actionBundle.length !== a.payload.actionBundle.length || a.actionBundle.some((x, i) => x !== a.payload.actionBundle[i])) {
     ctx.addIssue({ code: 'custom', path: ['actionBundle'], message: 'actionBundle must equal payload.actionBundle' });
   }
   // SPEC 2.9: an approval expires 10 minutes after creation.
-  if (msBetween(a.createdAt, a.expiresAt) !== APPROVAL_EXPIRY_MS) {
-    ctx.addIssue({ code: 'custom', path: ['expiresAt'], message: 'expiresAt must be createdAt plus 10 minutes' });
+  if (Math.abs(msBetween(a.createdAt, a.expiresAt) - APPROVAL_EXPIRY_MS) > 2000) {
+    ctx.addIssue({ code: 'custom', path: ['expiresAt'], message: 'expiresAt must be createdAt plus 10 minutes within 2 seconds' });
   }
   // DATA-MODEL 2.14 checks: decidedAt is absent exactly while PENDING; decidedBy is present exactly when APPROVED or REJECTED.
   if ((a.state === 'PENDING') !== (a.decidedAt === undefined)) {

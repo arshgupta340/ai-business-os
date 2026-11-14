@@ -236,7 +236,10 @@ export const ACTIVITY_EVENT_PAYLOADS = {
     previousAgentId: AgentIdSchema.optional(),
   }),
   'guardrail.refused': z.object({
-    callId: CallIdSchema,
+    callId: CallIdSchema.optional(),
+    executionId: ExecutionIdSchema.optional(),
+    approvalId: ApprovalIdSchema.optional(),
+    reasonCode: z.string().min(1).max(64).regex(/^[A-Za-z0-9_][A-Za-z0-9_.:-]*$/),
     rule: GuardrailRuleSchema, // SPEC 2.9: the rule that fired
     toolName: z.string().optional(),
   }),

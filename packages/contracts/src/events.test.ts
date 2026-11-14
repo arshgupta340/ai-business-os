@@ -30,7 +30,7 @@ const SAMPLES: Record<ActivityEventType, Record<string, unknown>> = {
   'agent.published': { agentId: 'agt_pizza_01', agentVersionId: 'agv_pizza_01_v1', version: 1, rolledBackFrom: 'agv_pizza_01_v2' },
   'agent.paused': { agentId: 'agt_pizza_01' },
   'live_agent.changed': { phoneNumberLast4: '0199', agentId: 'agt_barber_01', agentVersionId: 'agv_barber_01_v1', previousAgentId: 'agt_pizza_01' },
-  'guardrail.refused': { callId: 'call_p01', rule: 'no_approval_bypass' },
+  'guardrail.refused': { callId: 'call_p01', rule: 'no_approval_bypass', reasonCode: 'approval_missing' },
   'webhook.rejected': { provider: 'square', reason: 'signature_invalid' },
 };
 

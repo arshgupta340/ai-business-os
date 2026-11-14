@@ -68,7 +68,8 @@ export async function hashCanonical(value: unknown): Promise<string> {
 
 /** SPEC 2.9 payload hash. Pass the payload exactly as stored (material fields only; see `pickMaterialFields`). */
 export async function payloadHash(payload: ApprovalPayload): Promise<string> {
-  return hashCanonical(payload);
+  const bundleType = 'cartHash' in payload ? 'order_bundle' : 'serviceId' in payload ? 'booking_bundle' : 'squareItemId' in payload ? 'price_edit' : 'fact_edit';
+  return approvalPayloadHash(bundleType, payload);
 }
 
 /**
@@ -125,8 +126,12 @@ export type PayloadFor<B extends BundleType> = {
  * so both hash the same fields. Throws a ZodError if a field is missing or malformed.
  */
 export function pickMaterialFields<B extends BundleType>(bundleType: B, source: Record<string, unknown>): PayloadFor<B> {
+  // Check consent metadata before selecting only SPEC 2.9's hash fields.
+  const validated = PAYLOAD_SCHEMAS[bundleType].parse(source) as Record<string, unknown>;
   const picked: Record<string, unknown> = {};
-  for (const field of MATERIAL_FIELDS[bundleType]) picked[field] = source[field];
+  for (const field of MATERIAL_FIELDS[bundleType]) {
+    if (validated[field] !== undefined) picked[field] = validated[field];
+  }
   return PAYLOAD_SCHEMAS[bundleType].parse(picked) as PayloadFor<B>;
 }
 

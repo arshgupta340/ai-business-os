@@ -134,7 +134,7 @@ describe('API.md examples', () => {
 
   it('3.6 live agent, including the empty case', () => {
     ok(LiveAgentSchema, { phoneNumber: '+15555550199', businessId: 'biz_pizza_01', agentId: 'agt_pizza_01', agentVersionId: 'agv_pizza_01_v2', updatedAt: '2026-11-13T19:30:00Z' });
-    ok(LiveAgentSchema, { phoneNumber: '+15555550199', businessId: 'biz_pizza_01', updatedAt: '2026-11-13T19:30:00Z' });
+    ok(LiveAgentSchema, { phoneNumber: '+15555550199', businessId: 'biz_pizza_01' });
   });
 
   it('3.7 approval and decision', () => {
@@ -236,7 +236,7 @@ describe('CONTRACTS.md examples', () => {
       read_catalog: { description: "Search this shop's menu. Use exact item, size and topping IDs from the result.", required: [] },
       read_business_facts: { description: 'Read verified opening hours, policies and services. Answer only from this result.', required: [] },
       quote_order: { description: 'Get the exact total and tax for a cart. Read the total back to the caller from this result only.', required: ['cart'] },
-      propose_order: { description: 'Send the confirmed order to the owner for approval. Call only after the caller confirmed the read-back of this quote and agreed to receive a payment link.', required: ['cart', 'contact', 'fulfillment', 'quoteId'] },
+      propose_order: { description: 'Send the confirmed order to the owner for approval. Call only after the caller confirmed the read-back of this quote. Record whether the caller consents to messages; without consent, omit the recipient and use the dashboard QR code.', required: ['cart', 'contact', 'fulfillment', 'quoteId'] },
       get_order_status: { description: 'Read the verified status of an order placed on this call.', required: ['orderId'] },
       read_calendar_availability: { description: 'List free appointment slots for one service on one date.', required: ['serviceId', 'date'] },
       propose_booking: { description: 'Send the confirmed appointment to the owner for approval. Call only after the caller confirmed service, time and contact.', required: ['serviceId', 'startUtc', 'customer'] },

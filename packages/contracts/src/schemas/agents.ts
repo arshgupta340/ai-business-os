@@ -114,7 +114,7 @@ export const LiveAgentSchema = z.object({
   businessId: BusinessIdSchema,
   agentId: AgentIdSchema.optional(),
   agentVersionId: AgentVersionIdSchema.optional(),
-  updatedAt: IsoDateTimeSchema,
+  updatedAt: IsoDateTimeSchema.optional(),
 });
 export type LiveAgent = z.infer<typeof LiveAgentSchema>;
 

@@ -4,11 +4,27 @@ import { ApprovalIdSchema, BookingIdSchema, BusinessIdSchema, CallIdSchema, Orde
 import { CurrencySchema, E164Schema, IsoDateTimeSchema, MinorAmountSchema, Sha256HashSchema, TimezoneSchema, msBetween } from '../primitives';
 import { CartSchema, QuoteSchema } from './catalog';
 
-export const ContactSchema = z.object({
+/** Shared by contacts, customers and approval payloads (whose consent metadata is optional). */
+export function checkMessageConsent(value: { messageConsent?: boolean | undefined; messageRecipient?: string | undefined }, ctx: z.RefinementCtx): void {
+  if (value.messageConsent === true && value.messageRecipient === undefined) {
+    ctx.addIssue({ code: 'custom', path: ['messageRecipient'], message: 'Consent requires a messageRecipient' });
+  }
+  if (value.messageConsent === false && value.messageRecipient !== undefined) {
+    ctx.addIssue({ code: 'custom', path: ['messageRecipient'], message: 'messageRecipient must be absent without consent' });
+  }
+}
+
+export const ContactBaseSchema = z.object({
   name: z.string().min(1),
-  messageRecipient: E164Schema,
-  messageConsent: z.literal(true), // CONTRACTS 3: must be true
-  consentAt: IsoDateTimeSchema,
+  messageRecipient: E164Schema.optional(),
+  messageConsent: z.boolean(),
+  consentAt: IsoDateTimeSchema.optional(),
+});
+export const ContactSchema = ContactBaseSchema.superRefine((contact, ctx) => {
+  checkMessageConsent(contact, ctx);
+  if (contact.messageConsent && contact.consentAt === undefined) {
+    ctx.addIssue({ code: 'custom', path: ['consentAt'], message: 'Consent requires consentAt' });
+  }
 });
 export type Contact = z.infer<typeof ContactSchema>;
 
@@ -58,11 +74,12 @@ export const OrderSchema = OrderBaseSchema.superRefine((o, ctx) => {
 });
 export type Order = z.infer<typeof OrderSchema>;
 
-export const BookingCustomerSchema = z.object({
+export const BookingCustomerBaseSchema = z.object({
   name: z.string().min(1),
-  messageRecipient: E164Schema,
+  messageRecipient: E164Schema.optional(),
   messageConsent: z.boolean(),
 });
+export const BookingCustomerSchema = BookingCustomerBaseSchema.superRefine(checkMessageConsent);
 export type BookingCustomer = z.infer<typeof BookingCustomerSchema>;
 
 export const BookingBaseSchema = z.object({

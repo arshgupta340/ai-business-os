@@ -216,6 +216,18 @@ describe('propose_order', () => {
     expect(await ts.handler.call('propose_order', noRecipient, pizzaCtx)).toMatchObject({ ok: false, reason: 'VALIDATION_FAILED' });
   });
 
+  it('accepts an order without message consent or a recipient and lists only missing names', async () => {
+    const ts = createMockToolset({ businessId: PIZZA });
+    const q = await quote(ts, twoPizzas);
+    const contact = { name: 'Sam', messageConsent: false };
+    const missing = await ts.tools.propose_order({ cart: twoPizzas, contact: { ...contact, name: ' ' }, fulfillment, quoteId: q.quoteId }, pizzaCtx);
+    expectValid('propose_order', missing);
+    expect(missing).toEqual({ ok: true, quote: q, missingFields: ['contact.name'] });
+    const result = await ts.tools.propose_order({ cart: twoPizzas, contact, fulfillment, quoteId: q.quoteId }, pizzaCtx);
+    expectValid('propose_order', result);
+    expect(result).toMatchObject({ ok: true, proposalId: 'ord_mock_0001', approvalId: 'apv_mock_0001', missingFields: [] });
+  });
+
   it('lists missingFields and stores nothing when a field is blank', async () => {
     const ts = createMockToolset({ businessId: PIZZA });
     const q = await quote(ts, twoPizzas);
@@ -305,12 +317,15 @@ describe('propose_booking', () => {
     expect(BARBER_CALENDAR_ID).toContain('calendar.google.com');
   });
 
-  it('lists missingFields without consent, and refuses an off-grid or out-of-hours start', async () => {
+  it('accepts declined consent without a recipient, and refuses an off-grid or out-of-hours start', async () => {
     const ts = createMockToolset({ businessId: BARBER });
-    const r = await ts.tools.propose_booking({ serviceId: serviceBeardTrim.id, startUtc: '2026-11-17T19:30:00Z', customer: { ...customer, messageConsent: false } }, barberCtx);
+    const r = await ts.tools.propose_booking({ serviceId: serviceBeardTrim.id, startUtc: '2026-11-17T19:30:00Z', customer: { name: customer.name, messageConsent: false } }, barberCtx);
     expectValid('propose_booking', r);
-    expect(r).toMatchObject({ ok: true, missingFields: ['customer.messageConsent'] });
-    expect(r.ok && r.approvalId).toBeUndefined();
+    expect(r).toMatchObject({ ok: true, missingFields: [], approvalId: 'apv_mock_0001' });
+    const missing = await ts.tools.propose_booking({ serviceId: serviceBeardTrim.id, startUtc: '2026-11-17T19:30:00Z', customer: { name: ' ', messageConsent: false } }, barberCtx);
+    expectValid('propose_booking', missing);
+    expect(missing).toMatchObject({ ok: true, missingFields: ['customer.name'] });
+    expect(missing.ok && missing.approvalId).toBeUndefined();
     expect(await ts.tools.propose_booking({ serviceId: serviceBeardTrim.id, startUtc: '2026-11-17T19:37:00Z', customer }, barberCtx)).toMatchObject({ ok: false, reason: 'VALIDATION_FAILED' });
     expect(await ts.tools.propose_booking({ serviceId: serviceBeardTrim.id, startUtc: '2026-11-17T03:00:00Z', customer }, barberCtx)).toMatchObject({ ok: false, reason: 'VALIDATION_FAILED' });
   });

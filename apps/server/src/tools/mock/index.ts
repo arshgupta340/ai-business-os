@@ -249,8 +249,7 @@ export function createMockToolset(options: MockToolsetOptions): MockToolset {
 
       const missingFields: string[] = [];
       if (input.contact.name.trim() === '') missingFields.push('contact.name');
-      if (input.contact.messageRecipient.trim() === '') missingFields.push('contact.messageRecipient');
-      if (input.contact.messageConsent !== true) missingFields.push('contact.messageConsent');
+      if (input.contact.messageConsent && !input.contact.messageRecipient?.trim()) missingFields.push('contact.messageRecipient');
       if (input.fulfillment.pickupAt.trim() === '') missingFields.push('fulfillment.pickupAt');
       if (missingFields.length > 0) return { ok: true, quote: stored.quote, missingFields };
 
@@ -300,8 +299,7 @@ export function createMockToolset(options: MockToolsetOptions): MockToolset {
 
       const missingFields: string[] = [];
       if (input.customer.name.trim() === '') missingFields.push('customer.name');
-      if (input.customer.messageRecipient.trim() === '') missingFields.push('customer.messageRecipient');
-      if (!input.customer.messageConsent) missingFields.push('customer.messageConsent');
+      if (input.customer.messageConsent && !input.customer.messageRecipient?.trim()) missingFields.push('customer.messageRecipient');
       if (missingFields.length > 0) return { ok: true, missingFields, slot };
 
       return { ok: true, proposalId: nextId('bkg_mock_', 'booking'), approvalId: nextId(MOCK_APPROVAL_PREFIX, 'approval'), missingFields: [], slot };

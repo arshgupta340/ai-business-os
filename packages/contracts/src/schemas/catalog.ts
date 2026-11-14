@@ -88,11 +88,8 @@ export const QuoteBaseSchema = z.object({
 // Line totals are not summed against subtotalMinor: how Square's line totals map to lineTotalMinor
 // (with or without line tax) is not fixed by the docs.
 export const QuoteSchema = QuoteBaseSchema.superRefine((q, ctx) => {
-  if (q.subtotalMinor + q.taxMinor !== q.totalMinor) {
-    ctx.addIssue({ code: 'custom', path: ['totalMinor'], message: 'totalMinor must equal subtotalMinor + taxMinor' });
-  }
-  if (msBetween(q.quotedAt, q.expiresAt) !== QUOTE_EXPIRY_MS) {
-    ctx.addIssue({ code: 'custom', path: ['expiresAt'], message: 'expiresAt must be quotedAt plus 5 minutes (SPEC 2.9)' });
+  if (Math.abs(msBetween(q.quotedAt, q.expiresAt) - QUOTE_EXPIRY_MS) > 2000) {
+    ctx.addIssue({ code: 'custom', path: ['expiresAt'], message: 'expiresAt must be quotedAt plus 5 minutes within 2 seconds (SPEC 2.9)' });
   }
 });
 export type Quote = z.infer<typeof QuoteSchema>;

@@ -16,6 +16,8 @@ import {
   OrderSchema,
   PriceEditApprovalRequestSchema,
   QuoteSchema,
+  IsoDateTimeSchema,
+  RollbackBodySchema,
   isServerOnlyTransition,
 } from './index';
 
@@ -54,9 +56,14 @@ describe('Order (SPEC 2.9 order totals)', () => {
 });
 
 describe('Quote', () => {
-  it('rejects subtotal + tax != total, and an expiry other than 5 minutes', () => {
+  it('allows provider discounts and service charges, and checks the expiry', () => {
     passes(QuoteSchema, quote);
-    fails(QuoteSchema, { ...quote, taxMinor: 265 });
+    passes(QuoteSchema, { ...quote, totalMinor: 3000 });
+    passes(QuoteSchema, { ...quote, totalMinor: 4000 });
+    for (const field of ['subtotalMinor', 'taxMinor', 'totalMinor']) {
+      fails(QuoteSchema, { ...quote, [field]: -1 });
+      fails(QuoteSchema, { ...quote, [field]: 1.5 });
+    }
     fails(QuoteSchema, { ...quote, expiresAt: '2026-11-13T19:50:00Z' });
   });
 });
@@ -167,12 +174,16 @@ describe('ApprovalRequest: outer copies equal the payload, expiry is 10 minutes'
 });
 
 describe('other database checks', () => {
-  it('BusinessFact: verifiedAt absent exactly for drafts', () => {
+  it('BusinessFact: drafts forbid verifiedAt and verified facts require it', () => {
     const fact = { id: 'fact_1', businessId: 'biz_pizza_01', kind: 'hours', key: 'fri', value: { closed: true }, sourceType: 'upload', fileId: 'file_1',
       status: 'draft', confidence: 0.8, version: 1, createdAt: createdAt, updatedAt: createdAt };
     passes(BusinessFactSchema, fact);
     fails(BusinessFactSchema, { ...fact, verifiedAt: createdAt });
     fails(BusinessFactSchema, { ...fact, status: 'verified' });
+    passes(BusinessFactSchema, { ...fact, status: 'verified', verifiedAt: createdAt });
+  });
+  it.each([undefined, createdAt])('allows a superseded fact with verifiedAt %s', (verifiedAt) => {
+    passes(BusinessFactSchema, { id: 'fact_1', businessId: 'biz_pizza_01', kind: 'hours', key: 'fri', value: { closed: true }, sourceType: 'seed', status: 'superseded', confidence: 1, version: 1, createdAt, updatedAt: createdAt, ...(verifiedAt === undefined ? {} : { verifiedAt }) });
   });
   it('FactConflict: resolvedAt and resolvedBy present exactly when resolved', () => {
     const c = { id: 'cfl_1', businessId: 'biz_pizza_01', kind: 'policy', key: 'pickup_window', required: true, state: 'open',
@@ -216,4 +227,43 @@ describe('server-only transitions from the review', () => {
     expect(isServerOnlyTransition('messageDispatch', 'QUEUED', 'FAILED')).toBe(true);
     expect(isServerOnlyTransition('messageDispatch', 'SENT', 'FAILED')).toBe(true);
   });
+});
+
+
+describe('database timestamp precision', () => {
+  it('compares numeric offsets as instants', () => {
+    passes(QuoteSchema, { ...quote, expiresAt: '2026-11-13T11:45:00-08:00' });
+    for (const { schema, value } of Object.values(requests)) {
+      passes(schema, { ...value, expiresAt: '2026-11-13T12:10:00-08:00', payload: { ...value.payload, expiresAt: '2026-11-13T20:10:00+00:00' } });
+    }
+  });
+  for (const [label, delta, valid] of [['fractional spelling', 0, true], ['one second', 1000, true], ['two seconds', 2000, true], ['ten seconds', 10000, false]] as const) {
+    it.each([-1, 1])(`quote expiry: ${label}, direction %s`, (direction) => {
+      const expiresAt = new Date(Date.parse(quote.expiresAt) + direction * delta).toISOString();
+      expect(QuoteSchema.safeParse({ ...quote, expiresAt }).success).toBe(valid);
+    });
+    for (const { schema, value } of Object.values(requests)) {
+      it.each([-1, 1])(`${value.bundleType} expiry duration: ${label}, direction %s`, (direction) => {
+        const expiresAt = new Date(Date.parse(value.expiresAt) + direction * delta).toISOString();
+        const request = { ...value, expiresAt, payload: { ...value.payload, expiresAt } };
+        expect(schema.safeParse(request).success).toBe(valid);
+        expect(ApprovalRequestSchema.safeParse(request).success).toBe(valid);
+      });
+      it.each([-1, 1])(`${value.bundleType} payload expiry: ${label}, direction %s`, (direction) => {
+        const expiresAt = new Date(Date.parse(value.expiresAt) + direction * delta).toISOString();
+        const request = { ...value, payload: { ...value.payload, expiresAt } };
+        expect(schema.safeParse(request).success).toBe(valid);
+        expect(ApprovalRequestSchema.safeParse(request).success).toBe(valid);
+      });
+    }
+  }
+});
+
+describe('zoned timestamps and rollback', () => {
+  it.each(['2026-11-14T20:30:00Z', '2026-11-14T20:30:00.000Z', '2026-11-14T20:30:00+00:00', '2026-11-14T12:30:00-08:00', '2026-11-15T02:00:00+05:30'])('accepts %s', (value) => passes(IsoDateTimeSchema, value));
+  it('rejects timestamps without a zone', () => fails(IsoDateTimeSchema, '2026-11-14T20:30:00'));
+  it.each([undefined, true, false])('accepts optional rollback makeLive %s', (makeLive) => {
+    passes(RollbackBodySchema, { toVersionId: 'agv_pizza_01_v1', confirm: true, ...(makeLive === undefined ? {} : { makeLive }) });
+  });
+  it('rejects a non-boolean rollback makeLive', () => fails(RollbackBodySchema, { toVersionId: 'agv_pizza_01_v1', confirm: true, makeLive: 'true' }));
 });

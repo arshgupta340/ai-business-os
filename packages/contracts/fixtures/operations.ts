@@ -70,7 +70,9 @@ export const otherActivityEvents = [
   { id: 'evt_o05', businessId: PIZZA_BUSINESS_ID, type: 'webhook.rejected', correlationId: 'whk_rejected_01', actorType: 'provider', occurredAt: '2026-11-14T19:30:00Z',
     payload: { provider: 'square', reason: 'signature_invalid' } },
   { id: 'evt_o06', businessId: PIZZA_BUSINESS_ID, type: 'guardrail.refused', correlationId: 'call_demo_05', actorType: 'deployed_agent', occurredAt: '2026-11-14T19:51:20Z',
-    payload: { callId: 'call_demo_05', rule: 'no_fact_changes' } },
+    payload: { callId: 'call_demo_05', rule: 'no_fact_changes', reasonCode: 'fact_change_forbidden' } },
+  { id: 'evt_o07', businessId: PIZZA_BUSINESS_ID, type: 'guardrail.refused', correlationId: 'apv_demo_f01', actorType: 'system', occurredAt: '2026-11-14T20:29:00Z',
+    payload: { approvalId: 'apv_demo_f01', rule: 'no_approval_bypass', reasonCode: 'approval_pending' } },
 ] satisfies ActivityEvent[];
 
 /** Every stored event, oldest first. */

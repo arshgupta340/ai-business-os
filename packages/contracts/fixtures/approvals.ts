@@ -27,6 +27,7 @@ import {
   orderPaymentFailed,
   orderPaymentPending,
   orderRejected,
+  orderQrOnly,
 } from './orders';
 import { bookingAwaitingApproval, bookingSlotConflict, bookingVerified } from './bookings';
 import { OWNER_USER_ID, addMs } from './world';
@@ -66,7 +67,8 @@ function orderApproval(order: Order, channel: MessageChannelSetting, d: Decision
       totalMinor: order.totalMinor,
       currency: order.currency,
       pickupAt: order.fulfillment.pickupAt,
-      messageRecipient: order.contact.messageRecipient,
+      ...(order.contact.messageRecipient === undefined ? {} : { messageRecipient: order.contact.messageRecipient }),
+      messageConsent: order.contact.messageConsent,
       messageChannel: channel,
       actionBundle,
       expiresAt,
@@ -99,7 +101,8 @@ function bookingApproval(booking: Booking, channel: MessageChannelSetting, d: De
       startUtc: booking.startUtc,
       endUtc: booking.endUtc,
       timezone: booking.timezone,
-      messageRecipient: booking.customer.messageRecipient,
+      ...(booking.customer.messageRecipient === undefined ? {} : { messageRecipient: booking.customer.messageRecipient }),
+      messageConsent: booking.customer.messageConsent,
       messageChannel: channel,
       actionBundle,
       expiresAt,
@@ -120,6 +123,8 @@ export const approvalOrderPending = orderApproval(orderAwaitingApproval, 'surge'
 export const approvalOrderRejected = orderApproval(orderRejected, 'surge', { state: 'REJECTED', decidedAt: '2026-11-14T19:53:00Z' });
 export const approvalOrderExpired = orderApproval(orderApprovalExpired, 'surge', { state: 'EXPIRED' });
 export const approvalOrderPaymentFailed = orderApproval(orderPaymentFailed, 'surge', { state: 'APPROVED', decidedAt: '2026-11-14T20:02:30Z' });
+
+export const approvalOrderQrOnly = orderApproval(orderQrOnly, 'qr_only', { state: 'PENDING' });
 
 // ---- Booking bundles ----
 export const approvalBookingPending = bookingApproval(bookingAwaitingApproval, 'surge', { state: 'PENDING' });
@@ -186,6 +191,7 @@ export const approvalPriceEditPending = {
 } satisfies PriceEditApprovalRequest;
 
 export const approvals: ApprovalRequest[] = [
+  approvalOrderQrOnly,
   approvalPriceEditPending,
   approvalFactEditPending,
   approvalOrderPending,

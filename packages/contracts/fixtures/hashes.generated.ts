@@ -7,6 +7,7 @@ export const GENERATED_HASHES: Record<string, string> = {
   'cart:ord_demo_05': 'sha256:cc7e8c2dbf1537c4e052a28cc677f3d60c7a481c7f23d0fc8aa97dda162067d8',
   'cart:ord_demo_06': 'sha256:ed8104ee4f39fef277a44f157d3d98bbb585ddcd7d6bc80354aa2e04ea43871f',
   'cart:ord_demo_07': 'sha256:612a8b9df843f1943cf2d5e5d340542f4449562f755766305f035115dd435b37',
+  'cart:ord_demo_qr': 'sha256:da2c167e3c2f6ae135d134f9ffff5043b0c64fe17bb2fc46c9eebd1e48721709',
   'idem:exe_demo_01_0': '62a582fd3c82d8ae6466482763c6e7d8813703685fc617406aae16d7fa272313',
   'idem:exe_demo_01_1': 'a6e9aa6f3144156e18a7d27e4940d87b27145cc3d3ce0fd81c1ccea63151273a',
   'idem:exe_demo_01_2': 'a2832c2b08df98a07f68590dd05cfbb008b29aeb31762386880c8f6265f62ab4',
@@ -35,4 +36,5 @@ export const GENERATED_HASHES: Record<string, string> = {
   'payload:apv_demo_b03': 'sha256:b69f778c46ce88581495b9fd64b051510deab0fa41edd05b6daab2fd4dc03eb9',
   'payload:apv_demo_f01': 'sha256:65e02aa264ef580f510181355f4adb95e1dc0cdf497665061a0c8eb7ae514bcc',
   'payload:apv_demo_p01': 'sha256:02a999399973fb66a0bb70ff3bcecca6dcee9086f8e65deaaa670fb5a286ad33',
+  'payload:apv_demo_qr': 'sha256:f4626dafb297f34a5e48b4b5081f21fd1c74282ac9e2a1f96f25629e79366d10',
 };

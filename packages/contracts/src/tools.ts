@@ -143,7 +143,7 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   read_business_facts: 'Read verified opening hours, policies and services. Answer only from this result.',
   quote_order: 'Get the exact total and tax for a cart. Read the total back to the caller from this result only.',
   propose_order:
-    'Send the confirmed order to the owner for approval. Call only after the caller confirmed the read-back of this quote and agreed to receive a payment link.',
+    'Send the confirmed order to the owner for approval. Call only after the caller confirmed the read-back of this quote. Record whether the caller consents to messages; without consent, omit the recipient and use the dashboard QR code.',
   get_order_status: 'Read the verified status of an order placed on this call.',
   read_calendar_availability: 'List free appointment slots for one service on one date.',
   propose_booking: 'Send the confirmed appointment to the owner for approval. Call only after the caller confirmed service, time and contact.',
