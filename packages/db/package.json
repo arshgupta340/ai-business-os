@@ -8,7 +8,10 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "migrate": "tsx src/migrate.ts"
+    "migrate": "tsx src/migrate.ts",
+    "seed": "tsx ../../scripts/seed.ts",
+    "seed:square": "tsx ../../scripts/seed.ts square",
+    "reset": "tsx ../../scripts/reset.ts"
   },
   "dependencies": {
     "pg": "^8.23.1"
