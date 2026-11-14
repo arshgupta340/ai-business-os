@@ -32,6 +32,8 @@ This is the master spec. It amends the PRD (`docs/PRD.md`). Where this file and 
 | D-08 | The checkout link goes out through a channel-agnostic `MessageAdapter`. Spike B-04 tests channels in this order and uses the first that delivers a Square link to a team phone: (1) Surge shared demo number, real SMS, 25-message cap; (2) an Android phone the team has, sending SMS from its own SIM through textbee or SMSGate; (3) Twilio WhatsApp sandbox. The dashboard always shows the link as a QR code as the backup. |
 | D-09 | Scope is the full PRD P0 list and all twenty acceptance criteria. Build time is not the constraint: both leads run parallel worker agents (Claude, Codex, OpenCode). Everything that ships must work. |
 
+| D-10 | The server connects to Postgres as a restricted login, `abos_app`, not as the table owner. It can read and write the application tables but cannot disable guards, truncate, or delete approvals, executions, audit events or published versions. Migrations and the operator reset use the owner connection, `DATABASE_ADMIN_URL`. The server uses `DATABASE_URL`. |
+
 Everything the PRD lists under "Confirmed by the founding team" still holds unless a row here changes it.
 
 ### 1.2 Proposed, waiting for Arsh to ratify
@@ -326,7 +328,8 @@ Names only. Values live in `.env.local` and in the host's secret store. They are
 | Variable | Used by |
 |---|---|
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | web, server |
-| `SUPABASE_SERVICE_ROLE_KEY`, `DATABASE_URL` | server |
+| `SUPABASE_SERVICE_ROLE_KEY`, `DATABASE_URL` (the restricted `abos_app` login, D-10) | server |
+| `DATABASE_ADMIN_URL` (the owner connection) | migrations and the reset script only |
 | `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_MOCK` | web |
 | `OPENAI_API_KEY`, `OPENAI_BUILDER_MODEL`, `OPENAI_REALTIME_MODEL` | server |
 | `SQUARE_ENVIRONMENT` (must be `sandbox`), `SQUARE_ACCESS_TOKEN`, `SQUARE_LOCATION_ID`, `SQUARE_WEBHOOK_SIGNATURE_KEY`, `SQUARE_WEBHOOK_URL` | server |
