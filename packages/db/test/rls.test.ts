@@ -73,9 +73,10 @@ describe('row level security', () => {
     }
   });
 
-  it('webhook_events is closed to authenticated (no policy)', async () => {
+  it('webhook_events is closed to authenticated (no grant and no policy)', async () => {
     await insert(db, 'webhook_events', { source: 'square', provider_event_id: 'rls_1', event_type: 'x', business_id: a.businessId });
-    const { rows } = await asOwner(db, a.authUserId, () => db.query('select id from public.webhook_events'));
-    expect(rows).toEqual([]);
+    await expect(
+      asOwner(db, a.authUserId, () => db.query('select id from public.webhook_events')),
+    ).rejects.toThrow(/permission denied/);
   });
 });

@@ -1,8 +1,8 @@
 import type { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
-  BOOKING_BUNDLE, createApproval, createBooking, createExecution, createMigratedDb, createOrder, createOwner,
-  hash, hex64, insert, uniq, type Owner,
+  BOOKING_BUNDLE, createApproval, createApprovedApproval, createBooking, createExecution, createMigratedDb,
+  createOrder, createOwner, hash, hex64, insert, uniq, type Owner,
 } from './helpers';
 
 // SPEC 2.4. Orders and bookings hold the states from AWAITING_OWNER_APPROVAL on; the conversation
@@ -63,22 +63,26 @@ function bookingWithRefs(status: string) {
   return createBooking(db, owner, { status, google_event_id: `evt${uniq()}`, start_utc: start, end_utc: end });
 }
 
-function approvalIn(state: string) {
-  const decided = state !== 'PENDING';
+// Approvals are always created PENDING (approval_requests_guard), so each state is reached by an update.
+async function approvalIn(state: string) {
+  const a = await createApproval(db, owner);
+  if (state === 'PENDING') return a;
   const byOwner = state === 'APPROVED' || state === 'REJECTED';
-  return createApproval(db, owner, {
-    state, decided_at: decided ? new Date() : null, decided_by: byOwner ? owner.userId : null,
-  });
+  const { rows } = await db.query(
+    `update public.approval_requests set state = $2, decided_at = now(), decided_by = $3 where id = $1 returning *`,
+    [a.id, state, byOwner ? owner.userId : null],
+  );
+  return rows[0];
 }
 
 async function executionIn(status: string) {
-  const approval = await createApproval(db, owner);
+  const approval = await createApprovedApproval(db, owner);
   return createExecution(db, owner, String(approval.id), { status, finished_at: new Date() });
 }
 
 async function dispatchIn(status: string, channel = 'surge', idempotencyKey = hex64()) {
   const order = await createOrder(db, owner);
-  const approval = await createApproval(db, owner, { subject_id: order.id });
+  const approval = await createApprovedApproval(db, owner, { subject_id: order.id });
   const exe = await createExecution(db, owner, String(approval.id), { action_type: 'message.checkout.send', step_index: 1 });
   return insert(db, 'message_dispatches', {
     business_id: owner.businessId, approval_id: approval.id, execution_id: exe.id, order_id: order.id,
@@ -140,16 +144,16 @@ describe('status check constraints accept every SPEC 2.4 state and reject a made
 describe('never-broken rules held by constraints', () => {
   it('action_executions.idempotency_key is unique', async () => {
     const key = hex64();
-    const a1 = await createApproval(db, owner);
-    const a2 = await createApproval(db, owner);
+    const a1 = await createApprovedApproval(db, owner);
+    const a2 = await createApprovedApproval(db, owner);
     await createExecution(db, owner, String(a1.id), { idempotency_key: key });
     await expect(createExecution(db, owner, String(a2.id), { idempotency_key: key })).rejects.toThrow(UNIQUE_VIOLATION);
   });
 
   it('action_executions cannot queue the same step of one approval twice', async () => {
-    const a = await createApproval(db, owner);
+    const a = await createApprovedApproval(db, owner);
     await createExecution(db, owner, String(a.id));
-    await expect(createExecution(db, owner, String(a.id), { step_index: 1 })).rejects.toThrow(UNIQUE_VIOLATION);
+    await expect(createExecution(db, owner, String(a.id))).rejects.toThrow(UNIQUE_VIOLATION);
   });
 
   it('webhook_events stores the same (source, provider_event_id) once', async () => {
@@ -249,17 +253,36 @@ describe('never-broken rules held by constraints', () => {
       ).rejects.toThrow(/published and immutable/);
     });
 
-    it('the reset setting lets a reset transaction remove a published version', async () => {
-      const v = await insert(db, 'agent_versions', {
-        business_id: owner.businessId, agent_id: owner.agentId, version: 200 + slot++, spec: {}, published_at: new Date(),
-      });
-      await db.transaction(async (tx) => {
-        await tx.query(`set local app.allow_reset = 'on'`);
-        await tx.query(`delete from public.agent_versions where id = $1`, [v.id]);
-      });
-      const { rows } = await db.query(`select 1 from public.agent_versions where id = $1`, [v.id]);
-      expect(rows).toEqual([]);
+    it('no session setting unlocks a published version; only TRUNCATE (the reset path) removes it', async () => {
+      await expect(
+        db.transaction(async (tx) => {
+          await tx.query(`set local app.allow_reset = 'on'`);
+          await tx.query(`delete from public.agent_versions where id = $1`, [owner.agentVersionId]);
+        }),
+      ).rejects.toThrow(/published and immutable/);
+      const fresh = await createMigratedDb();
+      try {
+        await createOwner(fresh);
+        await fresh.exec('truncate public.agents, public.agent_versions cascade');
+        const { rows } = await fresh.query(`select count(*)::int as n from public.agent_versions`);
+        expect(rows[0]).toEqual({ n: 0 });
+      } finally {
+        await fresh.close();
+      }
     });
+  });
+
+  it('an agent referenced by an activity event cannot be deleted, and the event keeps its agent_id', async () => {
+    const agent = await insert(db, 'agents', { business_id: owner.businessId, name: 'Draft', template: 'custom' });
+    const e = await insert(db, 'activity_events', {
+      business_id: owner.businessId, type: 'agent.paused', agent_id: agent.id, correlation_id: 'bld_x', actor_type: 'owner',
+    });
+    await expect(db.query(`delete from public.agents where id = $1`, [agent.id])).rejects.toThrow(/foreign key/);
+    const { rows } = await db.query(`select agent_id from public.activity_events where id = $1`, [e.id]);
+    expect(rows[0]).toEqual({ agent_id: agent.id });
+    // An agent with no events can still be deleted.
+    const unused = await insert(db, 'agents', { business_id: owner.businessId, name: 'Unused', template: 'custom' });
+    await db.query(`delete from public.agents where id = $1`, [unused.id]);
   });
 
   it('activity_events rejects UPDATE and DELETE', async () => {

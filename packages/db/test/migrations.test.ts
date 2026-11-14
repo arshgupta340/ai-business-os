@@ -1,7 +1,7 @@
 import type { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { applyMigrations, readMigrations } from '../src/migrate';
-import { createEmptyDb, migrationDb } from './helpers';
+import { applyMigrations, readMigrations, type MigrationPool, type PooledSession } from '../src/migrate';
+import { createApproval, createEmptyDb, createOrder, createOwner, insert, migrationDb } from './helpers';
 
 // SPEC 2.7: the PRD's seventeen tables plus the four added ones.
 const SPEC_TABLES = [
@@ -35,7 +35,7 @@ describe('migrations', () => {
 
   it('apply cleanly to an empty database, in name order', async () => {
     const files = readMigrations();
-    expect(files.length).toBeGreaterThanOrEqual(6);
+    expect(files.length).toBeGreaterThanOrEqual(5);
     const result = await applyMigrations(migrationDb(db), files);
     expect(result.applied).toEqual(files.map((f) => f.name));
     expect(result.skipped).toEqual([]);
@@ -96,5 +96,193 @@ describe('migrations', () => {
       where c.table_schema = 'public' and c.column_name = 'updated_at'`);
     expect(rows.length).toBe(10);
     for (const r of rows) expect(r.has_trigger, r.table_name).toBe(true);
+  });
+});
+
+describe('a run that stops after the table file leaves nothing exposed', () => {
+  let db: PGlite;
+  beforeAll(async () => {
+    db = await createEmptyDb();
+    const throughTables = readMigrations().filter((f) => f.name < '0003');
+    expect(throughTables.map((f) => f.name.slice(0, 4))).toEqual(['0001', '0002']);
+    await applyMigrations(migrationDb(db), throughTables);
+    const o = await createOwner(db);
+    await createOrder(db, o);
+    await createApproval(db, o);
+    await insert(db, 'activity_events', { business_id: o.businessId, type: 'call.started', correlation_id: o.callId, actor_type: 'system' });
+    await insert(db, 'webhook_events', { source: 'square', provider_event_id: 'p1', event_type: 'x' });
+  });
+  afterAll(async () => {
+    await db.close();
+  });
+
+  async function publicTables(): Promise<{ name: string; col: string }[]> {
+    const { rows } = await db.query<{ name: string; col: string }>(`
+      select c.relname as name,
+             (select a.attname from pg_attribute a where a.attrelid = c.oid and a.attnum = 1) as col
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = 'public' and c.relkind = 'r' order by 1`);
+    return rows;
+  }
+
+  async function as<T>(role: string, fn: () => Promise<T>): Promise<T> {
+    await db.exec(`set role ${role}`);
+    try {
+      return await fn();
+    } finally {
+      await db.exec('reset role');
+    }
+  }
+
+  it('every public table has row level security already', async () => {
+    const { rows } = await db.query(`
+      select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = 'public' and c.relkind = 'r' and not c.relrowsecurity`);
+    expect(rows).toEqual([]);
+  });
+
+  for (const role of ['anon', 'authenticated']) {
+    it(`${role} can read no row and write nothing in any public table`, async () => {
+      const tables = await publicTables();
+      // The 21 SPEC tables plus schema_migrations.
+      expect(tables.length).toBe(22);
+      for (const t of tables) {
+        const read = await as(role, () =>
+          db.query(`select * from public.${t.name}`).then(
+            (r) => String(r.rows.length),
+            (e: Error) => e.message,
+          ),
+        );
+        // Either no privilege at all, or the RLS policy returns nothing for a session with no owner.
+        expect(read === '0' || /permission denied/.test(read), `${role} select ${t.name}: ${read}`).toBe(true);
+        for (const sql of [
+          `insert into public.${t.name} default values`,
+          `update public.${t.name} set ${t.col} = ${t.col}`,
+          `delete from public.${t.name}`,
+          `truncate public.${t.name} cascade`,
+        ]) {
+          await expect(as(role, () => db.query(sql)), `${role}: ${sql}`).rejects.toThrow(/permission denied/);
+        }
+      }
+    });
+  }
+});
+
+describe('function hardening', () => {
+  let db: PGlite;
+  beforeAll(async () => {
+    db = await createEmptyDb();
+    await applyMigrations(migrationDb(db));
+  });
+  afterAll(async () => {
+    await db.close();
+  });
+
+  it('every function the migrations create pins search_path to an empty string', async () => {
+    const { rows } = await db.query<{ fn: string; config: string[] | null }>(`
+      select n.nspname || '.' || p.proname as fn, p.proconfig as config
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname in ('public', 'private') and p.prokind = 'f'`);
+    expect(rows.length).toBe(7);
+    for (const r of rows) expect(r.config, r.fn).toContain('search_path=""');
+  });
+
+  it('owns_business lives in private, is security definer, and only authenticated may run it', async () => {
+    const { rows } = await db.query(`
+      select p.prosecdef as definer,
+             has_function_privilege('anon', p.oid, 'execute') as anon,
+             has_function_privilege('authenticated', p.oid, 'execute') as authenticated,
+             (select count(*)::int from pg_proc q join pg_namespace m on m.oid = q.pronamespace
+              where m.nspname = 'public' and q.proname = 'owns_business') as in_public
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname = 'private' and p.proname = 'owns_business'`);
+    expect(rows[0]).toEqual({ definer: true, anon: false, authenticated: true, in_public: 0 });
+  });
+
+  it('anon cannot execute any function the migrations create', async () => {
+    const { rows } = await db.query(`
+      select n.nspname || '.' || p.proname as fn from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname in ('public', 'private') and has_function_privilege('anon', p.oid, 'execute')`);
+    expect(rows).toEqual([]);
+  });
+
+  it('the service role can still insert with gen_id defaults and fire the triggers', async () => {
+    const o = await createOwner(db);
+    await db.exec('set role service_role');
+    try {
+      const { rows } = await db.query<{ id: string }>(
+        `insert into public.activity_events (business_id, type, correlation_id, actor_type)
+         values ($1, 'call.started', 'call_x', 'system') returning id`,
+        [o.businessId],
+      );
+      expect(rows[0]?.id).toMatch(/^evt_[0-9a-f]{32}$/);
+      await db.query(`update public.businesses set name = 'Renamed' where id = $1`, [o.businessId]);
+      await expect(db.query(`delete from public.activity_events`)).rejects.toThrow(/append only/);
+    } finally {
+      await db.exec('reset role');
+    }
+  });
+});
+
+function sessionOver(db: PGlite, onRelease: (err?: Error | boolean) => void): PooledSession {
+  return {
+    query: async (text, params) => {
+      if (params) return db.query(text, params);
+      const results = await db.exec(text);
+      return results[results.length - 1] ?? { rows: [] };
+    },
+    release: onRelease,
+  };
+}
+
+describe('applyMigrations with a pool pins one session', () => {
+  it('checks out one client for the lock, every transaction and the unlock, then releases it', async () => {
+    const sessions = [await createEmptyDb(), await createEmptyDb()];
+    let connects = 0;
+    let released = 0;
+    let poolQueries = 0;
+    // A pool that would hand each checkout, and each direct query, to a different session.
+    const pool: MigrationPool & { query: () => Promise<never> } = {
+      async connect() {
+        const db = sessions[connects++ % sessions.length]!;
+        return sessionOver(db, () => {
+          released += 1;
+        });
+      },
+      async query() {
+        poolQueries += 1;
+        throw new Error('pool.query must not be used: it can reach any session');
+      },
+    };
+    try {
+      const result = await applyMigrations(pool);
+      expect(result.applied.length).toBe(readMigrations().length);
+      expect({ connects, released, poolQueries }).toEqual({ connects: 1, released: 1, poolQueries: 0 });
+      const first = await sessions[0]!.query(`select count(*)::int as n from public.schema_migrations`);
+      expect(first.rows[0]).toEqual({ n: readMigrations().length });
+      const second = await sessions[1]!.query(`select to_regclass('public.schema_migrations') as t`);
+      expect(second.rows[0]).toEqual({ t: null });
+    } finally {
+      for (const s of sessions) await s.close();
+    }
+  });
+
+  it('releases the client, flagged as broken, when a migration fails', async () => {
+    const db = await createEmptyDb();
+    let released: unknown = 'not released';
+    const pool: MigrationPool = {
+      async connect() {
+        return sessionOver(db, (err) => {
+          released = err;
+        });
+      },
+    };
+    try {
+      const bad = { name: '0001_bad.sql', sql: 'select 1/0;', checksum: 'x' };
+      await expect(applyMigrations(pool, [bad])).rejects.toThrow(/0001_bad.sql failed/);
+      expect(released).toBeInstanceOf(Error);
+    } finally {
+      await db.close();
+    }
   });
 });

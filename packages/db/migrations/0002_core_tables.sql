@@ -1,6 +1,7 @@
--- 0002: core tables in dependency order.
--- Source: docs/DATA-MODEL.md section 2. Names follow docs/SPEC.md 2.1 to 2.9.
+-- 0002: core tables in dependency order, then row level security for all of them.
+-- Source: docs/DATA-MODEL.md sections 2 and 4. Names follow docs/SPEC.md 2.1 to 2.9.
 -- Status columns use check constraints with the exact SPEC 2.4 strings, not enums.
+-- Tables and their RLS are in one file, so one transaction: no committed state has a table without RLS.
 
 -- 2.1 users: public profile of a Supabase Auth user.
 create table public.users (
@@ -426,9 +427,67 @@ create table public.activity_events (
     'payment.verified', 'payment.failed', 'booking.verified', 'booking.slot_conflict', 'order.status_changed',
     'booking.status_changed', 'sync.queued', 'sync.succeeded', 'sync.failed', 'fact.changed', 'extraction.completed',
     'agent.published', 'agent.paused', 'live_agent.changed', 'guardrail.refused', 'webhook.rejected')),
-  agent_id       text references public.agents (id) on delete set null,
+  -- Restrict, not set null: set null would rewrite audit rows. An agent with events is not deletable.
+  agent_id       text references public.agents (id) on delete restrict,
   correlation_id text not null,
   actor_type     text not null check (actor_type in ('owner', 'deployed_agent', 'system', 'provider')),
   occurred_at    timestamptz not null default now(),
   payload        jsonb not null default '{}'
 );
+
+-- ---------------------------------------------------------------------------------------------
+-- Row level security (DATA-MODEL section 4).
+-- The server uses the service role, which bypasses RLS. RLS is the second wall: with an owner JWT
+-- an owner reads only their own businesses (AC-17), and anon and authenticated can write nothing.
+
+-- True when the signed-in Supabase user owns business b. Lives in the unexposed private schema.
+create or replace function private.owns_business(b text) returns boolean
+language sql stable security definer set search_path = '' as $$
+  select exists (
+    select 1 from public.businesses biz join public.users u on u.id = biz.owner_id
+    where biz.id = b and u.auth_user_id = (select auth.uid()));
+$$;
+revoke all on function private.owns_business(text) from public, anon;
+grant usage on schema private to authenticated;
+grant execute on function private.owns_business(text) to authenticated;
+
+alter table public.users enable row level security;
+create policy users_self_read on public.users
+  for select to authenticated using (auth_user_id = (select auth.uid()));
+
+alter table public.businesses enable row level security;
+create policy businesses_owner_read on public.businesses
+  for select to authenticated using (private.owns_business(id));
+
+alter table public.capabilities enable row level security;
+create policy capabilities_read on public.capabilities
+  for select to authenticated using (true);
+
+-- Every business-scoped table: an owner may read only rows of a business they own.
+do $$
+declare t text;
+begin
+  foreach t in array array[
+    'integrations', 'files', 'business_facts', 'catalog_items', 'fact_conflicts', 'agents', 'agent_versions',
+    'live_agent', 'builder_sessions', 'calls', 'approval_requests', 'orders', 'bookings', 'action_executions',
+    'message_dispatches', 'sync_jobs', 'activity_events'
+  ] loop
+    execute format('alter table public.%I enable row level security', t);
+    execute format('create policy %I on public.%I for select to authenticated using (private.owns_business(business_id))',
+                   t || '_owner_read', t);
+  end loop;
+end $$;
+
+-- No policy at all: service role only.
+alter table public.webhook_events enable row level security;
+
+-- Privileges. Clear anything anon or authenticated holds on any table in public (including grants
+-- made before 0001 changed the defaults), then grant back only select, and only where a policy exists.
+revoke all on all tables in schema public from anon, authenticated;
+grant select on
+  public.users, public.businesses, public.capabilities,
+  public.integrations, public.files, public.business_facts, public.catalog_items, public.fact_conflicts,
+  public.agents, public.agent_versions, public.live_agent, public.builder_sessions, public.calls,
+  public.approval_requests, public.orders, public.bookings, public.action_executions,
+  public.message_dispatches, public.sync_jobs, public.activity_events
+to authenticated;
