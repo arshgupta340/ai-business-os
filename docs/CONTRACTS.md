@@ -293,7 +293,8 @@ type IntegrationHealthEntry = {
   detail?: string;
 };
 type IntegrationHealth = Record<IntegrationProvider, IntegrationHealthEntry>; // GET /api/integrations/health
-type LiveAgent = { phoneNumber: string; businessId: string; agentId: string; agentVersionId: string; updatedAt: string };
+type LiveAgent = { phoneNumber: string; businessId: string; agentId?: string; agentVersionId?: string; updatedAt?: string };
+// Empty case, when no agent answers the number: phoneNumber and businessId only (SPEC 2.9).
 ```
 
 **Agent run modes (P-18).** Both endpoints take one text turn and return the same shape.
@@ -333,7 +334,7 @@ The server builds `payload` from stored rows, never from model output. The paylo
 
 **Rules.**
 - An approval is one-use. The only move out of `PENDING` is one conditional update, so a second, different decision gets `APPROVAL_ALREADY_DECIDED`.
-- `expiresAt` is `createdAt` plus 10 minutes. A decision after that gets `APPROVAL_EXPIRED`.
+- `expiresAt` is `createdAt` plus 10 minutes. A decision at or after that gets `APPROVAL_EXPIRED`. The refusal does not expire the row; the expiry job does.
 - The decision carries `payloadHash`. If it differs from the stored hash, the server returns `PAYLOAD_HASH_MISMATCH`.
 - The executor recomputes the hash from current rows before every step. Any change to a material field (cart, total, recipient, channel, slot, calendar, fact value, price) stops the bundle and needs a new approval.
 
@@ -404,23 +405,26 @@ The payment poller checks every 30 seconds for 15 minutes after the link is read
 | `RETRY_REQUIRED` | owner retries, approval still valid, same key | `RECHECKING_SLOT` | |
 | `RETRY_REQUIRED` | reconciliation finds the event by id | `BOOKED_VERIFIED` | server only, terminal; creates the Sheets sync job |
 
-**Approval.** `PENDING` goes to `APPROVED` (owner approves with matching hash before `expiresAt`), `REJECTED` (owner rejects) or `EXPIRED` (`expiresAt` passes, by job or late decision). All three are terminal.
+**Approval.** `PENDING` goes to `APPROVED` (owner approves with matching hash before `expiresAt`), `REJECTED` (owner rejects) or `EXPIRED` (the expiry job, `private.expire_approvals`, finds it still `PENDING` at or after `expiresAt`). All three are terminal. A decision at or after `expiresAt` is refused with `APPROVAL_EXPIRED` and leaves the row `PENDING` until that job runs. A repeat of a recorded decision with the same outcome, owner and reason changes nothing and writes no second `approval.decided` event.
 
 **Execution.** Steps run in bundle order. A step starts when the step before it is `SUCCEEDED`, except that a message step that ends `SKIPPED`, `FAILED` or `NEEDS_REVIEW` still lets `local.*.record` run. Sheets steps have no execution row; their sync job is created on entering `PAID_VERIFIED` or `BOOKED_VERIFIED`. There is no retry state.
 
 | From | Event | To |
 |---|---|---|
-| `QUEUED` | message step claimed while the approval's `messageChannel` is `qr_only` | `SKIPPED` (terminal; no dispatch row) |
-| `QUEUED` | worker claims the row (`FOR UPDATE SKIP LOCKED`) | `RUNNING` |
+| (row created) | approval decided `APPROVED`, message step, and the approval's `messageChannel` is `qr_only` | `SKIPPED` (terminal; no dispatch row; the row is created in this state and is never `QUEUED`) |
+| (row created) | approval decided `APPROVED`, every other step | `QUEUED` |
+| `QUEUED` | worker claims the row with `claim_execution` or `claim_next_execution` | `RUNNING` (`attempts` plus one) |
 | `RUNNING` | provider confirms the result | `SUCCEEDED` (terminal, server only) |
-| `RUNNING` | retryable error, `attempts` below 3 | `QUEUED` (`attempts` plus one, with backoff) |
+| `RUNNING` | retryable error, `attempts` below 3 | `QUEUED` (with backoff; `attempts` does not change here, because it is counted on the claim) |
 | `RUNNING` | non-retryable error, or third attempt failed | `FAILED` (terminal) |
 | `RUNNING` | outcome unknown (timeout after send) | `NEEDS_REVIEW` |
 | `NEEDS_REVIEW` | reconciliation finds the external object | `SUCCEEDED` (terminal, server only) |
 | `NEEDS_REVIEW` | reconciliation proves nothing happened | `QUEUED` (same key) |
 | `NEEDS_REVIEW` | owner abandons the step | `FAILED` (terminal) |
 
-**Sync job.** Created in `PENDING` on entering `PAID_VERIFIED` or `BOOKED_VERIFIED`, carrying the Sheets step's idempotency key. `PENDING` to `RUNNING` when the runner picks it up. `RUNNING` to `DONE` (terminal) when the row is appended or its `recordId` is already present. `RUNNING` to `RETRYING` on an error with attempts below 5. `RETRYING` to `RUNNING` when `nextRetryAt` is reached. `RUNNING` to `FAILED` (terminal) after the fifth attempt.
+The database routines of migration 0004 allow less than this table. `finish_execution` accepts a result only for a `RUNNING` step, from the worker and attempt that hold it, and the claim routines accept only `QUEUED` rows. So the three rows out of `NEEDS_REVIEW` have no routine today, and a `RUNNING` step whose worker stopped stays `RUNNING`. Migration 0005, not yet applied, adds resolving a `NEEDS_REVIEW` step and stale lease recovery.
+
+**Sync job.** Created in `PENDING` on entering `PAID_VERIFIED` or `BOOKED_VERIFIED`, carrying the Sheets step's idempotency key. `PENDING` to `RUNNING` when the runner picks it up with `claim_sync_job`, which adds one to `attempts`. `RUNNING` to `DONE` (terminal) when the row is appended or its `recordId` is already present. `RUNNING` to `RETRYING` on an error with attempts below 5. `RETRYING` to `RUNNING` when `nextRetryAt` is reached. `RUNNING` to `FAILED` (terminal) after the fifth attempt.
 
 **Message dispatch.** No dispatch row is created for `qr_only`; the step's execution is `SKIPPED`. No automatic resend from `UNKNOWN`.
 
@@ -434,6 +438,8 @@ The payment poller checks every 30 seconds for 15 minutes after the link is read
 | `SENT` | verified delivery callback: delivered | `DELIVERED` (terminal, server only) |
 | `SENT` | verified delivery callback: failed | `FAILED` (terminal) |
 
+The database routine of migration 0004 allows less than this table. `update_dispatch` allows `QUEUED` to move to `SENT`, `DELIVERED`, `FAILED` or `UNKNOWN`, and `SENT` to move to `DELIVERED`, and only while the message step's execution is `RUNNING` under the calling worker and attempt. It refuses every change from `UNKNOWN`, and it refuses `SENT` to `FAILED`. So the two rows out of `UNKNOWN` and the row from `SENT` to `FAILED` have no routine today. Migration 0005, not yet applied, changes how an `UNKNOWN` dispatch is resolved.
+
 Only `whatsapp_sandbox` can reach `DELIVERED`. `SENT` is the last state for every other channel. The `MessageDispatch` schema refuses `DELIVERED` on any other channel.
 
 **Fact.** An approved `fact_edit` targets the existing verified row. When `local.fact.update` runs, that row becomes `superseded` and the approved value is inserted as a new `verified` row in the same transaction. `superseded` is terminal. **Fact conflict.** `open` to `resolved` when the owner picks a candidate (or an approved edit carries `resolvesConflictId`); `resolved` is terminal.
@@ -444,14 +450,14 @@ Only `whatsapp_sandbox` can reach `DELIVERED`. `SENT` is the last state for ever
 
 ## 7. Activity events
 
-Until migration 0005, `decide_and_enqueue` and `expire_approvals` write `order.status_changed` and `booking.status_changed` with `{ subjectId, from, to }` only. An `order.status_changed` row received over Realtime does not parse with `activityEventFromRow`, because `callId` is required, so the client treats every Realtime insert as a signal to refetch. From migration 0005, the routines write the full contract payload: `orderId` or `bookingId`, `callId` when the subject has one, `from`, and `to`; call journeys use the call ID as `correlationId`. The activity list route continues filling these fields for older rows.
+Until migration 0005, which is not yet applied, `decide_and_enqueue` and `expire_approvals` write `order.status_changed` and `booking.status_changed` with `{ subjectId, from, to }` only. They also give every event they write (those two, `approval.decided` and `approval.expired`) the approval ID as `correlationId`, on call journeys too. An `order.status_changed` row received over Realtime does not parse with `activityEventFromRow`, because `callId` is required, so the client treats every Realtime insert as a signal to refetch. From migration 0005, the routines write the full contract payload: `orderId` or `bookingId`, `callId` when the subject has one, `from`, and `to`; call journeys use the call ID as `correlationId`. The activity list route continues filling these fields for older rows.
 
 ```ts
 type ActivityEvent = { id: string; businessId: string; type: ActivityEventType; correlationId: string;
   actorType: "owner" | "deployed_agent" | "system" | "provider"; occurredAt: string; payload: object };
 ```
 
-Payloads are redacted. `guardrail.refused` names the rule that fired in `rule` and the specific reason in `reasonCode`. Phone numbers appear only as `recipientLast4`, `callerLast4` or `phoneNumberLast4`. Card data never appears in any field. Customer names appear as first name only. Other than the pre-migration status events described above, `correlationId` is the `call_` id for call journeys, the `bld_` id for builder journeys, the `file_` id for extraction and the `apv_` id for owner edits. Screens: OV Overview, LO Live operations (the sidebar item "Activity", SPEC 2.9), AP Approvals, MA My Agents, BK Business Knowledge, IN Integrations.
+Payloads are redacted. `guardrail.refused` names the rule that fired in `rule` and the specific reason in `reasonCode`. Phone numbers appear only as `recipientLast4`, `callerLast4` or `phoneNumberLast4`. Card data never appears in any field. Customer names appear as first name only. Other than the pre-migration decision, expiry and status events described above, `correlationId` is the `call_` id for call journeys, the `bld_` id for builder journeys, the `file_` id for extraction and the `apv_` id for owner edits. Screens: OV Overview, LO Live operations (the sidebar item "Activity", SPEC 2.9), AP Approvals, MA My Agents, BK Business Knowledge, IN Integrations.
 
 | Type | Payload | Screens |
 |---|---|---|
