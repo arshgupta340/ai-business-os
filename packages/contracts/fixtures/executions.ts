@@ -171,3 +171,13 @@ export const messageDispatches: MessageDispatch[] = [
   dispatch({ id: 'msg_demo_b02', executionId: 'exe_demo_b02_1', subjectId: 'bkg_demo_b02', channel: 'surge', recipient: '+15555550141',
     template: 'booking_confirmed', status: 'SENT', providerMessageId: 'surge_demo_b02' }),
 ];
+
+/**
+ * The payment-pending order's checkout text as AgentPhone would send it (D-12): the same step as `msg_demo_03`,
+ * so it shares that step's key. AgentPhone has a polled delivery status, so it reaches DELIVERED. It is an
+ * example only and is not in `messageDispatches`: the stored world has one dispatch row per step key.
+ */
+export const messageDispatchAgentphone: MessageDispatch = dispatch({
+  id: 'msg_demo_03_ap', executionId: 'exe_demo_03_1', subjectId: 'ord_demo_03', channel: 'agentphone', recipient: '+15555550125',
+  template: 'checkout_link', status: 'DELIVERED', providerMessageId: 'agentphone_demo_03', deliveredAfterMs: 4000,
+});
