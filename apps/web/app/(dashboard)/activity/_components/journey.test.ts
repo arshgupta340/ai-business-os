@@ -130,6 +130,36 @@ describe('grouping', () => {
   });
 });
 
+describe('events the executor writes under the approval id', () => {
+  it('join the call that asked for that approval, in time order', () => {
+    const events = [
+      ev('call.started', {}, 'call_1'),
+      ev('approval.requested', {approvalId: 'apv_1'}, 'call_1'),
+      ev('approval.decided', {approvalId: 'apv_1', decision: 'approve'}, 'call_1'),
+      ev('execution.started', {executionId: 'exe_1', approvalId: 'apv_1', actionType: 'square.checkout.create', stepIndex: 0, attempt: 1}, 'apv_1'),
+      ev('execution.succeeded', {executionId: 'exe_1', actionType: 'square.checkout.create'}, 'apv_1'),
+      ev('sync.succeeded', {target: 'sheets', syncJobId: 'job_1', recordType: 'order', recordId: 'ord_1'}, 'apv_1'),
+      // Another call's approval, and a fact edit that belongs to no call.
+      ev('call.started', {}, 'call_2'),
+      ev('approval.requested', {approvalId: 'apv_2'}, 'call_2'),
+      ev('execution.started', {executionId: 'exe_2', approvalId: 'apv_2', actionType: 'square.checkout.create', stepIndex: 0, attempt: 1}, 'apv_2'),
+      ev('approval.requested', {approvalId: 'apv_fact'}, 'apv_fact'),
+      ev('execution.succeeded', {executionId: 'exe_9', actionType: 'local.fact.update'}, 'apv_fact'),
+    ].reverse();
+    const groups = groupByCall(events);
+    expect([...groups.keys()].sort()).toEqual(['call_1', 'call_2']);
+    expect(groups.get('call_1')!.map((e) => e.type)).toEqual([
+      'call.started',
+      'approval.requested',
+      'approval.decided',
+      'execution.started',
+      'execution.succeeded',
+      'sync.succeeded',
+    ]);
+    expect(groups.get('call_2')!.map((e) => e.type)).toEqual(['call.started', 'approval.requested', 'execution.started']);
+  });
+});
+
 describe('order journey', () => {
   it('waits for approval at step 3 in warning, with nothing green', () => {
     const j = deriveJourney({callId: 'call_1', events: proposal(), call: call(), order: order('AWAITING_OWNER_APPROVAL')});
