@@ -43,8 +43,10 @@ describe('composition with a database and a verifier', () => {
       // Builder auth now comes from the same JWT check: a bad token and a foreign business are refused.
       expect((await app.inject({ method: 'POST', url: '/api/builder/sessions?businessId=biz_a', headers: { authorization: 'Bearer nope' }, payload: {} })).statusCode).toBe(401);
       expect((await app.inject({ method: 'POST', url: '/api/builder/sessions?businessId=biz_b', headers, payload: {} })).statusCode).toBe(403);
-      // Past auth and scope. The builder's knowledge seam still serves fixtures only, so biz_a answers NOT_FOUND.
-      expect((await app.inject({ method: 'POST', url: '/api/builder/sessions?businessId=biz_a', headers, payload: {} })).json().code).toBe('NOT_FOUND');
+      // Past auth and scope, the session lands in builder_sessions through the database store.
+      const created = await app.inject({ method: 'POST', url: '/api/builder/sessions?businessId=biz_a', headers, payload: {} });
+      expect(created.statusCode).toBe(201);
+      expect((await h.db.query('select business_id, owner_id from builder_sessions where id = $1', [created.json().id])).rows[0]).toEqual({ business_id: 'biz_a', owner_id: 'usr_a' });
     } finally { await app.close(); }
   });
 });

@@ -15,6 +15,7 @@ import type { FastifyPluginAsync } from 'fastify';
 // The in-memory engine in api/ports.ts is a test fake and is never wired here.
 import type { CatalogPort as RouteCatalogPort, EnginePorts } from '../api/ports';
 import { createBuilderAuth, createVerifier, type TokenVerifier } from '../auth/verify';
+import type { BuilderPluginOptions } from '../builder/index';
 import type { AgentModel } from '../builder/runner/agent-model';
 import { OpenAiAgentModel } from '../builder/runner/openai-agent-model';
 import { RecordedAgentModel } from '../builder/runner/recorded-agent-model';
@@ -30,6 +31,7 @@ import {
   type CallsStore,
 } from './ports';
 import { buildProviders, type Providers } from './providers';
+import { createProposeFactFromChat, dbAgentDraftStore, dbBuilderSessionStore, dbBusinessKnowledge, dbDraftFactStore, dbLiveAgentReader, type ProposeFactFromChat } from './builder';
 import { notWiredExecutor, notWiredWebhooks, type Executor, type ExecutorFactory, type SeamDeps, type WebhooksFactory } from './seams';
 
 
@@ -66,8 +68,10 @@ export interface ComposedServer {
   toolsetPorts: RealToolsetPorts;
   toolsetFor(ctx: { businessId: string; agentVersionId: string; callId: string; capabilities: readonly import('@abos/contracts').CapabilityId[] }): RealToolset;
   agentModel: AgentModel;
-  /** Options for the builder plugin's own seams. Empty when auth cannot be verified, so the builder fails closed. */
-  builder: { auth?: ReturnType<typeof createBuilderAuth>; liveAgent?: { isLiveAgent(businessId: string, agentId: string): Promise<boolean> } };
+  /** Options for the builder plugin's own seams (auth, stores, knowledge, live agent). */
+  builder: BuilderPluginOptions;
+  /** Issue #65 item 5: a fact_edit approval from an owner chat answer. The builder plugin has no option for it yet. */
+  proposeFactFromChat: ProposeFactFromChat;
   /** Voice plugin options, or the list of missing settings that keep the phone path off. */
   voice: { ok: true; options: VoicePluginOptions } | { ok: false; missing: string[] };
   executor: Executor;
@@ -142,15 +146,14 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   const agentModel: AgentModel = options.agentModel
     ?? (env.OPENAI_API_KEY && env.OPENAI_BUILDER_MODEL ? new OpenAiAgentModel({ apiKey: env.OPENAI_API_KEY, model: env.OPENAI_BUILDER_MODEL }) : new RecordedAgentModel());
 
-  const builder: ComposedServer['builder'] = hasDb && authConfigured ? {
-    auth: createBuilderAuth(db, verifier),
-    liveAgent: {
-      async isLiveAgent(businessId, agentId) {
-        const row = await db.query('select 1 from public.live_agent where business_id = $1 and agent_id = $2', [businessId, agentId]);
-        return row.rows.length > 0;
-      },
-    },
+  // The builder's own seams (issue #65). Without a database it keeps its in-memory defaults, and
+  // without a way to verify tokens it keeps its fail-closed auth default.
+  const builder: BuilderPluginOptions = hasDb ? {
+    ...(authConfigured ? { auth: createBuilderAuth(db, verifier) } : {}),
+    liveAgent: dbLiveAgentReader(db), sessions: dbBuilderSessionStore(db), agents: dbAgentDraftStore(db),
+    draftFacts: dbDraftFactStore(db), knowledge: dbBusinessKnowledge(db),
   } : {};
+  const proposeFactFromChat = createProposeFactFromChat(engine);
 
   const voiceMissing = [
     ...(env.PUBLIC_SERVER_URL ? [] : ['PUBLIC_SERVER_URL']),
@@ -170,7 +173,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
 
   let sweep: ReturnType<typeof setInterval> | undefined;
   return {
-    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, voice, executor, webhooksPlugin, now, newId,
+    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, now, newId,
     async close() { if (pool) await pool.end(); },
     startJobs() {
       if (!hasDb || sweep) return;
