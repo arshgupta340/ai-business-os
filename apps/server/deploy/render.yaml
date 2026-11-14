@@ -70,6 +70,18 @@ services:
       - key: TWILIO_PHONE_NUMBER
         sync: false
 
+      # Telephony (D-12): TELEPHONY_PROVIDER is twilio (default) or agentphone
+      - key: TELEPHONY_PROVIDER
+        sync: false
+      - key: AGENTPHONE_API_KEY
+        sync: false
+      - key: AGENTPHONE_WEBHOOK_SECRET
+        sync: false
+      - key: AGENTPHONE_NUMBER_ID
+        sync: false
+      - key: AGENTPHONE_PHONE_NUMBER
+        sync: false
+
       # Message channel: set MESSAGE_CHANNEL and only that channel's keys
       - key: MESSAGE_CHANNEL
         sync: false

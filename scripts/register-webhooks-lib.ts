@@ -385,12 +385,60 @@ async function writeSquareEnv(ports: Ports, key: string, url: string): Promise<v
   await ports.envFile.write(rewriteEnvContent(current, [['SQUARE_WEBHOOK_SIGNATURE_KEY', key], ['SQUARE_WEBHOOK_URL', url]]));
 }
 
+// AgentPhone (D-12). From the vendor's documentation, not tested against a live account
+// (docs/notes-agentphone.md): GET and POST https://api.agentphone.ai/v1/webhooks with Bearer auth; POST takes
+// { url } and returns { id, url, secret, status }. "A new secret is generated each time", so this script
+// never posts when the URL is already right, and on --apply writes the new secret to .env.local (hidden),
+// because the old one stops matching. A per-agent webhook would override the project one: not checked here.
+
+export const AGENTPHONE_API_BASE = 'https://api.agentphone.ai';
+export const AGENTPHONE_WEBHOOK_PATH = WEBHOOK_ENDPOINTS.agentphone.path;
+
+export interface AgentPhoneResult {
+  before: string | undefined;
+  after: string;
+  changed: boolean;
+  applied: boolean;
+  envWritten: boolean;
+  envPath: string;
+}
+
+function agentphoneError(body: unknown, status: number): string {
+  const err = record(record(body)?.error);
+  const code = str(err?.code);
+  return code ? `AgentPhone answered ${status}: ${code}` : `AgentPhone answered ${status}.`;
+}
+
+export async function registerAgentPhone(ports: Ports, opts: { base: string; apply: boolean }): Promise<AgentPhoneResult> {
+  const key = required(ports.env, 'AGENTPHONE_API_KEY');
+  const headers = { Authorization: `Bearer ${key}`, Accept: 'application/json', 'Content-Type': 'application/json' };
+  const url = `${opts.base}${AGENTPHONE_WEBHOOK_PATH}`;
+  const envPath = ports.envFile.path;
+  const res = await ports.fetch(`${AGENTPHONE_API_BASE}/v1/webhooks`, { method: 'GET', headers });
+  const body = await readJson(res);
+  if (res.status !== 200 && res.status !== 404) throw new RegisterError(agentphoneError(body, res.status));
+  const before = res.status === 200 ? str(record(body)?.url) : undefined;
+  if (before === url) return { before, after: url, changed: false, applied: false, envWritten: false, envPath };
+  if (!opts.apply) return { before, after: url, changed: true, applied: false, envWritten: false, envPath };
+  const post = await ports.fetch(`${AGENTPHONE_API_BASE}/v1/webhooks`, { method: 'POST', headers, body: JSON.stringify({ url }) });
+  const created = await readJson(post);
+  if (post.status !== 200 && post.status !== 201) throw new RegisterError(agentphoneError(created, post.status));
+  const secret = str(record(created)?.secret);
+  if (str(record(created)?.url) !== url) throw new RegisterError('AgentPhone did not return the new webhook URL.');
+  if (!secret) throw new RegisterError('AgentPhone set the webhook but returned no secret. Read it in the AgentPhone dashboard and set AGENTPHONE_WEBHOOK_SECRET.');
+  const current = (await ports.envFile.read()) ?? '';
+  await ports.envFile.write(rewriteEnvContent(current, [['AGENTPHONE_WEBHOOK_SECRET', secret]]));
+  return { before, after: url, changed: true, applied: true, envWritten: true, envPath };
+}
+
 // Command line.
 
 export interface Options {
   apply: boolean;
   twilio: boolean;
   square: boolean;
+  /** Only with --agentphone-only; the default run is Twilio and Square as before. */
+  agentphone?: true;
   base: string | undefined;
 }
 
@@ -399,6 +447,7 @@ export function parseArgs(argv: readonly string[]): Options {
   let dry = false;
   let twilioOnly = false;
   let squareOnly = false;
+  let agentphoneOnly = false;
   let base: string | undefined;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -406,16 +455,19 @@ export function parseArgs(argv: readonly string[]): Options {
     else if (arg === '--dry-run') dry = true;
     else if (arg === '--twilio-only') twilioOnly = true;
     else if (arg === '--square-only') squareOnly = true;
+    else if (arg === '--agentphone-only') agentphoneOnly = true;
     else if (arg === '--base') {
       const next = argv[i + 1];
       if (next === undefined || next.startsWith('--')) throw new RegisterError('--base needs a URL, for example --base https://abos-server.onrender.com');
       base = next;
       i += 1;
     } else if (arg !== undefined && arg.startsWith('--base=')) base = arg.slice('--base='.length);
-    else throw new RegisterError(`Unknown option "${arg ?? ''}". Use --dry-run, --apply, --twilio-only, --square-only or --base <url>.`);
+    else throw new RegisterError(`Unknown option "${arg ?? ''}". Use --dry-run, --apply, --twilio-only, --square-only, --agentphone-only or --base <url>.`);
   }
   if (apply && dry) throw new RegisterError('Use --dry-run or --apply, not both.');
   if (twilioOnly && squareOnly) throw new RegisterError('Use --twilio-only or --square-only, not both.');
+  if (agentphoneOnly && (twilioOnly || squareOnly)) throw new RegisterError('Use --agentphone-only alone, not with --twilio-only or --square-only.');
+  if (agentphoneOnly) return { apply, twilio: false, square: false, agentphone: true, base };
   return { apply, twilio: !squareOnly, square: !twilioOnly, base };
 }
 
@@ -426,7 +478,7 @@ export function redact(line: string, secrets: readonly string[]): string {
   return out;
 }
 
-const SECRET_NAMES = ['TWILIO_AUTH_TOKEN', 'TWILIO_ACCOUNT_SID', 'SQUARE_ACCESS_TOKEN', 'SQUARE_WEBHOOK_SIGNATURE_KEY'];
+const SECRET_NAMES = ['TWILIO_AUTH_TOKEN', 'TWILIO_ACCOUNT_SID', 'SQUARE_ACCESS_TOKEN', 'SQUARE_WEBHOOK_SIGNATURE_KEY', 'AGENTPHONE_API_KEY', 'AGENTPHONE_WEBHOOK_SECRET'];
 
 /** Runs the whole command. Returns the exit code. Every output line goes through `log`. */
 export async function run(ports: Ports, argv: readonly string[], log: (line: string) => void): Promise<number> {
@@ -441,6 +493,8 @@ export async function run(ports: Ports, argv: readonly string[], log: (line: str
         const m = /^SQUARE_WEBHOOK_SIGNATURE_KEY=(.*)$/m.exec(content);
         const key = m?.[1]?.replace(/\r$/, '');
         if (key) secrets.push(key);
+        const ap = /^AGENTPHONE_WEBHOOK_SECRET=(.*)$/m.exec(content)?.[1]?.replace(/\r$/, '');
+        if (ap) secrets.push(ap);
         await ports.envFile.write(content);
       },
     },
@@ -510,8 +564,28 @@ export async function run(ports: Ports, argv: readonly string[], log: (line: str
     }
   }
 
+  let agentphoneWritten = false;
+  if (opts.agentphone) {
+    say('');
+    say('AgentPhone');
+    try {
+      const r = await registerAgentPhone(guardedPorts, { base, apply: opts.apply });
+      say(`  Webhook URL: ${show(r.before)} -> ${r.after}`);
+      if (!r.changed) say('  Already set. No change (the secret was not rotated).');
+      else if (r.applied) {
+        agentphoneWritten = true;
+        say(`  Updated. AgentPhone generated a new secret; wrote AGENTPHONE_WEBHOOK_SECRET (value hidden) to ${r.envPath}. The old secret no longer matches.`);
+      } else say('  Would update (dry run). Applying generates a new webhook secret.');
+    } catch (err) {
+      failed = true;
+      say(`  Failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   say('');
-  if (squareWritten) say(`Next: copy SQUARE_WEBHOOK_SIGNATURE_KEY and SQUARE_WEBHOOK_URL from ${squarePath} into the host's environment settings, then redeploy.`);
+  if (agentphoneWritten) say(`Next: copy AGENTPHONE_WEBHOOK_SECRET from ${ports.envFile.path} into the host's environment settings, then redeploy.`);
+  else if (opts.agentphone) say('Next: after --apply, copy AGENTPHONE_WEBHOOK_SECRET into the host environment settings, then redeploy. The AgentPhone agent must use voiceMode "webhook".');
+  else if (squareWritten) say(`Next: copy SQUARE_WEBHOOK_SIGNATURE_KEY and SQUARE_WEBHOOK_URL from ${squarePath} into the host's environment settings, then redeploy.`);
   else if (opts.square) say(`Next: after --apply, copy SQUARE_WEBHOOK_SIGNATURE_KEY and SQUARE_WEBHOOK_URL from ${squarePath} into the host's environment settings, then redeploy.`);
   else say('Next: nothing to copy to the host for Twilio.');
   if (failed) say('One or more steps failed. See above.');
