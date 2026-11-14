@@ -31,8 +31,8 @@ import {
   orderRejected,
   orderQrOnly,
 } from './orders';
-import { bookingAwaitingApproval, bookingSlotConflict, bookingVerified } from './bookings';
-import { OWNER_USER_ID, addMs } from './world';
+import { bookingAwaitingApproval, bookingSlotConflict, bookingVerified, bookingRejected, bookingExpired, bookingRetryRequired, bookingMessageUnknown } from './bookings';
+import { OWNER_USER_ID, addMs, shiftIsoTimes } from './world';
 
 type Decision = { state: ApprovalState; decidedAt?: string };
 
@@ -190,7 +190,24 @@ export const approvalPriceEditPending = {
   createdAt: PRICE_EDIT_CREATED_AT,
 } satisfies PriceEditApprovalRequest;
 
+export const approvalBookingRejected = bookingApproval(bookingRejected, 'surge', { state: 'REJECTED', decidedAt: '2026-11-14T19:01:00Z' });
+export const approvalBookingExpired = bookingApproval(bookingExpired, 'surge', { state: 'EXPIRED' });
+export const approvalBookingRetry = bookingApproval(bookingRetryRequired, 'surge', { state: 'APPROVED', decidedAt: '2026-11-14T19:01:00Z' });
+export const approvalBookingUnknown = bookingApproval(bookingMessageUnknown, 'surge', { state: 'APPROVED', decidedAt: '2026-11-14T17:33:00Z' });
+
+function decidedFactEdit(id: string, state: 'APPROVED' | 'REJECTED' | 'EXPIRED'): FactEditApprovalRequest {
+  const base = shiftIsoTimes(approvalFactEditPending, -60 * 60 * 1000);
+  return { ...base, id, payloadHash: storedHash(`payload:${id}`), ...decisionFields({ state, decidedAt: state === 'EXPIRED' ? base.expiresAt : addMs(base.createdAt, 60000) }, base.expiresAt) };
+}
+export const approvalFactEditApproved = decidedFactEdit('apv_demo_f88a', 'APPROVED');
+export const approvalFactEditRejected = decidedFactEdit('apv_demo_f88r', 'REJECTED');
+export const approvalFactEditExpired = decidedFactEdit('apv_demo_f88e', 'EXPIRED');
+const pastPriceEdit = shiftIsoTimes(approvalPriceEditPending, -60 * 60 * 1000);
+export const approvalPriceEditRejected: PriceEditApprovalRequest = { ...pastPriceEdit, id: 'apv_demo_p88r', state: 'REJECTED', decidedBy: OWNER_USER_ID, decidedAt: addMs(pastPriceEdit.createdAt, 60000), payloadHash: storedHash('payload:apv_demo_p88r') };
+
 export const approvals: ApprovalRequest[] = [
+  approvalBookingRejected, approvalBookingExpired, approvalBookingRetry, approvalBookingUnknown,
+  approvalFactEditApproved, approvalFactEditRejected, approvalFactEditExpired, approvalPriceEditRejected,
   approvalOrderQrOnly,
   approvalPriceEditPending,
   approvalFactEditPending,

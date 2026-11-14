@@ -28,6 +28,7 @@ import {
   OrderSchema,
   QUOTE_EXPIRY_MS,
   ServiceOfferingSchema,
+  SyncJobSchema,
   MATERIAL_FIELDS,
   approvalPayloadHash,
   canonicalJson,
@@ -82,6 +83,8 @@ describe('fixtures parse with the contract schemas', () => {
     parsesAll(ApprovalRequestSchema, F.approvals, 'approvals');
     parsesAll(ActionExecutionSchema, F.executions, 'executions');
     parsesAll(MessageDispatchSchema, F.messageDispatches, 'dispatches');
+    parsesAll(SyncJobSchema, F.syncJobs, 'sync jobs');
+    parses(IntegrationHealthSchema, F.integrationHealthDisconnected, 'disconnected health');
     parses(IntegrationHealthSchema, F.integrationHealth, 'health');
     parsesAll(OrderCheckoutSchema, F.orderCheckouts, 'checkouts');
     parsesAll(ActivityEventSchema, F.allActivityEvents, 'activity');
@@ -190,7 +193,7 @@ describe('business rules the stricter contracts check', () => {
     expect(new Set(F.orders.map((o) => o.status))).toEqual(
       new Set(['AWAITING_OWNER_APPROVAL', 'PAYMENT_PENDING', 'PAID_VERIFIED', 'FULFILLMENT_READY', 'REJECTED', 'APPROVAL_EXPIRED', 'PAYMENT_FAILED']),
     );
-    expect(new Set(F.bookings.map((b) => b.status))).toEqual(new Set(['AWAITING_OWNER_APPROVAL', 'BOOKED_VERIFIED', 'SLOT_CONFLICT']));
+    expect(new Set(F.bookings.map((b) => b.status))).toEqual(new Set(['AWAITING_OWNER_APPROVAL', 'BOOKED_VERIFIED', 'SLOT_CONFLICT', 'REJECTED', 'EXPIRED', 'RETRY_REQUIRED']));
     expect(new Set(F.approvals.map((a) => a.bundleType))).toEqual(new Set(['order_bundle', 'booking_bundle', 'fact_edit', 'price_edit']));
     expect(new Set(F.approvals.map((a) => a.state))).toEqual(new Set(['PENDING', 'APPROVED', 'REJECTED', 'EXPIRED']));
     expect(new Set(F.calls.map((c) => c.channel))).toEqual(new Set(['phone', 'test_console']));
@@ -586,6 +589,8 @@ async function checkWorld(W: FixtureWorld): Promise<void> {
   parsesAll(ApprovalRequestSchema, [...W.approvals, ...W.pendingApprovals], 'approvals');
   parsesAll(ActionExecutionSchema, W.executions, 'executions');
   parsesAll(MessageDispatchSchema, W.messageDispatches, 'dispatches');
+  parsesAll(SyncJobSchema, W.syncJobs, 'sync jobs');
+  parses(IntegrationHealthSchema, W.integrationHealthDisconnected, 'disconnected health');
   parses(IntegrationHealthSchema, W.integrationHealth, 'health');
   parsesAll(OrderCheckoutSchema, W.orderCheckouts, 'checkouts');
   parsesAll(ActivityEventSchema, W.allActivityEvents, 'activity');
@@ -633,6 +638,10 @@ describe('materializeFixtures', () => {
     ['the real current time', new Date()],
     ['a time across the March 2027 daylight saving change', new Date('2027-03-14T18:00:00Z')],
     ['a time far in the future', new Date('2099-06-30T23:59:59.250Z')],
+    ['late at night', new Date('2026-11-15T07:59:00Z')],
+    ['Sunday', new Date('2026-11-15T20:00:00Z')],
+    ['before spring daylight saving', new Date('2027-03-14T09:59:00Z')],
+    ['after fall daylight saving', new Date('2026-11-01T09:01:00Z')],
   ] as const;
 
   it.each(times)('at %s: every object parses, every hash is real, PENDING approvals are live, the original is untouched', async (_label, now) => {

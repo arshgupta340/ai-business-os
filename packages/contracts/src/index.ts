@@ -15,6 +15,7 @@ export * from './schemas/facts';
 export * from './schemas/orders';
 export * from './schemas/approvals';
 export * from './schemas/executions';
+export * from './schemas/sync';
 export * from './schemas/agents';
 export * from './schemas/builder';
 export * from './schemas/business';

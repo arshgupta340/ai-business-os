@@ -183,7 +183,11 @@ export const faqDraftAgent = {
   updatedAt: '2026-11-14T20:28:00Z',
 } satisfies Agent;
 
-export const agents: Agent[] = [pizzaAgent, barberAgent, faqDraftAgent];
+export const pausedSpec: AgentSpec = { ...pizzaSpecV1, id: 'agt_pizza_paused_88', status: 'paused' };
+export const pausedVersion: AgentVersion = { ...pizzaVersionV1, id: 'agv_pizza_paused_88_v1', agentId: pausedSpec.id, spec: pausedSpec };
+agentVersions.push(pausedVersion);
+export const pausedAgent: Agent = { ...pizzaAgent, id: pausedSpec.id, state: 'paused', activeVersionId: pausedVersion.id, activeVersion: pausedVersion, draftSpec: pausedSpec, isLiveAgent: false };
+export const agents: Agent[] = [pizzaAgent, barberAgent, faqDraftAgent, pausedAgent];
 
 export const liveAgent = {
   phoneNumber: DEMO_PHONE_NUMBER,
