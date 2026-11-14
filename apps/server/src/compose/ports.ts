@@ -272,7 +272,8 @@ export function dbLiveAgentPort(db: Db): LiveAgentPort {
         left join public.agents a on a.id = l.agent_id left join public.agent_versions v on v.id = l.agent_version_id
         where l.phone_number = $1`, [phoneNumber]))[0];
       if (!row || typeof row.agent_id !== 'string' || typeof row.agent_version_id !== 'string') return { state: 'none' };
-      if (row.state !== 'live') return { state: 'paused' };
+      // The identity lets the voice webhook record the refused call as started and ended (API.md 4).
+      if (row.state !== 'live') return { state: 'paused', businessId: String(row.business_id), agentId: row.agent_id, agentVersionId: row.agent_version_id };
       const spec = AgentSpecSchema.safeParse(row.spec);
       if (!spec.success) return { state: 'none' };
       return { state: 'live', businessId: String(row.business_id), businessName: String(row.business_name), agentId: row.agent_id, agentVersionId: row.agent_version_id, spec: spec.data };

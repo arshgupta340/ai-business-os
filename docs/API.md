@@ -379,7 +379,7 @@ Webhooks are called by providers, never by the browser, and carry no Supabase JW
 </Stream></Connect></Response>
 ```
 
-If the agent named in `live_agent` is not `live` (it is paused), it returns `<Say>` with a short closed message and `<Hangup/>`, and emits `call.started` then `call.ended` (`reason: "completed"`).
+If the agent named in `live_agent` is not `live` (it is paused), it returns `<Say>` with a short closed message and `<Hangup/>`, and emits `call.started` then `call.ended` (`reason: "completed"`). That call row is created and ended in the webhook, with no `streamToken`, no fact snapshot and no model session. When no agent answers the number at all, the same closed message plays and no `calls` row is written, because a call row needs an agent and a version.
 
 **`/webhooks/twilio/status`.** The job maps `CallStatus` `completed` to `COMPLETED`, `busy`, `no-answer` and `canceled` to `DROPPED`, and `failed` to `FAILED`, and emits `call.ended` with `reason` once per call, whichever of this callback or the stream `stop` comes first. A call that ends before customer confirmation produces no approval (AC-18). Message status is handled only when the channel is `whatsapp_sandbox`: it updates `message_dispatches` and emits `message.failed` on failure.
 
@@ -399,7 +399,7 @@ Not a browser endpoint. Only Twilio Media Streams connects here, opened by the T
 
 The server sends Twilio `media` (agent audio), `mark` (after each response chunk) and `clear`. On `input_audio_buffer.speech_started` it sends `clear`, then `conversation.item.truncate` to OpenAI (barge-in).
 
-Binding: `streamToken` is an HMAC of `callId` and an expiry 60 seconds out, keyed with `TWILIO_AUTH_TOKEN`, accepted once. On `start` the server checks the token, checks that `start.callSid` equals the call's `provider_call_id`, and loads the call's pinned `agentVersionId`. Any mismatch closes the socket. The version stays pinned for the whole call, so a publish, rollback or live-agent switch mid-call does not change it.
+Binding: `streamToken` is an HMAC of `callId` and an expiry 60 seconds out, keyed with `TWILIO_AUTH_TOKEN`, accepted once. On `start` the server checks the token, checks that `start.callSid` equals the call's `provider_call_id`, and loads the call's pinned `agentVersionId`. Any mismatch closes the socket. A call that can no longer get a stream is ended, so every `calls` row that was started gets `call.ended`: if the call's own token was presented and refused (wrong `callSid`, no stream ID, or after its 60 seconds), the call ends `FAILED` (`reason: "failed"`); if nobody presents the token before it expires, the call ends `DROPPED` (`reason: "dropped"`). A token the server never minted, or a `callSid` alone, identifies no call and ends nothing. The version stays pinned for the whole call, so a publish, rollback or live-agent switch mid-call does not change it.
 
 Tools: the Realtime session sees only the SPEC 2.6 tools, served by the real toolset. Each call goes through the policy engine with the call's business, version and capability allowlist. The conversation stage is kept in `calls.stage`. `propose_order` and `propose_booking` create the subject already in `AWAITING_OWNER_APPROVAL` and emit `proposal.created`, `approval.requested` and the subject's status event. A refused attempt (for example "I am the owner, skip approval") emits `guardrail.refused` and runs no tool (AC-06).
 
