@@ -35,7 +35,7 @@ describe('migrations', () => {
 
   it('apply cleanly to an empty database, in name order', async () => {
     const files = readMigrations();
-    expect(files.length).toBeGreaterThanOrEqual(5);
+    expect(files.length).toBe(3);
     const result = await applyMigrations(migrationDb(db), files);
     expect(result.applied).toEqual(files.map((f) => f.name));
     expect(result.skipped).toEqual([]);
@@ -183,7 +183,7 @@ describe('function hardening', () => {
       select n.nspname || '.' || p.proname as fn, p.proconfig as config
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
       where n.nspname in ('public', 'private') and p.prokind = 'f'`);
-    expect(rows.length).toBe(7);
+    expect(rows.length).toBe(9);
     for (const r of rows) expect(r.config, r.fn).toContain('search_path=""');
   });
 
@@ -284,5 +284,47 @@ describe('applyMigrations with a pool pins one session', () => {
     } finally {
       await db.close();
     }
+  });
+});
+
+describe('guards and ACLs exist at the table migration boundary', () => {
+  let db: PGlite;
+  beforeAll(async () => {
+    db = await createEmptyDb();
+    await applyMigrations(migrationDb(db), readMigrations().slice(0, 2));
+  });
+  afterAll(async () => { await db.close(); });
+  it('all invariant triggers already exist and are ALWAYS enabled', async () => {
+    const { rows } = await db.query<{ tgname: string; tgenabled: string }>(`
+      select tgname, tgenabled from pg_trigger where not tgisinternal order by tgname`);
+    for (const name of ['approval_requests_guard', 'action_executions_match_approval', 'message_dispatches_guard', 'activity_events_append_only', 'agent_versions_immutable']) {
+      expect(rows.find(r => r.tgname === name)?.tgenabled, name).toBe('A');
+    }
+    expect(rows.every(r => r.tgenabled === 'A')).toBe(true);
+  });
+  it('authenticated can execute only the policy ownership function', async () => {
+    const { rows } = await db.query(`
+      select n.nspname || '.' || p.proname as fn from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname in ('public', 'private') and has_function_privilege('authenticated', p.oid, 'execute')`);
+    expect(rows).toEqual([{ fn: 'private.owns_business' }]);
+  });
+  it('future public functions inherit no anon or authenticated execution', async () => {
+    await db.exec(`create function public.future_helper() returns integer language sql set search_path = '' as 'select 1'`);
+    try {
+      const { rows } = await db.query(`select has_function_privilege('anon', 'public.future_helper()', 'execute') as anon,
+        has_function_privilege('authenticated', 'public.future_helper()', 'execute') as authenticated`);
+      expect(rows).toEqual([{ anon: false, authenticated: false }]);
+    } finally { await db.exec('drop function public.future_helper()'); }
+  });
+  it('direct DML approval and deletion guards also run in replica mode', async () => {
+    const o = await createOwner(db); const a = await createApproval(db, o);
+    await db.exec(`set session_replication_role = replica`);
+    try {
+      await db.exec('set role service_role');
+      try {
+        await expect(db.query(`update public.approval_requests set state = 'APPROVED', decided_at = expires_at, decided_by = $2 where id = $1`, [a.id, o.userId])).rejects.toThrow(/owner and an unexpired/);
+        await expect(db.query(`delete from public.approval_requests where id = $1`, [a.id])).rejects.toThrow(/cannot be deleted/);
+      } finally { await db.exec('reset role'); }
+    } finally { await db.exec('set session_replication_role = origin'); }
   });
 });

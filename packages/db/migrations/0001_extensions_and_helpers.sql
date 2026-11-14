@@ -7,6 +7,8 @@ create schema if not exists extensions;
 
 -- btree_gist lets the bookings_no_overlap exclusion constraint compare text columns with "=".
 create extension if not exists btree_gist with schema extensions;
+create extension if not exists pgcrypto with schema extensions;
+grant usage on schema extensions to service_role;
 
 -- Functions that must not be reachable through the Supabase Data API live here.
 -- Supabase exposes only the schemas listed in its API settings; "private" is not one of them.
@@ -20,10 +22,10 @@ revoke all on schema private from anon;
 alter default privileges in schema public revoke all on tables from anon, authenticated;
 alter default privileges in schema public revoke all on sequences from anon, authenticated;
 
--- New functions are not executable by PUBLIC or anon unless a migration grants it.
+-- New functions are not executable by PUBLIC, anon or authenticated unless a migration grants it.
 -- The PUBLIC default is global in Postgres, so it can only be removed globally.
 alter default privileges revoke execute on functions from public;
-alter default privileges in schema public revoke execute on functions from anon;
+alter default privileges in schema public revoke execute on functions from anon, authenticated;
 
 -- Primary keys are text with a type prefix (SPEC 2.1), for example gen_id('ord_').
 create or replace function public.gen_id(prefix text) returns text
@@ -31,10 +33,10 @@ language sql volatile set search_path = '' as $$
   select prefix || pg_catalog.replace(pg_catalog.gen_random_uuid()::text, '-', '')
 $$;
 -- Column defaults call gen_id as the inserting role. Only the server's service role inserts.
-revoke execute on function public.gen_id(text) from public, anon;
+revoke execute on function public.gen_id(text) from public, anon, authenticated;
 grant execute on function public.gen_id(text) to service_role;
 
--- Attached as a "before update" trigger to every table with an updated_at column (0004).
+-- Attached as a "before update" trigger to every table with an updated_at column (0002).
 create or replace function public.set_updated_at() returns trigger
 language plpgsql set search_path = '' as $$ begin new.updated_at = pg_catalog.now(); return new; end $$;
-revoke execute on function public.set_updated_at() from public, anon;
+revoke execute on function public.set_updated_at() from public, anon, authenticated;

@@ -65,7 +65,7 @@ function bookingWithRefs(status: string) {
 
 // Approvals are always created PENDING (approval_requests_guard), so each state is reached by an update.
 async function approvalIn(state: string) {
-  const a = await createApproval(db, owner);
+  const a = await createApproval(db, owner, state === 'EXPIRED' ? { expires_at: new Date(Date.now() - 1000) } : {});
   if (state === 'PENDING') return a;
   const byOwner = state === 'APPROVED' || state === 'REJECTED';
   const { rows } = await db.query(
@@ -77,12 +77,14 @@ async function approvalIn(state: string) {
 
 async function executionIn(status: string) {
   const approval = await createApprovedApproval(db, owner);
-  return createExecution(db, owner, String(approval.id), { status, finished_at: new Date() });
+  const e = await createExecution(db, owner, String(approval.id));
+  const { rows } = await db.query(`update public.action_executions set status = $2, finished_at = now() where id = $1 returning *`, [e.id, status]);
+  return rows[0];
 }
 
 async function dispatchIn(status: string, channel = 'surge', idempotencyKey = hex64()) {
   const order = await createOrder(db, owner);
-  const approval = await createApprovedApproval(db, owner, { subject_id: order.id });
+  const approval = await createApprovedApproval(db, owner, { subject_id: order.id, payload: { messageChannel: channel, messageRecipient: '+15555550123' } });
   const exe = await createExecution(db, owner, String(approval.id), { action_type: 'message.checkout.send', step_index: 1 });
   return insert(db, 'message_dispatches', {
     business_id: owner.businessId, approval_id: approval.id, execution_id: exe.id, order_id: order.id,

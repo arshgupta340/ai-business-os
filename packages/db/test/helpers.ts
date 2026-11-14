@@ -1,11 +1,12 @@
 // Test helpers: a fresh in-process Postgres (PGlite) with the Supabase stand-ins and every
 // migration applied, plus small insert helpers. These rows exist only inside each test database.
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
+import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 import { btree_gist } from '@electric-sql/pglite/contrib/btree_gist';
 import { decideApproval } from '../src/guarded-updates';
 import { applyMigrations, type MigrationDb } from '../src/migrate';
@@ -25,7 +26,7 @@ export function migrationDb(db: PGlite): MigrationDb {
 
 /** A new empty database with the test prelude only. */
 export async function createEmptyDb(): Promise<PGlite> {
-  const db = await PGlite.create({ extensions: { btree_gist } });
+  const db = await PGlite.create({ extensions: { btree_gist, pgcrypto } });
   await db.exec(PRELUDE_SQL);
   return db;
 }
@@ -114,10 +115,12 @@ export async function createOrder(db: PGlite, o: Owner, extra: Row = {}): Promis
 }
 
 export async function createApproval(db: PGlite, o: Owner, extra: Row = {}): Promise<Row> {
+  const payload = extra.payload ?? { businessId: o.businessId, messageChannel: 'surge', messageRecipient: '+15555550123' };
+  const canonical = String(extra.payload_canonical ?? JSON.stringify(payload));
   return insert(db, 'approval_requests', {
     id: `apv_${uniq()}`, business_id: o.businessId, actor_type: 'deployed_agent', actor_id: o.agentVersionId,
     bundle_type: 'order_bundle', action_bundle: ORDER_BUNDLE, subject_id: `ord_${uniq()}`,
-    payload: { businessId: o.businessId }, payload_hash: hash(),
+    payload, payload_canonical: canonical, payload_hash: `sha256:${createHash('sha256').update(canonical).digest('hex')}`,
     ...extra,
   });
 }

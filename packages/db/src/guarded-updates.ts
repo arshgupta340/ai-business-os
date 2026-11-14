@@ -1,6 +1,8 @@
+import type { PoolClient } from 'pg';
+
 // The few queries whose exact form is the rule. The server calls these functions instead of
-// writing its own version of the SQL. Each takes a query executor: a pg Pool, a pg Client,
-// a transaction client or a PGlite instance all fit.
+// writing its own version of the SQL. decideAndEnqueue requires a transaction client.
+// The other helpers accept any pg-style query executor.
 // Source: docs/DATA-MODEL.md sections 2.14, 2.17 and 2.19, and docs/CONTRACTS.md sections 4 to 6.
 
 /** Anything with a pg-style query method: `query(text, params) -> { rows }`. */
@@ -17,6 +19,9 @@ export interface ApprovalRow {
   subject_id: string;
   state: string;
   payload_hash: string;
+  payload_canonical: string;
+  payload: Record<string, unknown>;
+  action_bundle: string[];
   expires_at: Date;
   decided_by: string | null;
   decided_at: Date | null;
@@ -68,6 +73,7 @@ where  r.id = $1 and r.business_id = $2 and b.id = r.business_id and b.owner_id 
   and  r.payload_hash = $5 and r.state = 'PENDING' and r.expires_at > now()
 returning r.*`;
 
+/** @deprecated Use decideAndEnqueue in a caller-owned transaction. */
 export async function decideApproval(
   db: QueryExecutor,
   args: {
@@ -93,6 +99,73 @@ export async function decideApproval(
   return (rows[0] as ApprovalRow | undefined) ?? null;
 }
 
+/** A checked-out pg client. A Pool lacks release and cannot satisfy this interface. */
+export type TransactionClient = QueryExecutor & Pick<PoolClient, 'release'>;
+export type DecideAndEnqueueArgs = Parameters<typeof decideApproval>[1] & {
+  /** One stable key per non-deferred step, in bundle order. Empty for rejection. */
+  stepIdempotencyKeys: readonly string[];
+};
+
+/**
+ * The caller owns BEGIN and COMMIT (and connection release). Pass the same checked-out client
+ * for the whole transaction. A savepoint makes a failed enqueue undo its decision even if the
+ * caller catches the error and later commits. No provider calls belong in this transaction.
+ * Identical retries return existing rows; conflicting decisions or keys return null.
+ */
+export async function decideAndEnqueue(
+  tx: TransactionClient,
+  args: DecideAndEnqueueArgs,
+): Promise<{ approval: ApprovalRow; executions: ExecutionRow[] } | null> {
+  await tx.query('savepoint decide_and_enqueue');
+  try {
+    const { rows } = await tx.query(`
+      select r.* from public.approval_requests r
+      join public.businesses b on b.id = r.business_id
+      where r.id = $1 and r.business_id = $2 and b.owner_id = $3 and r.payload_hash = $4
+      for update of r`, [args.approvalId, args.businessId, args.ownerUserId, args.payloadHash]);
+    const existing = rows[0] as ApprovalRow | undefined;
+    let result: { approval: ApprovalRow; executions: ExecutionRow[] } | null = null;
+    if (existing) {
+      const steps = existing.action_bundle.filter(step => !step.startsWith('sheets.'));
+      if (existing.state === 'PENDING') {
+        const expected = args.decision === 'APPROVED' ? steps.length : 0;
+        if (args.stepIdempotencyKeys.length !== expected) throw new Error(`expected ${expected} step idempotency keys`);
+        const approval = await decideApproval(tx, args);
+        if (approval) {
+          const executions: ExecutionRow[] = [];
+          if (approval.state === 'APPROVED') {
+            for (const [index, action] of steps.entries()) {
+              const status = action.startsWith('message.') && approval.payload.messageChannel === 'qr_only' ? 'SKIPPED' : 'QUEUED';
+              const inserted = await tx.query(`
+                insert into public.action_executions (business_id, approval_id, action_type, step_index, idempotency_key, status)
+                values ($1, $2, $3, $4, $5, $6) returning *`,
+                [approval.business_id, approval.id, action, index, args.stepIdempotencyKeys[index], status]);
+              executions.push(inserted.rows[0] as ExecutionRow);
+            }
+          }
+          result = { approval, executions };
+        }
+      } else if (existing.state === args.decision && existing.decided_by === args.ownerUserId
+                 && (existing.decision_reason ?? null) === (args.reason ?? null)) {
+        const stored = await tx.query('select * from public.action_executions where approval_id = $1 order by step_index', [existing.id]);
+        const executions = stored.rows as ExecutionRow[];
+        const expected = args.decision === 'APPROVED' ? steps.length : 0;
+        if (executions.length === expected && args.stepIdempotencyKeys.length === expected
+            && executions.every((e, i) => e.step_index === i && e.action_type === steps[i]
+                 && e.idempotency_key === args.stepIdempotencyKeys[i])) {
+          result = { approval: existing, executions };
+        }
+      }
+    }
+    await tx.query('release savepoint decide_and_enqueue');
+    return result;
+  } catch (error) {
+    await tx.query('rollback to savepoint decide_and_enqueue');
+    await tx.query('release savepoint decide_and_enqueue');
+    throw error;
+  }
+}
+
 /**
  * A row x of action_executions may be claimed only when all of these hold:
  * - its approval a is APPROVED, was decided before it expired, and is in the same business;
@@ -103,21 +176,8 @@ export async function decideApproval(
  * The trigger action_executions_match_approval enforces the first two at insert as well.
  */
 const CLAIMABLE = `
-     a.id = x.approval_id and a.business_id = x.business_id
- and a.state = 'APPROVED' and a.decided_at is not null and a.decided_at < a.expires_at
- and x.status = 'QUEUED' and x.next_attempt_at <= now()
- and (array(select t.step from unnest(a.action_bundle) with ordinality as t(step, n)
-            where t.step not like 'sheets.%' order by t.n))[x.step_index + 1] = x.action_type
- and not exists (
-   select 1
-   from unnest(array(select t.step from unnest(a.action_bundle) with ordinality as t(step, n)
-                     where t.step not like 'sheets.%' order by t.n)) with ordinality as e(step, n)
-   where e.n - 1 < x.step_index
-     and not exists (
-       select 1 from public.action_executions p
-       where p.approval_id = x.approval_id and p.step_index = e.n - 1 and p.action_type = e.step
-         and (p.status = 'SUCCEEDED'
-              or (p.action_type like 'message.%' and p.status in ('SKIPPED', 'FAILED', 'NEEDS_REVIEW')))))`;
+     x.status = 'QUEUED' and x.next_attempt_at <= now()
+ and public.execution_claim_allowed(x.approval_id, x.business_id, x.step_index, x.action_type)`;
 
 /**
  * Claims one execution so only one worker owns it. Zero rows means another worker holds it,
@@ -129,7 +189,6 @@ export const CLAIM_EXECUTION_SQL = `
 update public.action_executions x
 set    status = 'RUNNING', attempts = x.attempts + 1, locked_by = $1, locked_at = now(),
        started_at = coalesce(x.started_at, now())
-from   public.approval_requests a
 where  x.id = $2 and ${CLAIMABLE}
 returning x.*`;
 
@@ -145,7 +204,7 @@ export async function claimExecution(
 export const CLAIM_NEXT_EXECUTION_SQL = `
 with next as (
   select x.id
-  from   public.action_executions x, public.approval_requests a
+  from   public.action_executions x
   where  ${CLAIMABLE}
   order by x.next_attempt_at, x.created_at
   limit 1

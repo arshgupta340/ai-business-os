@@ -1,103 +1,99 @@
 # @abos/db
 
-The Supabase (Postgres) schema for AI Business OS, the runner that applies it, and the few queries whose exact form is a rule. Owner: Arsh. The source for every table, constraint and policy is `docs/DATA-MODEL.md`.
+Supabase PostgreSQL schema, checksum migration runner and guarded database operations for AI Business OS. Table names and states follow `docs/SPEC.md` and `docs/DATA-MODEL.md`.
 
-Nothing here holds a secret. The connection string lives in `.env.local` as `DATABASE_URL`.
+## Files
 
-## What is in this folder
-
-| Path | What it holds |
+| File | Contents |
 |---|---|
-| `migrations/0001_extensions_and_helpers.sql` | The `extensions` and `private` schemas, `btree_gist`, default privileges that keep new tables and functions closed to `anon` and `authenticated`, `gen_id()` and `set_updated_at()` |
-| `migrations/0002_core_tables.sql` | All 21 tables of SPEC 2.7 in dependency order with their checks and unique keys, then in the same file `private.owns_business()`, row level security, the read-only owner policies and the table privileges |
-| `migrations/0003_indexes.sql` | Unique indexes on Square and Google IDs, and the dashboard indexes |
-| `migrations/0004_triggers.sql` | `updated_at`; immutable published agent versions; append-only `activity_events`; approvals born `PENDING` and frozen except for the one decision; executions only for an `APPROVED` bundle and only as the step the bundle lists |
-| `migrations/0005_realtime.sql` | Adds `activity_events` to the `supabase_realtime` publication |
-| `src/migrate.ts` | The migration runner |
-| `src/guarded-updates.ts` | `decideApproval`, `claimExecution`, `claimNextExecution`, `recordWebhookEvent`, `expireApprovals` |
-| `test/` | Tests that run every migration on PGlite, plus the test-only Supabase prelude |
+| `migrations/0001_extensions_and_helpers.sql` | `extensions` and `private` schemas, `btree_gist`, `pgcrypto`, default privilege lockdown, ID and timestamp helpers |
+| `migrations/0002_core_tables.sql` | All 21 application tables, constraints, indexes, RLS, intentional owner reads, invariant functions and ALWAYS triggers, in one transaction |
+| `migrations/0003_realtime.sql` | `activity_events` membership in `supabase_realtime` |
+| `src/migrate.ts` | Session-pinned, checksum-recorded migration runner |
+| `src/guarded-updates.ts` | `decideAndEnqueue`, deprecated `decideApproval`, both claim operations, webhook dedupe and approval expiry |
+| `test/` | Offline PGlite tests and test-only Supabase stand-ins |
 
-The seed and reset scripts are task B-10 and are not here yet.
+## Apply migrations
 
-## Apply the migrations to Supabase
+Apply each SQL file as one transaction using the migration administrator. The runner reads `DATABASE_URL` from the environment or the nearest `.env.local`. Use a session connection rather than a transaction pooler:
 
-Option 1, the runner. In the Supabase dashboard open Connect and copy the **session** connection string (port 5432, not the transaction pooler on 6543). Put it in `.env.local` at the repo root:
-
-```
-DATABASE_URL=postgresql://postgres.<project-ref>:<password>@<region>.pooler.supabase.com:5432/postgres
-```
-
-Then, from the repo root:
-
-```bash
+```sh
 npm run migrate -w @abos/db
 ```
 
-The runner finds `.env.local` by walking up from the current directory. It applies each file in name order inside its own transaction and records it in `public.schema_migrations`. Running it again applies nothing. If a file that was already applied has been edited, the runner stops: add a new numbered file instead of changing an old one.
+The runner takes one advisory lock on one session, applies each file inside BEGIN and COMMIT, and records its checksum in `public.schema_migrations`. Running it twice skips every recorded file without changing the schema. A changed checksum stops the run. A failed file rolls back and is not recorded. The runner accepts either a pool, from which it checks out one client for the entire run, or a single-session adapter. Never wrap pool.query as a single-session adapter.
 
-Each file is safe on its own: tables and their row level security are in the same file, so a run that stops after any file leaves no table readable or writable by `anon` or `authenticated`.
+This review consolidates the initial migration files. It is a fresh-database baseline, not an upgrade for an installation that recorded the previous file names or checksums. Such an installation needs a separately planned forward migration or an operator-approved rebuild. The runner intentionally refuses to silently reinterpret applied history.
 
-Option 2, the SQL editor or any tool that runs one file as one transaction. Run each file from `migrations/` in name order, `0001` first. This does not fill `schema_migrations`, so do not mix the two methods on one database. If you used the editor and later want the runner, start from a fresh project.
+Alternatively, apply files in order through a SQL editor, each in one transaction. This does not populate the runner's history; do not mix the two methods. Never run `test/` SQL against Supabase.
 
-Do not run anything from `test/` against Supabase.
+## Safety at each committed file boundary
 
-## Use the guarded queries
+The matrix assumes the files run as the same migration role, as intended on Supabase. Default privileges apply to objects created by that role. No application table commits without its RLS, privileges, constraints and invariant triggers.
+
+| After file | anon | authenticated | service_role |
+|---|---|---|---|
+| `0001_extensions_and_helpers.sql` | No application tables exist; no execution of public helpers | Same as anon | Can execute `gen_id`; retains intended Supabase service defaults |
+| `0002_core_tables.sql` | No application table access and no execution of application functions | SELECT own user row, owned businesses and business-scoped rows, and global capabilities through RLS. No table writes or TRUNCATE. No access to webhook_events or schema_migrations. Only `private.owns_business` is executable for the policies | Bypasses RLS and retains direct table DML, subject to constraints and ALWAYS triggers. Retains Supabase's TRUNCATE grant |
+| `0003_realtime.sql` | Unchanged | Unchanged; activity_events is now in the Realtime publication | Unchanged |
+
+When using the runner, `schema_migrations` has RLS and explicit revokes as soon as it is created, including before `0001`. Neither browser role can access it. Public functions created by the migration role default to no EXECUTE for PUBLIC, anon or authenticated. Existing helpers and trigger functions explicitly revoke these grants. `private.owns_business` is the only SECURITY DEFINER function; it uses an empty search path and qualified names, with schema USAGE and function EXECUTE granted only to authenticated. `execution_claim_allowed` and ID generation are executable by service_role.
+
+### Approval and execution invariants
+
+Approvals start PENDING with no decision. Material columns, including `payload_canonical`, never change. APPROVED and REJECTED require the business's owner as decided_by, decided_at before expires_at, and an unexpired request at decision time. EXPIRED requires now() at or after expires_at, decided_at and no deciding user. Terminal approvals cannot change. DELETE is rejected for every approval, including one without executions.
+
+The proposal writer supplies `payload_canonical`: the exact canonical JSON string of the material fields it hashed. Canonicalization follows SPEC 2.9 and CONTRACTS section 4: recursively sorted keys, no whitespace, UTF-8, arrays in order. The database verifies that this string parses as a JSON object, that payload contains that object's keys and values, and that payload_hash equals `sha256:` plus the lowercase hexadecimal SHA-256 of those exact bytes using `extensions.digest`. The database does not reserialize JSON or enforce the server's choice of material keys or canonical key order. Payload may contain additional display fields. Execution code must use the stored canonical material for approved material fields.
+
+Execution inserts require an APPROVED request decided before expiry, the same business, and the exact non-deferred bundle position. Initial status must be QUEUED, or SKIPPED for `message.checkout.send` or `message.booking.confirm`. Execution identity and its idempotency key are immutable. Both claim queries and every direct transition into RUNNING call the same SQL function, `public.execution_claim_allowed`. It requires valid approval, business and bundle position and a finished row for every earlier expected step. A missing predecessor blocks a claim. SUCCEEDED counts as finished; only message steps may instead end SKIPPED, FAILED or NEEDS_REVIEW. The guarded claims additionally require QUEUED and a due retry time. ALWAYS triggers also run in replica mode.
+
+Dispatches are unique per execution. They require a message execution, the approval's order or booking subject in the same business, the matching bundle and template, and recipient and channel equal to the approved payload and canonical material. No dispatch exists for qr_only. After insert, business, approval, execution, subject source columns, channel, recipient, template, body hash, ID and idempotency key cannot change. Only status, attempts, provider reference, timestamps and error fields can change. Body hash is frozen on insert; the database does not prove a rendered provider message's bytes or a provider result. The sent-state constraint requires a provider message ID.
+
+Published agent versions reject row updates and deletes after publication. Activity events reject row updates and deletes. These invariant triggers are also ALWAYS enabled.
+
+### Remaining bypasses
+
+The table owner can disable triggers, change constraints or grants, and rewrite data. ALWAYS does not prevent an owner disabling a trigger. TRUNCATE bypasses row triggers and remains the operator reset path, including for approvals, versions and audit events. Supabase's service_role retains its default TRUNCATE privilege. Row guards do not constrain that administrative reset path. The application should not connect as the table owner or use the migration administrator connection.
+
+## Open decision
+
+A dedicated non-owner runtime role and an operator-only reset privilege boundary remain a project-owner decision. This task creates no new database login role and does not change which role the application uses. service_role retains direct DML and TRUNCATE. The row-level bypasses tested here are closed, but isolating reset from runtime requires a separately approved privilege change. No claim is made that a malicious holder of the service credential cannot reset data or that database fields authenticate the human owner; the server must authenticate the owner before deciding.
+
+## Decide and enqueue atomically
+
+Use `decideAndEnqueue(tx, args)` to decide. Its transaction client type requires a checked-out client's release method, so a pg.Pool cannot be passed. The caller owns BEGIN, COMMIT, ROLLBACK and client release:
 
 ```ts
-import { decideApproval, recordWebhookEvent } from '@abos/db';
-
-const decided = await decideApproval(pool, { approvalId, businessId, decision: 'APPROVED', ownerUserId, payloadHash });
-if (!decided) {
-  // Already decided, expired, or the hash no longer matches. Read the row to choose the error code.
+const tx = await pool.connect();
+try {
+  await tx.query('BEGIN');
+  const result = await decideAndEnqueue(tx, {
+    approvalId, businessId, ownerUserId, payloadHash,
+    decision: 'APPROVED',
+    stepIdempotencyKeys, // one caller-supplied stable key per non-deferred step, in order
+  });
+  // Add any subject transitions and activity events on tx in this transaction.
+  await tx.query('COMMIT');
+  return result;
+} catch (error) {
+  await tx.query('ROLLBACK');
+  throw error;
+} finally {
+  tx.release();
 }
 ```
 
-Each function takes anything with a pg-style `query(text, params)` method: a `pg` Pool, a client inside a transaction, or PGlite. Do not rewrite these queries in the server; the `where` clauses are the rules.
+The operation locks the approval, checks business, owner, hash and expiry, makes the guarded decision, and inserts each non-deferred step in order. Steps start QUEUED except the message step for qr_only, which starts SKIPPED. Sheets is deferred until verified payment or booking. Reject with an empty stepIdempotencyKeys array. A repeated identical decision, reason and keys returns the existing approval and executions without insertion; mismatches return null. Incorrect key counts throw. A savepoint rolls back both decision and inserts on failure even when the caller catches the error and commits. It does not BEGIN or COMMIT independently or make provider calls. Subject state and activity event updates remain the caller's responsibility in that same transaction.
 
-- `decideApproval` succeeds only for a `PENDING`, unexpired request whose hash matches, in the given business, decided by that business's owner. `decided_by` is copied from `businesses.owner_id`.
-- `claimExecution` and `claimNextExecution` claim a step only when its approval is `APPROVED` (decided before it expired, same business), the row is the step the bundle lists at that position, and every earlier listed step has a finished row. A missing earlier row blocks the claim.
-- The database backs this up: an `action_executions` insert fails unless its approval is `APPROVED`, in the same business, and lists that action at that step (Sheets steps are left out, SPEC 2.9). Insert the executions in the same transaction as the decision.
+`decideApproval` remains exported for the other branch's compatibility and is deprecated. It performs only a guarded decision and is not the atomic decision API. `claimExecution`, `claimNextExecution`, `recordWebhookEvent` and `expireApprovals` accept pg-style query executors. Record webhook events only after signature verification; the database enforces replay uniqueness, not cryptographic verification of provider signatures.
 
-`applyMigrations` accepts a pool (it checks out one client for the whole run and releases it at the end) or a single-session adapter with `exec` and `query`. Never wrap a pool in the adapter.
+## Verification
 
-## Run the tests
-
-```bash
-npm test
+```sh
+npm test -- packages/db/test --pool=threads --maxWorkers=1
+npm run typecheck
 ```
 
-The tests use PGlite (`@electric-sql/pglite`), which is Postgres compiled to WebAssembly and runs inside the test process. No database server, Docker or network is needed. Each test file creates a fresh database, runs `test/supabase-prelude.sql`, then applies every migration through the same runner the real command uses.
+Tests run offline against PGlite with both real `btree_gist` and `pgcrypto` extensions. No migration SQL is skipped. The test-only prelude mirrors Supabase roles, default grants, auth.uid and Realtime publication. Direct service_role INSERT and UPDATE tests exercise the guards without guarded decision or claim helpers. Tests cover migration replay, rollback and the table-file boundary.
 
-## The test prelude
-
-Supabase creates some objects that plain Postgres does not have. `test/supabase-prelude.sql` makes stand-ins for them before the migrations run:
-
-- the roles `anon`, `authenticated` and `service_role` (with `bypassrls`)
-- the `auth` schema with `auth.users` and an `auth.uid()` that reads the session setting `request.jwt.claim.sub`
-- Supabase's default table grants to those roles in `public`
-- the `supabase_realtime` publication
-
-It is not a migration because Supabase already has all of these. Running it on Supabase would fail or, worse, replace Supabase's own `auth.uid()`.
-
-PGlite ships `btree_gist`, so the `bookings_no_overlap` exclusion constraint runs in the tests exactly as written. No migration statement is skipped in the tests.
-
-## Not verified until the migrations run on a real Supabase project
-
-- `create extension btree_gist with schema extensions` on Supabase, and that the gist operator class is found from `extensions`. If it is not, DATA-MODEL 2.16 says to install the extension into `public`.
-- The foreign key from `public.users.auth_user_id` to Supabase's real `auth.users`, and the real `auth.uid()` reading an owner JWT through PostgREST.
-- Realtime: that a dashboard subscribed with an owner JWT receives only that owner's `activity_events`. The tests check only that the table is in the publication and that the select policy filters rows.
-- Supabase's own default grants. The tests mirror them in the prelude; the real ones may differ by version.
-- The Postgres version. PGlite is Postgres 18; the project runs Postgres 17.11. Nothing here uses a feature newer than Postgres 15.
-- That Supabase's own default grants are the per-schema kind that `0001` can revoke. If a grant to `anon` or `authenticated` is global, `0002` still revokes it table by table, but a later table would need its own revoke.
-- `alter default privileges revoke execute on functions from public` in `0001` applies to every function the migration role creates later, in any schema. Grant execute explicitly where a role needs it.
-- A connection over TLS through the Supabase pooler. The runner was run with the `pg` driver against a local PGlite socket server only.
-
-## Reset and immutable versions
-
-Published agent versions cannot be updated or deleted by any role, the service role included; there is no session setting that unlocks them. The demo reset (task B-10) must therefore remove agents and versions with `TRUNCATE ... CASCADE`, which fires no row trigger, and then reseed. This changes DATA-MODEL 6.2, which deletes non-seeded agents and keeps the seeded ones: with this schema the reset truncates and reseeds them instead. An agent that any `activity_events` row references cannot be deleted either (`on delete restrict`), so the reset truncates `activity_events` first.
-
-## Rules for later migrations
-
-- Add a new numbered file. Never edit an applied one.
-- A new table is closed to `anon` and `authenticated` by default (0001). In the same file that creates it: `enable row level security`, add a select policy if owners should read it, and `grant select` to `authenticated` only where that policy exists.
-- A new function is not executable by `PUBLIC` or `anon` by default. Pin `set search_path = ''` and schema-qualify every name. Put any `security definer` function in `private`, never in `public`.
+A real Supabase project, PostgreSQL 17, real JWT/PostgREST sessions, deployed default grants, TLS pooler connections and end-to-end Realtime delivery are not verified by this offline suite. Before deployment, confirm extensions are installed in `extensions` and apply with the intended migration administrator. No provider operations are tested here.
