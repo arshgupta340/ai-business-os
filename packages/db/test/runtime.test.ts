@@ -159,6 +159,9 @@ for(const type of types) describe(type, () => {
         if(e.action_type==='square.checkout.create') {
           await runtime.saveCheckout(db,{businessId:biz,executionId:e.id,workerId:'worker',attempt:1,
             squareOrderId:'sq-'+p.args.subjectId,paymentLinkId:'link-'+p.args.subjectId,url:'https://example.test/checkout'});
+          // The completion reference must be the Square order ID that save_checkout stored.
+          expect((await runtime.finishExecution(db,{businessId:biz,executionId:e.id,workerId:'worker',attempt:1,status:'SUCCEEDED',externalRef:'sq-'+p.args.subjectId})).status).toBe('SUCCEEDED');
+          return;
         } else if(e.action_type==='calendar.event.create') {
           expect((await runtime.verifyBooking(db,{businessId:biz,executionId:e.id,workerId:'worker',attempt:1,googleEventId:'event-'+uniq()})).status).toBe('BOOKED_VERIFIED');
           return;
