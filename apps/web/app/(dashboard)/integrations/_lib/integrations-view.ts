@@ -36,6 +36,7 @@ export const CHANNEL_LABEL: Record<Channel, string> = {
   android_gateway: 'Text message from the Android phone',
   whatsapp_sandbox: 'WhatsApp sandbox',
   qr_only: 'QR code only',
+  agentphone: 'AgentPhone text message',
 };
 
 /** The sentence about the active message channel. */
@@ -148,7 +149,8 @@ export function describeIntegrationEvent(event: ActivityEvent): IntegrationEvent
   switch (event.type) {
     case 'webhook.rejected': {
       const p = payloadOf({...event, type: 'webhook.rejected'});
-      const provider = PROVIDER_LABELS[p.provider] ?? p.provider;
+      // AgentPhone sends webhooks but has no health card of its own, so it is not in PROVIDER_LABELS.
+      const provider = p.provider === 'agentphone' ? 'AgentPhone' : PROVIDER_LABELS[p.provider] ?? p.provider;
       const why = p.reason === 'signature_invalid' ? 'its signature did not match' : 'it was malformed';
       return {title: `Rejected a ${provider} webhook because ${why}. Nothing changed.`, payment: p.provider === 'square'};
     }
