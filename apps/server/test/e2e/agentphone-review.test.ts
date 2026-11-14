@@ -35,6 +35,8 @@ const voiceTurn = (callId: string, transcript: string, to = PHONE) => ({ event: 
 const callEnded = (callId: string) => ({ event: 'agent.call_ended', channel: 'voice', data: { callId, numberId: 'num_e2e', from: '+15559876543', to: PHONE, direction: 'inbound', status: 'completed' } });
 const chunks = (payload: string) => payload.trim().split('\n').map((l) => JSON.parse(l) as { text: string; interim?: boolean; hangup?: boolean });
 const count = async (w: World, sql: string, params: unknown[] = []) => ((await w.t.db.query(sql, params)).rows[0] as { n: number }).n;
+/** The turn bound of the second world. Long enough that a loaded machine still starts the turn's first tool call inside it. */
+const BOUND_MS = 500;
 const TROUBLE = 'Sorry, I am having trouble right now. Please try again in a moment.';
 
 describe('AgentPhone webhook: replay, rule 6 and the processed mark', () => {
@@ -163,7 +165,7 @@ describe('AgentPhone webhook: replay, rule 6 and the processed mark', () => {
 
 describe('AgentPhone voice turn past its bound (review F1)', () => {
   let w: World;
-  beforeAll(async () => { w = await createWorld({ executor: notWiredExecutor, telephony: { http: noHttp, interimAfterMs: 60_000, turnTimeoutMs: 120 } }, AP_ENV); }, 120_000);
+  beforeAll(async () => { w = await createWorld({ executor: notWiredExecutor, telephony: { http: noHttp, interimAfterMs: 60_000, turnTimeoutMs: BOUND_MS } }, AP_ENV); }, 120_000);
   afterAll(async () => { await w?.close(); });
 
   it('after the bound the abandoned turn starts no tool, stores no proposal and leaves no unheard reply in the history', async () => {
@@ -171,7 +173,7 @@ describe('AgentPhone voice turn past its bound (review F1)', () => {
     let finished!: () => void;
     const done = new Promise<void>((r) => { finished = r; });
     w.model.push(async ({ executeTool }) => {
-      await sleep(300);
+      await sleep(BOUND_MS + 300);
       late = await executeTool('quote_order', { cart: CART });
       finished();
       return 'A late reply nobody heard.';
@@ -225,20 +227,27 @@ describe('AgentPhone voice turn past its bound (review F1)', () => {
   it('a call that ends during a turn: the turn stores no proposal afterwards', async () => {
     let quote: Quote | undefined;
     let proposed: unknown;
+    let quoted!: () => void;
+    const afterQuote = new Promise<void>((r) => { quoted = r; });
+    let ended!: () => void;
+    const callHasEnded = new Promise<void>((r) => { ended = r; });
     let finished!: () => void;
     const done = new Promise<void>((r) => { finished = r; });
     w.model.push(async ({ executeTool }) => {
       const q = await executeTool('quote_order', { cart: CART }) as ToolResult<'quote_order'>;
       if (q.ok) quote = q.quote;
-      await sleep(60);
+      quoted();
+      await callHasEnded;
       const pickupAt = zonedIso(nextLocalDate([0, 1, 2, 3, 4, 5, 6]), '18:00', 'America/Los_Angeles');
       proposed = await executeTool('propose_order', { cart: CART, contact: { name: 'Sam', messageConsent: false }, fulfillment: { type: 'pickup', pickupAt }, quoteId: quote?.quoteId ?? 'none' });
       finished();
       return 'Sent.';
     });
     const turn = signed(w, voiceTurn('call_end_mid', 'One large pepperoni for Sam at six'));
-    await sleep(20);
+    await afterQuote;
+    expect(quote).toBeDefined();
     expect((await signed(w, callEnded('call_end_mid'))).statusCode).toBe(200);
+    ended();
     await turn;
     await done;
     expect(proposed).toMatchObject({ ok: false });
