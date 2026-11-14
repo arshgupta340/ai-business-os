@@ -5,6 +5,7 @@ import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {ErrorState} from '@/components/ErrorState';
 import {isApiError} from '@/lib/api';
+import {errorText} from '@/lib/error-text';
 
 /**
  * Error state for one Overview block. Shows the safe ApiError message, keeps
@@ -13,7 +14,8 @@ import {isApiError} from '@/lib/api';
  */
 export function BlockError({title, error, onRetry}: {title: string; error: unknown; onRetry: () => void}) {
   const api = isApiError(error) ? error : null;
-  const message = api?.message ?? 'Could not load this part of the overview.';
+  // The server message can carry an error code. The owner reads the sentence for the code.
+  const message = api ? errorText(api) : 'Could not load this part of the overview.';
   const canRetry = api ? api.retryable : true;
   return (
     <VStack gap={2}>

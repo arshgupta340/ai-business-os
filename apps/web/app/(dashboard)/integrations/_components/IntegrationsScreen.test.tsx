@@ -211,8 +211,8 @@ describe('IntegrationsScreen', {timeout: 20_000}, () => {
 
   it('lists integration events and adds a new one without a reload', async () => {
     renderScreen();
-    expect(await screen.findByText(/Rejected a Square webhook/)).toBeTruthy();
-    const before = screen.getAllByText(/Rejected a Square webhook/).length;
+    expect(await screen.findByText(/Rejected a webhook from Square/)).toBeTruthy();
+    const before = screen.getAllByText(/Rejected a webhook from Square/).length;
     const square = await card('Square');
     expect(badge(square, 'Connected')).toBeTruthy();
 
@@ -221,9 +221,9 @@ describe('IntegrationsScreen', {timeout: 20_000}, () => {
     mockControls.simulateRejectedWebhook();
     await whenIdle();
 
-    await waitFor(() => expect(screen.getAllByText(/Rejected a Square webhook/).length).toBe(before + 1));
+    await waitFor(() => expect(screen.getAllByText(/Rejected a webhook from Square/).length).toBe(before + 1));
     await waitFor(() => expect(badge(square, 'Degraded').dataset.tone).toBe('warning'));
-    expect(screen.getAllByRole('link', {name: /Rejected a Square webhook/})[0].getAttribute('href')).toBe('/activity');
+    expect(screen.getAllByRole('link', {name: /Rejected a webhook from Square/})[0].getAttribute('href')).toBe('/activity');
   });
 
   it('shows the empty events state for a business with none', async () => {

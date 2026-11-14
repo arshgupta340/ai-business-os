@@ -6,14 +6,8 @@
  * { open: "HH:MM", close: "HH:MM" } or { closed: true }, one fact per weekday.
  */
 import type {ActivityEvent, ActivityEventPayloads, ApprovalRequest, BusinessFact, FactEditApprovalPayload, FactKind} from '@/lib/api';
-import {
-  WEEKDAYS,
-  WEEKDAY_NAMES,
-  describeValue,
-  factKeyLabel,
-  sourceTypeLabel,
-  type Weekday,
-} from '../../knowledge/_components/knowledge-model';
+import {factKeyLabel, factSourceLabel} from '@/lib/labels';
+import {WEEKDAYS, WEEKDAY_NAMES, describeValue, type Weekday} from '../../knowledge/_components/knowledge-model';
 
 export {WEEKDAYS, WEEKDAY_NAMES, type Weekday};
 
@@ -240,7 +234,7 @@ export function changeLogEntries(events: readonly ActivityEvent[], facts: readon
             ? `New, version ${toVersion}`
             : `Version ${fromVersion} to ${toVersion}`
           : '',
-      who: typeof p.sourceType === 'string' ? sourceTypeLabel(p.sourceType as BusinessFact['sourceType']) : 'Unknown',
+      who: factSourceLabel(p.sourceType),
       occurredAt: event.occurredAt,
     });
   }

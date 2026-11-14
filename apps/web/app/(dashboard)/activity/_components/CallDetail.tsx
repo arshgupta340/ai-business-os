@@ -20,12 +20,13 @@ import {
   type OrderApprovalPayload,
 } from '@/lib/api';
 import {formatCountdown, formatDateTime, formatMoney, formatTime, lastFour, secondsUntil} from '@/lib/format';
+import {actionLabel} from '@/lib/labels';
 import {statusView} from '@/lib/status';
 import {SandboxBadge} from '@/components/SandboxBadge';
 import {StatusBadge} from '@/components/StatusBadge';
 import {CheckoutPanel} from './CheckoutPanel';
 import {describeEvent} from './describe';
-import {actionLabel, deriveJourney, isHalted, syncStatusView, waitingOn, type Journey, type JourneyInput} from './journey';
+import {deriveJourney, isHalted, stepErrorSentence, syncStatusView, waitingOn, type Journey, type JourneyInput} from './journey';
 import {ProviderHealthNotice, providersForSteps} from '@/components/ProviderHealthNotice';
 import {JourneyStepper, NoticeView, Panel, useNow} from './ui';
 
@@ -171,6 +172,7 @@ function BundleSteps({journey}: {journey: Journey}) {
       <List hasDividers>
         {bundle.map((actionType, i) => {
           let badge = null;
+          let error = '';
           if (approved) {
             if (actionType.startsWith('sheets.')) {
               const view = !journey.sync && halted ? notRun : journey.sync
@@ -182,7 +184,8 @@ function BundleSteps({journey}: {journey: Journey}) {
               const isMessage = actionType.startsWith('message.');
               if (exe) {
                 const view = statusView('execution', exe.status);
-                badge = <StatusBadge label={exe.errorCode ? `${view.label}, ${exe.errorCode}` : view.label} tone={view.tone} />;
+                badge = <StatusBadge label={view.label} tone={view.tone} />;
+                error = stepErrorSentence(exe.errorCode);
               } else if (isMessage && journey.message?.status === 'SKIPPED') {
                 const view = statusView('execution', 'SKIPPED');
                 badge = <StatusBadge label={view.label} tone={view.tone} />;
@@ -194,7 +197,7 @@ function BundleSteps({journey}: {journey: Journey}) {
               }
             }
           }
-          return <ListItem key={actionType} label={actionLabel(actionType)} description={`Step ${i + 1} of ${bundle.length}`} endContent={badge} />;
+          return <ListItem key={actionType} label={actionLabel(actionType)} description={`Step ${i + 1} of ${bundle.length}${error ? `.${error}` : ''}`} endContent={badge} />;
         })}
       </List>
     </Panel>

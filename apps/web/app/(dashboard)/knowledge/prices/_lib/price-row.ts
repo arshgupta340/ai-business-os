@@ -6,8 +6,11 @@
  * and the catalog returns it (screen data map, section 11).
  */
 import type {ActivityEvent, ApprovalRequest, BusinessFact, CatalogItem, FactConflict, PriceEditApprovalPayload} from '@/lib/api';
+import {errorCodeText} from '@/lib/error-text';
+import {formatMoney} from '@/lib/format';
+import {menuItemNames} from '@/lib/labels';
 import {statusView, type StatusView} from '@/lib/status';
-import {conflictVariationId, menuItemNames} from '../../_components/knowledge-model';
+import {conflictVariationId} from '../../_components/knowledge-model';
 
 export const SQUARE_STEP = 'square.catalog.price.update';
 export const SYNC_STEP = 'local.catalog.sync';
@@ -32,6 +35,20 @@ export type PricePhase =
   | {kind: 'sync_failed'; payload: PriceEditApprovalPayload; errorCode: string}
   | {kind: 'rejected'; payload: PriceEditApprovalPayload}
   | {kind: 'expired'; payload: PriceEditApprovalPayload};
+
+/**
+ * What the row says when a step failed. The error code never shows: the
+ * sentence for it from errorCodeText says what happened.
+ */
+export function failureText(phase: Extract<PricePhase, {kind: 'square_failed' | 'sync_failed'}>): string {
+  const error = errorCodeText(phase.errorCode);
+  if (phase.kind === 'sync_failed') {
+    return `Square accepted ${formatMoney(phase.payload.newPriceMinor, phase.payload.currency)} (sandbox), but the catalog here did not refresh. ${error} Run Sync from Square on Business Knowledge to check.`;
+  }
+  return phase.squarePrice === 'unknown'
+    ? `Square did not confirm the change. ${error} The price in Square is unknown until the step is reviewed. The price above is the last one the catalog showed.`
+    : `The price in Square is unchanged. Square refused the update. ${error} One cause is a price change in Square since you proposed. Propose again.`;
+}
 
 const EXECUTION_TYPES = new Set(['execution.started', 'execution.succeeded', 'execution.failed']);
 

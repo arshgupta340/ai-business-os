@@ -12,13 +12,11 @@ import {VStack} from '@astryxdesign/core/VStack';
 import {SandboxBadge} from '@/components/SandboxBadge';
 import {StatusBadge} from '@/components/StatusBadge';
 import type {ApprovalRequest, BusinessFact} from '@/lib/api';
+import {factKeyLabel, factKindGroupLabel, factSourceLabel} from '@/lib/labels';
 import {statusView} from '@/lib/status';
 import {
-  KIND_LABELS,
   describeValue,
-  factKeyLabel,
   groupKnowledge,
-  sourceTypeLabel,
   type KnowledgeKind,
   type KnowledgeRow,
 } from '../../knowledge/_components/knowledge-model';
@@ -50,7 +48,7 @@ export function OtherFactsSection(props: Props) {
     <VStack gap={5}>
       {visible.map((kind) => (
         <VStack key={kind} gap={3}>
-          <Heading level={3}>{KIND_LABELS[kind]}</Heading>
+          <Heading level={3}>{factKindGroupLabel(kind)}</Heading>
           {kind === 'service' ? <Text type="supporting">Service prices are sandbox payment data.</Text> : null}
           {kind !== 'policy' ? <Text type="supporting">Shown to read only. They cannot be changed on this page.</Text> : null}
           <VStack gap={3}>
@@ -82,7 +80,7 @@ function FactSummary({kind, fact}: {kind: KnowledgeKind; fact: BusinessFact}) {
         <Text>{value.text}</Text>
         {value.hasMoney ? <SandboxBadge /> : null}
       </HStack>
-      <Text type="supporting">{`${sourceTypeLabel(fact.sourceType)}, version ${fact.version}`}</Text>
+      <Text type="supporting">{`${factSourceLabel(fact.sourceType)}, version ${fact.version}`}</Text>
     </VStack>
   );
 }

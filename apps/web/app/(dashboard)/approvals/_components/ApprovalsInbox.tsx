@@ -29,8 +29,10 @@ import {
 } from '@/lib/api';
 import {formatCountdown, formatMoney, formatRelative, secondsUntil} from '@/lib/format';
 import {useBusiness} from '@/lib/session';
+import {errorText} from '@/lib/error-text';
+import {approvalActorLabel, bundleLabel} from '@/lib/labels';
 import {statusView} from '@/lib/status';
-import {actorLabel, bundleLabel, effectiveState, sortInbox, summaryLine} from '../_lib/approval-view';
+import {effectiveState, sortInbox, summaryLine} from '../_lib/approval-view';
 import {useNow} from '../_lib/useNow';
 import {ApprovalDecisionDialog} from './ApprovalDecisionDialog';
 
@@ -112,7 +114,7 @@ export function ApprovalsInbox() {
       ) : failed?.error ? (
         <ErrorState
           title="Could not load approval requests"
-          message={failed.error.message}
+          message={errorText(failed.error)}
           onRetry={!isApiError(failed.error) || failed.error.retryable ? () => shownQueries.forEach((q) => void q.refetch()) : undefined}
         />
       ) : items.length === 0 ? (
@@ -173,7 +175,7 @@ function InboxRow({
       }
       description={
         <VStack gap={1}>
-          <Text type="supporting">{`${actorLabel(approval.actorType)}, ${formatRelative(approval.createdAt, timeZone, now)}`}</Text>
+          <Text type="supporting">{`${approvalActorLabel(approval.actorType)}, ${formatRelative(approval.createdAt, timeZone, now)}`}</Text>
           <HStack gap={2} vAlign="center" wrap="wrap">
             <StatusBadge label={view.label} tone={view.tone} />
             {state === 'PENDING' ? (

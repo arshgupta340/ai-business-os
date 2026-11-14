@@ -19,7 +19,8 @@ import {useActivityFeed, useAgents, useLiveAgent, type Agent, type LiveAgent} fr
 import {formatRelative} from '@/lib/format';
 import {useBusiness} from '@/lib/session';
 import {statusView} from '@/lib/status';
-import {sortAgents, templateLabel, versionLabel} from '../../overview/_components/overview-logic';
+import {agentTemplateLabel} from '@/lib/labels';
+import {sortAgents, versionLabel} from '../../overview/_components/overview-logic';
 import {answersNumber, numberOwner, numberOwnerSentence} from '../_lib/agents-view';
 import {ErrorNotice} from './ErrorNotice';
 
@@ -39,7 +40,7 @@ function AgentRow({agent, liveAgent, timeZone}: {agent: Agent; liveAgent?: LiveA
       description={
         <VStack gap={0.5}>
           <Text type="supporting">
-            {templateLabel(agent.template)}, {versionLabel(agent)}
+            {agentTemplateLabel(agent.template)}, {versionLabel(agent)}
           </Text>
           <Text type="supporting">{phoneLine}</Text>
           <Text type="supporting">{`Updated ${formatRelative(agent.updatedAt, timeZone)}`}</Text>

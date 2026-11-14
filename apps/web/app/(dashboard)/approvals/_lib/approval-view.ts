@@ -9,12 +9,13 @@ import type {
   CatalogItem,
   ApprovalState,
   BookingApprovalPayload,
-  BundleType,
   FactEditApprovalPayload,
   OrderApprovalPayload,
   PriceEditApprovalPayload,
 } from '@/lib/api';
+import {errorText} from '@/lib/error-text';
 import {formatDateTime, formatMoney, lastFour, secondsUntil} from '@/lib/format';
+import {actionLabel, factKeyLabel, factKindLabel, messageChannelLabel} from '@/lib/labels';
 
 // ------------------------------------------------------------- payloads
 
@@ -40,48 +41,8 @@ export function typedApproval(approval: ApprovalRequest): TypedApproval {
 
 // ---------------------------------------------------------------- labels
 
-const BUNDLE_LABELS: Record<BundleType, string> = {
-  order_bundle: 'Order',
-  booking_bundle: 'Booking',
-  fact_edit: 'Fact edit',
-  price_edit: 'Price edit',
-};
-
-export function bundleLabel(bundleType: BundleType): string {
-  return BUNDLE_LABELS[bundleType];
-}
-
-export function actorLabel(actorType: ApprovalRequest['actorType']): string {
-  return actorType === 'owner' ? 'Your own change' : 'Asked by your phone agent';
-}
-
-const WEEKDAYS: Record<string, string> = {
-  mon: 'Monday',
-  tue: 'Tuesday',
-  wed: 'Wednesday',
-  thu: 'Thursday',
-  fri: 'Friday',
-  sat: 'Saturday',
-  sun: 'Sunday',
-};
-
-const FACT_KIND_LABELS: Record<string, string> = {
-  hours: 'Opening hours',
-  policy: 'Policy',
-  service: 'Service',
-  contact: 'Contact',
-  faq: 'FAQ',
-  menu_item: 'Menu item',
-};
-
-export function factKindLabel(kind: string): string {
-  return FACT_KIND_LABELS[kind] ?? kind;
-}
-
-/** "Sunday" for an hours key, the key itself for anything else. */
-export function factKeyLabel(kind: string, key: string): string {
-  return kind === 'hours' ? (WEEKDAYS[key] ?? key) : key;
-}
+// Bundle, actor, fact kind and fact key names come from '@/lib/labels'. This
+// screen keeps no map of its own.
 
 /** Shows a fact value as text. `null` means the fact is new (CONTRACTS.md section 4). */
 export function formatFactValue(kind: string, value: unknown): string {
@@ -154,7 +115,7 @@ export function summaryLine(approval: ApprovalRequest, timeZone: string, catalog
     case 'booking_bundle':
       return `${formatDateTime(t.payload.startUtc, t.payload.timezone)}, confirmation to ${recipientLabel(t.payload.messageRecipient)}`;
     case 'fact_edit': {
-      const what = `${factKindLabel(t.payload.kind)}, ${factKeyLabel(t.payload.kind, t.payload.key)}`;
+      const what = `${factKindLabel(t.payload.kind)}, ${factKeyLabel(t.payload.kind, t.payload.key, t.payload.after ?? t.payload.before)}`;
       const after = formatFactValue(t.payload.kind, t.payload.after);
       // A new fact has no current value to compare with.
       return t.payload.before === null || t.payload.before === undefined
@@ -183,8 +144,10 @@ export type ActionStepView = {
 
 /** Maps each step of the hashed action bundle to the system it writes to (screen data map, section 8). */
 export function actionSteps(t: TypedApproval): ActionStepView[] {
-  const channel =
-    t.bundleType === 'order_bundle' || t.bundleType === 'booking_bundle' ? t.payload.messageChannel : 'the message channel';
+  const channel = t.bundleType === 'order_bundle' || t.bundleType === 'booking_bundle' ? t.payload.messageChannel : undefined;
+  // qr_only is a setting of the business (SPEC 2.9): the message step sends nothing.
+  const qrOnly = channel === 'qr_only';
+  const messageSystem = channel === undefined ? 'Customer message' : messageChannelLabel(channel);
   const to =
     t.bundleType === 'order_bundle' || t.bundleType === 'booking_bundle' ? recipientLabel(t.payload.messageRecipient) : 'the customer';
   return t.payload.actionBundle.map((step): ActionStepView => {
@@ -192,7 +155,9 @@ export function actionSteps(t: TypedApproval): ActionStepView[] {
       case 'square.checkout.create':
         return {step, system: 'Square (sandbox)', description: 'Create a checkout link for the total above.', isExternal: true};
       case 'message.checkout.send':
-        return {step, system: `Customer message (${channel})`, description: `Send the checkout link to ${to}.`, isExternal: true};
+        return qrOnly
+          ? {step, system: messageSystem, description: 'No message is sent. The customer pays with the QR code at the counter.', isExternal: true}
+          : {step, system: messageSystem, description: `Send the checkout link to ${to}.`, isExternal: true};
       case 'local.order.record':
         return {step, system: 'This app', description: 'Record the order. Nothing leaves the app.', isExternal: false};
       case 'sheets.order.append':
@@ -202,7 +167,9 @@ export function actionSteps(t: TypedApproval): ActionStepView[] {
         return {step, system: 'Google Calendar', description: `Create the event${cal} after a fresh availability check.`, isExternal: true};
       }
       case 'message.booking.confirm':
-        return {step, system: `Customer message (${channel})`, description: `Tell ${to} the booking is confirmed.`, isExternal: true};
+        return qrOnly
+          ? {step, system: messageSystem, description: 'No message is sent. Tell the customer the booking is confirmed yourself.', isExternal: true}
+          : {step, system: messageSystem, description: `Tell ${to} the booking is confirmed.`, isExternal: true};
       case 'local.booking.record':
         return {step, system: 'This app', description: 'Record the booking. Nothing leaves the app.', isExternal: false};
       case 'sheets.booking.append':
@@ -214,7 +181,13 @@ export function actionSteps(t: TypedApproval): ActionStepView[] {
       case 'local.catalog.sync':
         return {step, system: 'This app', description: 'Refresh the local copy of the catalog.', isExternal: false};
       default:
-        return {step, system: 'Unknown step', description: `The request lists a step this screen does not know: ${step}.`, isExternal: true, isUnknown: true};
+        return {
+          step,
+          system: 'Unknown step',
+          description: `The request lists a step this screen does not know: ${actionLabel(step)}.`,
+          isExternal: true,
+          isUnknown: true,
+        };
     }
   });
 }
@@ -323,7 +296,8 @@ export function decisionErrorView(error: ApiError): DecisionErrorView {
       }
       return {
         title: 'The decision did not go through',
-        message: error.message,
+        // The server message can carry an error code. The owner reads the sentence for the code.
+        message: errorText(error),
         next: error.retryable ? 'retry' : 'none',
         status: 'error',
         correlationId,

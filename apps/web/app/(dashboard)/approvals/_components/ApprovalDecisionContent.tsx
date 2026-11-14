@@ -37,14 +37,13 @@ import {
 } from '@/lib/api';
 import {actorName, formatCountdown, formatDate, formatDateTime, formatMoney, formatTime, secondsUntil} from '@/lib/format';
 import {useBusiness as useSessionBusiness} from '@/lib/session';
+import {errorText} from '@/lib/error-text';
+import {approvalActorLabel, factKeyLabel, factKindLabel} from '@/lib/labels';
 import {statusView} from '@/lib/status';
 import {
   actionSteps,
-  actorLabel,
   decisionErrorView,
   effectiveState,
-  factKeyLabel,
-  factKindLabel,
   formatFactValue,
   recipientLabel,
   typedApproval,
@@ -112,7 +111,7 @@ export function ApprovalDecisionContent({
         onClose={onClose}
         body={
           <ErrorState
-            message={err?.message ?? 'The request could not be loaded.'}
+            message={err ? errorText(err) : 'The request could not be loaded.'}
             onRetry={retryable ? () => void query.refetch() : undefined}
           />
         }
@@ -297,7 +296,7 @@ function LoadedDecision({approval, businessId, timeZone, onClose, onDecided, ref
     <VStack gap={5}>
       <HStack gap={2} wrap="wrap" vAlign="center">
         <StatusBadge label={view.label} tone={view.tone} />
-        <Text type="supporting">{actorLabel(approval.actorType)}</Text>
+        <Text type="supporting">{approvalActorLabel(approval.actorType)}</Text>
         {state === 'PENDING' ? (
           <Text type="label" hasTabularNumbers>
             {`Expires in ${formatCountdown(secondsLeft)}`}
@@ -657,7 +656,7 @@ function FactEditDetails({t}: {t: Extract<TypedApproval, {bundleType: 'fact_edit
           <Text>{factKindLabel(p.kind)}</Text>
         </MetadataListItem>
         <MetadataListItem label="Key">
-          <Text>{factKeyLabel(p.kind, p.key)}</Text>
+          <Text>{factKeyLabel(p.kind, p.key, p.after ?? p.before)}</Text>
         </MetadataListItem>
         <MetadataListItem label="From version">
           <Text>{String(p.fromVersion)}</Text>

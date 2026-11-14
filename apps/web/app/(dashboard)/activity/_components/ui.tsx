@@ -8,6 +8,7 @@ import {Step, Stepper} from '@astryxdesign/core/Stepper';
 import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {isApiError} from '@/lib/api';
+import {errorText} from '@/lib/error-text';
 import type {Tone} from '@/lib/status';
 import {ErrorState} from '@/components/ErrorState';
 import type {Journey, Notice} from './journey';
@@ -92,10 +93,10 @@ export function Panel({title, actions, children}: {title: string; actions?: Reac
   );
 }
 
-/** ApiError message with its correlation ID, and a retry only when the error says it is retryable. */
+/** The owner text for the error with its correlation ID, and a retry only when the error says it is retryable. The server message is never shown. */
 export function QueryError({error, onRetry, title}: {error: unknown; onRetry?: () => void; title?: string}) {
   const api = isApiError(error) ? error : null;
-  const message = api ? api.message : 'Could not load this data.';
+  const message = api ? errorText(api) : 'Could not load this data.';
   const withId = api?.correlationId ? `${message} Reference: ${api.correlationId}` : message;
   return <ErrorState title={title} message={withId} onRetry={api && !api.retryable ? undefined : onRetry} />;
 }

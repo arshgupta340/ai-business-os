@@ -3,7 +3,8 @@
  * Continue rule, display labels and the notes kept from each builder turn.
  * No React here, so every rule is unit tested on its own.
  */
-import {PROVIDER_LABELS} from '@/components/shell/ConnectionHealth';
+import {errorText} from '@/lib/error-text';
+import {providerLabel} from '@/lib/labels';
 import {
   CAPABILITIES,
   type AgentSpec,
@@ -12,7 +13,7 @@ import {
   type Effect,
   type CapabilityId,
 } from '@/lib/api';
-import type {Tone} from '@/lib/status';
+import {readableLabel, type Tone} from '@/lib/status';
 
 // ------------------------------------------------------------ capabilities
 
@@ -204,11 +205,7 @@ export function parseNotes(raw: string | null): TurnNotes {
 
 // ------------------------------------------------------------ labels
 
-export const TEMPLATE_LABELS: Record<AgentSpec['template'], string> = {
-  restaurant_order_taker: 'Restaurant order taker',
-  appointment_booker: 'Appointment booker',
-  custom: 'Custom agent',
-};
+// Template and bundle names come from agentTemplateLabel and bundleLabel in '@/lib/labels'.
 
 export const SCOPE_LABELS: Record<AgentSpec['knowledgeScopes'][number], string> = {
   business_profile: 'Business profile',
@@ -219,6 +216,14 @@ export const SCOPE_LABELS: Record<AgentSpec['knowledgeScopes'][number], string> 
   faq: 'Questions and answers',
 };
 
+/** The name of a knowledge scope. A scope this app does not know shows in a readable form, never raw. */
+export function scopeLabel(scope: unknown): string {
+  // Object.hasOwn keeps inherited names such as "constructor" from passing as a scope.
+  return typeof scope === 'string' && Object.hasOwn(SCOPE_LABELS, scope)
+    ? SCOPE_LABELS[scope as keyof typeof SCOPE_LABELS]
+    : readableLabel(scope, 'Other knowledge');
+}
+
 export const CHANNEL_LABELS: Record<AgentSpec['channel'], string> = {phone: 'Phone'};
 
 export const ESCALATION_LABELS: Record<AgentSpec['escalation'], string> = {
@@ -227,13 +232,6 @@ export const ESCALATION_LABELS: Record<AgentSpec['escalation'], string> = {
 
 export const WRITE_POLICY_LABELS: Record<AgentSpec['writePolicy'], string> = {
   owner_approval_each_action_bundle: 'You approve every action before it runs',
-};
-
-export const BUNDLE_LABELS: Record<string, string> = {
-  fact_edit: 'Business fact change',
-  price_edit: 'Price change',
-  order_bundle: 'Order',
-  booking_bundle: 'Booking',
 };
 
 /**
@@ -397,7 +395,7 @@ export function builderSendErrorView(error: ApiError): BuilderSendErrorView {
   }
   if (error.code === 'INTEGRATION_UNAVAILABLE') {
     const raw = typeof error.details?.provider === 'string' ? error.details.provider : null;
-    const name = raw ? ((PROVIDER_LABELS as Record<string, string>)[raw] ?? raw) : 'The builder';
+    const name = raw ? providerLabel(raw) : 'The builder';
     return {
       title: 'The builder is not available right now',
       description: `${name} is not responding. Your message is kept below, so you can send it again.`,
@@ -409,7 +407,8 @@ export function builderSendErrorView(error: ApiError): BuilderSendErrorView {
   }
   return {
     title: 'Your message was not sent',
-    description: error.message,
+    // The server message can carry an error code. The owner reads the sentence for the code.
+    description: errorText(error),
     tone: 'error',
     canRetry: error.retryable,
     refreshSession: false,

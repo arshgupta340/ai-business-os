@@ -6,7 +6,7 @@ import {VStack} from '@astryxdesign/core/VStack';
 import {useIntegrationsHealth, type IntegrationHealth, type IntegrationProvider} from '@/lib/api';
 import {statusView, type Tone} from '@/lib/status';
 import {consequenceFor} from '@/app/(dashboard)/integrations/_lib/integrations-view';
-import {providerLabel} from '@/components/shell/ConnectionHealth';
+import {providerLabel} from '@/lib/labels';
 
 /** The Banner status for a tone that statusView chose. Same translation as StatusBadge. */
 const BANNER_STATUS: Record<Tone, 'info' | 'warning' | 'error' | 'success'> = {

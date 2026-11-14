@@ -7,7 +7,7 @@ import {http, HttpResponse} from 'msw';
 import {ApiError, createApiQueryClient} from '@/lib/api';
 import {server} from '@/mocks/server';
 import {requests, useMockServer} from '@/mocks/test-setup';
-import {ApiErrorBanner, errorText, isResolveOnFactsList} from './ApiErrorBanner';
+import {ApiErrorBanner, isResolveOnFactsList, knowledgeErrorText} from './ApiErrorBanner';
 import {KnowledgeScreen} from './KnowledgeScreen';
 
 useMockServer();
@@ -49,7 +49,7 @@ describe('ApiErrorBanner for a conflict resolved from the facts list', () => {
   it('recognises the answer and never tells the owner to try again', () => {
     const error = asApiError();
     expect(isResolveOnFactsList(error)).toBe(true);
-    expect(errorText(error)).not.toMatch(/try again|not responding/i);
+    expect(knowledgeErrorText(error)).not.toMatch(/try again|not responding/i);
     render(<ApiErrorBanner error={error} onRetry={() => {}} />);
     expect(screen.queryByRole('button', {name: 'Try again'})).toBeNull();
   });
@@ -57,7 +57,7 @@ describe('ApiErrorBanner for a conflict resolved from the facts list', () => {
   it('names an ordinary provider outage with the Integrations label', () => {
     const outage = new ApiError({code: 'INTEGRATION_UNAVAILABLE', message: 'x', status: 503, retryable: true, details: {provider: 'square'}, kind: 'http'});
     expect(isResolveOnFactsList(outage)).toBe(false);
-    expect(errorText(outage)).toBe('Square is not responding.');
+    expect(knowledgeErrorText(outage)).toBe('Square is not responding.');
   });
 });
 

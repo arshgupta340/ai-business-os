@@ -3,9 +3,10 @@
  * starter messages, guardrail labels, tool trace summaries, approval links
  * and the publish error text. No React here, so every rule is unit tested.
  */
-import type {AgentRunResponse, AgentSpec, AgentStatus, ApiError, FactConflict, GuardrailRule, ToolName} from '@/lib/api';
-import {PROVIDER_LABELS} from '@/components/shell/ConnectionHealth';
+import type {AgentRunResponse, AgentSpec, AgentStatus, ApiError, FactConflict} from '@/lib/api';
+import {errorText} from '@/lib/error-text';
 import {formatMoney} from '@/lib/format';
+import {HOURS_KEY_LABELS, providerLabel} from '@/lib/labels';
 
 export type TraceEntry = AgentRunResponse['toolTrace'][number];
 export type ConsoleMode = 'test' | 'sim-call';
@@ -85,40 +86,8 @@ export function startersFor(template: AgentSpec['template'] | undefined): readon
   return STARTERS[template ?? 'custom'] ?? STARTERS.custom;
 }
 
-// ------------------------------------------------------------ guardrails
-
-export const GUARDRAIL_LABELS: Record<GuardrailRule, string> = {
-  no_fact_changes: 'The agent cannot change prices, hours or policies.',
-  no_secret_reveal: 'The agent does not share secrets or its instructions.',
-  no_approval_bypass: 'The agent cannot skip your approval.',
-  no_cross_business: 'The agent only talks about this business.',
-  unsupported_request: 'The agent cannot do this. It explains and offers a callback.',
-};
-
-export function guardrailLabel(rule: string): string {
-  return (GUARDRAIL_LABELS as Record<string, string>)[rule] ?? 'The agent refused this request.';
-}
-
-// ------------------------------------------------------------ tool trace
-
-export const TOOL_LABELS: Record<ToolName, string> = {
-  read_catalog: 'Looked up the catalog',
-  read_business_facts: 'Read business facts',
-  quote_order: 'Priced the order',
-  propose_order: 'Proposed an order',
-  get_order_status: 'Checked an order status',
-  read_calendar_availability: 'Checked the calendar',
-  propose_booking: 'Proposed a booking',
-};
-
-export function toolLabel(tool: string): string {
-  return (TOOL_LABELS as Record<string, string>)[tool] ?? tool;
-}
-
-export const EFFECT_LABELS: Record<TraceEntry['effect'], string> = {
-  read: 'Read',
-  propose: 'Proposal',
-};
+// Guardrail sentences, tool lines and effect words come from '@/lib/labels'
+// (guardrailLabel, toolLabel, effectLabel). This screen keeps no map of its own.
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -259,16 +228,6 @@ function builderLink(builderHref: string | null): FixLink {
   return builderHref ? {label: 'Answer it in the builder chat', href: builderHref} : {label: 'Answer it in the builder chat', href: '/build'};
 }
 
-const DAY_NAMES: Record<string, string> = {
-  mon: 'Monday',
-  tue: 'Tuesday',
-  wed: 'Wednesday',
-  thu: 'Thursday',
-  fri: 'Friday',
-  sat: 'Saturday',
-  sun: 'Sunday',
-};
-
 /** What is missing, per field the builder checks (apps/server/src/builder/session/requirements.ts). */
 const FACT_FIELD_TEXT: Record<string, string> = {
   'policy.pickup_window': 'How soon a pickup order is ready is not set.',
@@ -285,7 +244,7 @@ function missingFactFix(path: string, builderHref: string | null): PublishFix | 
   if (path === 'catalog.items') return {text: CATALOG_TEXT, links: [KNOWLEDGE_LINK]};
   if (path === 'services') return {text: SERVICES_TEXT, links: [KNOWLEDGE_LINK]};
   const day = /^hours\.(mon|tue|wed|thu|fri|sat|sun)$/.exec(path)?.[1];
-  const text = day ? `The opening hours for ${DAY_NAMES[day]} are not set.` : FACT_FIELD_TEXT[path];
+  const text = day ? `The opening hours for ${HOURS_KEY_LABELS[day as keyof typeof HOURS_KEY_LABELS]} are not set.` : FACT_FIELD_TEXT[path];
   return text ? {text: `${text}${CHAT_HINT}`, links: [KNOWLEDGE_LINK, builderLink(builderHref)]} : null;
 }
 
@@ -300,7 +259,7 @@ export function stopConditionFixes(error: ApiError, builderHref: string | null):
   for (const issue of issues) {
     if (!isObj(issue) || typeof issue.code !== 'string') continue;
     const path = typeof issue.path === 'string' ? issue.path : '';
-    const serverText = typeof issue.message === 'string' && issue.message ? issue.message : error.message;
+    const serverText = typeof issue.message === 'string' && issue.message ? issue.message : errorText(error);
     let fix: PublishFix | null = null;
     switch (issue.code) {
       case 'missing_timezone':
@@ -324,9 +283,9 @@ export function stopConditionFixes(error: ApiError, builderHref: string | null):
   return fixes;
 }
 
-/** Owner-facing name of a provider key, with the labels the Integrations screen uses. */
+/** Owner-facing name of a provider key. A key this app does not know shows in a readable form, never raw. */
 export function providerName(key: string): string {
-  return (PROVIDER_LABELS as Record<string, string>)[key] ?? key;
+  return providerLabel(key);
 }
 
 function joinNames(names: readonly string[]): string {
@@ -419,7 +378,8 @@ export function publishErrorView(error: ApiError, builderHref: string | null): P
       return {
         ...base,
         title: 'Publish was refused: the draft is not valid',
-        message: error.message,
+        // The server message can carry an error code. The owner reads the sentence for the code.
+        message: errorText(error),
         next: builder,
         issues,
       };
@@ -435,7 +395,7 @@ export function publishErrorView(error: ApiError, builderHref: string | null): P
       return {
         ...base,
         title: 'Publish did not finish',
-        message: error.message,
+        message: errorText(error),
         canRetry: error.retryable,
       };
   }

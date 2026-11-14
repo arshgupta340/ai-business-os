@@ -1,4 +1,14 @@
 import {describe, expect, it} from 'vitest';
+import {
+  ActionTypeSchema,
+  ActivityEventTypeSchema,
+  AgentTemplateSchema,
+  FactKindSchema,
+  HoursKeySchema,
+  WebhookProviderSchema,
+} from '@abos/contracts';
+import {agentTemplateLabel, eventTypeLabel} from '@/lib/labels';
+import {expectOwnerLabel, FUTURE_VALUES} from '@/lib/owner-label.test-helpers';
 import type {ActivityEvent, Booking, Call, IntegrationHealth, Order} from '@/lib/api';
 import {summarizeHealth} from '@/components/shell/ConnectionHealth';
 import {
@@ -171,6 +181,63 @@ describe('describeEvent', () => {
   it('uses the agent name when it is known', () => {
     const line = describeEvent(event('agent.paused', {agentId: 'agt_1'}), {...opts, agentName: () => 'Pizza line'});
     expect(line.title).toBe('Pizza line paused');
+  });
+});
+
+/** expectOwnerLabel, plus no dotted identifier such as "square.checkout.create". */
+function expectPlain(text: string, raw: string): void {
+  expectOwnerLabel(text, raw);
+  expect(text, `${JSON.stringify(text)} has a dotted identifier`).not.toMatch(/[a-z]\.[a-z]/);
+}
+
+describe('no raw contract value in the recent activity list (#124)', () => {
+  const event = (type: string, payload: Record<string, unknown>): ActivityEvent =>
+    ({id: 'evt_1', businessId: 'biz_pizza_01', type, correlationId: 'call_1', actorType: 'system', occurredAt: '2026-11-13T20:00:00.000Z', payload}) as ActivityEvent;
+  const opts = {timeZone: 'America/Los_Angeles'};
+
+  it('names the fact kind and key of every fact change', () => {
+    for (const kind of FactKindSchema.options) {
+      for (const key of ['margherita_large', 'pickup_window', ...HoursKeySchema.options]) {
+        const {title} = describeEvent(event('fact.changed', {factId: 'f', kind, key, fromVersion: 1, toVersion: 2, sourceType: 'owner_ui'}), opts);
+        expectPlain(title, kind);
+        expectPlain(title, key);
+      }
+    }
+    expect(describeEvent(event('fact.changed', {factId: 'f', kind: 'menu_item', key: 'margherita_large', fromVersion: 1, toVersion: 2, sourceType: 'upload'}), opts).title).toBe(
+      'Business fact updated: Menu item, Margherita large',
+    );
+    expect(describeEvent(event('fact.changed', {factId: 'f', kind: 'hours', key: 'fri', fromVersion: 1, toVersion: 2, sourceType: 'owner_ui'}), opts).title).toBe(
+      'Business fact updated: Opening hours, Friday',
+    );
+  });
+
+  it('names every action type in a step event', () => {
+    for (const actionType of [...ActionTypeSchema.options, ...FUTURE_VALUES]) {
+      for (const type of ['execution.started', 'execution.succeeded', 'execution.failed']) {
+        const {title} = describeEvent(event(type, {approvalId: 'a', actionType, idempotencyKey: 'k'}), opts);
+        expectPlain(title, actionType);
+      }
+    }
+    expect(describeEvent(event('execution.started', {actionType: 'square.checkout.create'}), opts).title).toBe('Step started: Create the Square checkout link');
+  });
+
+  it('names the provider of every rejected webhook', () => {
+    for (const provider of [...WebhookProviderSchema.options, ...FUTURE_VALUES]) {
+      const {title} = describeEvent(event('webhook.rejected', {provider, reason: 'signature'}), opts);
+      expectPlain(title, provider);
+      expect(title).not.toMatch(/^A webhook/);
+    }
+    expect(describeEvent(event('webhook.rejected', {provider: 'agentphone', reason: 'signature'}), opts).title).toBe('AgentPhone webhook rejected, nothing changed');
+  });
+
+  it('gives every event type a title, and a type it does not know a generic one', () => {
+    for (const type of ActivityEventTypeSchema.options) expectPlain(eventTypeLabel(type), type);
+    for (const type of FUTURE_VALUES) expect(describeEvent(event(type, {}), opts).title).toBe('Other activity');
+  });
+
+  it('uses one template name on every screen', () => {
+    for (const template of [...AgentTemplateSchema.options, ...FUTURE_VALUES]) expectPlain(agentTemplateLabel(template), template);
+    expect(agentTemplateLabel('restaurant_order_taker')).toBe('Restaurant order taker');
   });
 });
 

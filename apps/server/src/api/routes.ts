@@ -163,7 +163,7 @@ function envStatus(env: Env): ProviderStatusMap {
     openai: { configured: Boolean(env.OPENAI_API_KEY), detail: '' },
     google_calendar: { configured: Boolean(env.GOOGLE_SERVICE_ACCOUNT_JSON && env.GOOGLE_CALENDAR_ID), detail: '' },
     google_sheets: { configured: Boolean(env.GOOGLE_SERVICE_ACCOUNT_JSON && env.GOOGLE_SHEET_ID), detail: '' },
-    message_channel: env.MESSAGE_CHANNEL === 'qr_only' ? { configured: true, detail: 'qr_only sends nothing', noProviderNeeded: true } : { configured: false, detail: 'not checked' },
+    message_channel: env.MESSAGE_CHANNEL === 'qr_only' ? { configured: true, detail: 'no message is sent, the link is shown as a QR code', noProviderNeeded: true } : { configured: false, detail: 'not checked' },
   };
   for (const s of Object.values(fromEnv)) if (!s.detail) s.detail = s.configured ? 'configured' : 'unconfigured';
   return fromEnv;
