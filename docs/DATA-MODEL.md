@@ -6,6 +6,22 @@ This document defines every table, constraint, index and row level security poli
 
 Migrations and seeds in `packages/db` and `scripts/` are owned by Arsh (SPEC 3.1). The builder service, which Saina owns (D-07), writes `builder_sessions`, `agents`, `agent_versions`, `files`, draft `business_facts` and `fact_conflicts` through the server; it does not change the schema.
 
+## 0. Read this first: the migrations are the source of truth
+
+The SQL in this document was the starting point for task B-06. An independent review of the migrations then found defects, and the fixes changed the SQL. Where this document and `packages/db/migrations` differ, **the migrations win**. Table names, column names and state lists did not change. These rules did:
+
+| Rule | What the migrations do | What this document's SQL still shows |
+|---|---|---|
+| Running a step | An execution can be inserted and claimed only for an approval that is `APPROVED`, in the same business, decided before it expired, and only as the step its bundle lists at that position. A missing earlier step blocks a later one. | Claim queries with no approval check |
+| Approval rows | Frozen after creation. Only the decision columns change, and only once. | No such trigger |
+| Who decides | The decision query joins `businesses` and requires the business owner. | Any user ID accepted |
+| Row-level security | Enabled, with policies and revokes, in the same file that creates the tables. Default privileges are revoked before any table exists. No migration step leaves a table exposed. | A separate, later security step |
+| Published agent versions | Immutable for every role. There is no reset bypass. | A bypass through the setting `app.allow_reset` |
+| Reset script (section 6.2) | Truncates agents and versions, then reseeds the seeded ones. `TRUNCATE` fires no row trigger. | Keeps seeded agents and uses the bypass |
+| `activity_events.agent_id` | `ON DELETE RESTRICT`. An agent with audit events cannot be deleted. | `ON DELETE SET NULL` |
+| Helper functions | Every function pins an empty `search_path`. `owns_business` lives in a `private` schema and only `authenticated` may run it. | `public.owns_business` with `search_path = public` |
+| Message dispatches | A dispatch is tied to the approval of the execution it belongs to. | No such tie |
+
 ## 1. Conventions
 
 - Columns are snake_case. JSON fields in `packages/contracts` are camelCase and map one to one (`business_id` is `businessId`).

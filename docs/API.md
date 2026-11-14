@@ -108,7 +108,7 @@ FactConflict fields follow CONTRACTS.md.
   "payloadHash": "sha256:9c1e...", "state": "PENDING", "expiresAt": "2026-11-13T20:10:00Z", "createdAt": "2026-11-13T20:00:00Z" } }
 ```
 
-The server stores the proposed value as a new draft fact, and `subjectId` is that draft's `fact_` ID (DATA-MODEL.md section 2.6). To resolve a conflict, send `{ "resolvesConflictId": "cfl_01", "value": {...} }` instead of `kind` and `key`. The conflict moves to `resolved` when the edit is approved.
+The server stores the proposed value as a new draft fact, and `subjectId` is that draft's `fact_` ID (DATA-MODEL.md section 2.6). A conflict is resolved in one of two ways. To keep the authoritative value, call `POST /api/conflicts/:id/resolve` (section 3.12): nothing external is written, so no approval is needed. To replace a local fact with the uploaded value, send `{ "resolvesConflictId": "cfl_01", "value": {...} }` here instead of `kind` and `key`; the conflict moves to `resolved` when the edit is approved. A price that lives in Square cannot be changed this way: that is a price change (`catalog/prices/propose`, SHOULD).
 
 **`POST /api/businesses/:id/catalog/sync`**. Refreshes the `catalog_items` cache from Square (P-10). Body `{}`. Response `202 { "jobId": "job_cat_01" }`. Errors: `INTEGRATION_UNAVAILABLE`, `ENVIRONMENT_MISMATCH`. Events: `sync.queued`, then `sync.succeeded` or `sync.failed` with `payload.target: "catalog"`. Screens: Knowledge review.
 
@@ -225,7 +225,7 @@ To take a paused agent live again, call `publish`. If the draft has not changed 
 
 One phone number serves both businesses, so this route is owner-scoped (P-06).
 
-**`GET /api/live-agent`**. Returns the LiveAgent (SPEC 2.9). Every field is always present. If the agent it names is `paused`, the number plays a short closed message. Who made a switch is recorded in the `live_agent.changed` event. Screens: Overview, Agent details.
+**`GET /api/live-agent`**. Returns the LiveAgent (SPEC 2.9). `phoneNumber` and `businessId` are always present. `agentId` and `agentVersionId` are absent when no agent answers the number, which the UI shows as "No agent is answering". If the agent it names is `paused`, the number plays a short closed message. Who made a switch is recorded in the `live_agent.changed` event. Screens: Overview, Agent details.
 
 ```json
 { "phoneNumber": "+15555550199", "businessId": "biz_pizza_01", "agentId": "agt_pizza_01", "agentVersionId": "agv_pizza_01_v2", "updatedAt": "2026-11-13T19:30:00Z" }
