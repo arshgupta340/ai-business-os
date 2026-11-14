@@ -55,6 +55,7 @@ These are written into the spec so work can start. Each stays a proposal until A
 | P-15 | Google access uses one service account, with the demo calendar and sheet shared to it. | PRD says "preconnected test credentials". |
 | P-16 | The dashboard gets live updates through Supabase Realtime on `activity_events`, which tells the UI to refetch. There is no custom SSE endpoint. | PRD `/api/activity/stream`. |
 | P-17 | Upgrade the Twilio account (about 20 US dollars) so callers do not hear the trial announcement. This is Arsh's spending decision. | Not in PRD. |
+| P-19 | Owner recovery actions are a SHOULD item (task B-32): `POST /api/orders/:id/cancel`, and `POST /api/executions/:id/resolve` with `retry` or `abandon` for a step in `NEEDS_REVIEW`, a booking in `RETRY_REQUIRED` or a message in `UNKNOWN`. Until they exist, a stuck record is cleared with the reset script. | The PRD defines the stuck states but no way out of them. |
 | P-18 | Two text ways to run an agent. `POST /api/agents/:id/test` uses mock tools only and can never cause a write (AC-03). `POST /api/agents/:id/sim-call` runs a published agent in text with the real read and propose tools, creates a `calls` row with channel `test_console`, and is labelled "simulated call" in the UI. Writes still need owner approval. Automated end-to-end tests use it, and it is the fallback if the phone path fails. | PRD has only the mock preview. |
 
 ### 1.3 Rules that are never cut
@@ -246,6 +247,11 @@ These settle names and numbers that more than one doc uses.
 | Sync target | The Sheets sync target is named `google_sheets`. |
 | Not persisted | Quotes made before a proposal and test console sessions live in server memory. A quote is saved inside the order when the proposal is stored. |
 | User IDs | `users.id` is a `usr_` text ID. `users.auth_user_id` links to Supabase Auth. |
+| Unavailable items | `UNAVAILABLE` is both a call stage (an item is found unavailable while collecting) and an order status (the re-check at checkout finds an item gone). |
+| Fulfillment | The server sets `FULFILLMENT_READY` itself once the order is `PAID_VERIFIED` and recorded. There is no "mark ready" endpoint. |
+| Catalog sync events | A catalog sync writes `sync.*` events with `target: "catalog"`. It is not a `sync_jobs` row. Only Sheets uses `sync_jobs`. |
+| Live agent route | `GET` and `PUT /api/live-agent` are Arsh's, because the phone worker reads that table. Publish (Saina's) can make an agent live by calling the function that route exports. |
+| Fields that are also columns | Where a JSON field is stored in a column, the column's name decides the field's name. Enum values and object shapes follow `docs/CONTRACTS.md`. |
 | Tie-breakers | For a field name no ruling covers, `docs/CONTRACTS.md` wins. For a path or an error code, `docs/API.md` wins. For a table or column name, `docs/DATA-MODEL.md` wins. |
 
 ## 3. Architecture

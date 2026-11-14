@@ -72,7 +72,7 @@ create table public.capabilities (
   id              text primary key check (id ~ '^[a-z]+(\.[a-z]+)+$'),
   description     text not null,
   effect          text not null check (effect in ('read', 'propose', 'write', 'external_message')),
-  approval_mode   text not null check (approval_mode in ('none', 'creates', 'required')),
+  approval_mode   text not null check (approval_mode in ('none', 'creates_approval', 'required')),
   handler_id      text not null,
   input_schema    jsonb not null,
   output_schema   jsonb not null,
@@ -80,7 +80,7 @@ create table public.capabilities (
   timeout_ms      integer not null default 8000 check (timeout_ms between 100 and 60000),
   tier            text not null check (tier in ('MUST', 'SHOULD')),
   check ((effect in ('write', 'external_message')) = (approval_mode = 'required')),
-  check ((effect = 'propose') = (approval_mode = 'creates'))
+  check ((effect = 'propose') = (approval_mode = 'creates_approval'))
 );
 ```
 
@@ -94,7 +94,7 @@ create table public.integrations (
   business_id text not null references public.businesses (id) on delete cascade,
   provider    text not null check (provider in ('square', 'twilio', 'openai', 'google_calendar', 'google_sheets', 'message_channel')),
   alias       text not null,
-  state       text not null default 'unconfigured' check (state in ('ok', 'degraded', 'down', 'unconfigured')),
+  state       text not null default 'disconnected' check (state in ('connected', 'degraded', 'disconnected')),
   config_ref  text,
   config      jsonb not null default '{}',
   last_checked_at timestamptz, last_error text,
@@ -114,17 +114,17 @@ create table public.files (
   name             text not null,
   mime             text not null check (mime in (
     'application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'text/csv',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel')),
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')),
   sha256           text not null check (sha256 ~ '^sha256:[0-9a-f]{64}$'),
   size_bytes       integer not null check (size_bytes > 0 and size_bytes <= 10485760),
-  extraction_state text not null default 'PENDING' check (extraction_state in ('PENDING', 'RUNNING', 'DONE', 'FAILED')),
+  extraction_state text not null default 'PENDING' check (extraction_state in ('PENDING', 'EXTRACTING', 'EXTRACTED', 'FAILED')),
   uploaded_by      text not null references public.users (id),
   created_at       timestamptz not null default now(),
   unique (business_id, sha256)
 );
 ```
 
-Files live in the private Supabase Storage bucket `business-files`, with no public URL. The mime check covers PDF, image, CSV and spreadsheet (P-12, D-09). The size check is the 10 MB cap (SPEC 2.9). Audio is not an accepted type. `unique (business_id, sha256)` stops the same file being extracted twice.
+Files live in the private Supabase Storage bucket `business-files`, with no public URL. The mime check covers PDF, image, CSV and spreadsheet (P-12, D-09). The size check is the 10 MB cap (SPEC 2.9). Audio is not an accepted type. `unique (business_id, sha256)` stops the same file being extracted twice. `FileRecord.draftFactIds` and `conflictIds` are not columns; the API reads them from `business_facts.file_id` and `fact_conflicts`.
 
 ### 2.6 `business_facts`
 
@@ -132,7 +132,7 @@ Files live in the private Supabase Storage bucket `business-files`, with no publ
 create table public.business_facts (
   id            text primary key default gen_id('fact_'),
   business_id   text not null references public.businesses (id) on delete cascade,
-  kind          text not null check (kind in ('profile', 'hours', 'policy', 'service', 'faq', 'catalog_item')),
+  kind          text not null check (kind in ('hours', 'policy', 'service', 'contact', 'faq', 'menu_item')),
   key           text not null,
   value         jsonb not null,
   source_type   text not null check (source_type in ('square', 'google_calendar', 'owner_chat', 'owner_ui', 'upload', 'seed')),
@@ -154,7 +154,7 @@ create unique index business_facts_version
 
 `source_type` is the SPEC 2.9 list. Every uploaded file uses `upload`, with `file_id` set; the file type is `files.mime`. `business_facts_one_verified` enforces at most one `verified` row per business, kind and key (SPEC 2.9). An earlier verified row becomes `superseded` and stays, which is the versioned change log (AC-16). Uploads and chat only insert drafts. An approved `local.fact.update` then, in one transaction, sets the current verified row to `superseded` and turns the draft into the new verified row with the next `version` and `supersedes_id` pointing at the old row. The order of those two updates matters: supersede first, then verify, or the partial index rejects the second row.
 
-Keys: hours are one fact per weekday, keys `mon` to `sun`, value `{ open, close }` in local time or `{ closed: true }` (SPEC 2.7). Services are `kind = 'service'` with the `svc_` ID as key and a `ServiceOffering` as value. Draft menu items from an upload are `kind = 'catalog_item'`; they exist only to be compared with `catalog_items` (section 5). `faq` facts serve the FAQ-only custom agent (P-13).
+Keys: hours are one fact per weekday, keys `mon` to `sun`, value `{ open, close }` in local time or `{ closed: true }` (SPEC 2.7). Services are `kind = 'service'` with the `svc_` ID as key and a `ServiceOffering` as value. Draft menu items from an upload are `kind = 'menu_item'`; they come only from an upload, stay `draft`, exist only to be compared with `catalog_items` (section 5) and are never a price source (SPEC 2.9). `faq` facts serve the FAQ-only custom agent (P-13).
 
 ### 2.7 `catalog_items`
 
@@ -167,6 +167,7 @@ create table public.catalog_items (
   square_item_version      bigint not null,
   square_variation_version bigint not null,
   item_name                text not null,
+  description              text,
   variation_name           text not null,
   price_minor              integer not null check (price_minor >= 0),
   currency                 text not null default 'USD' check (currency = 'USD'),
@@ -179,31 +180,30 @@ create table public.catalog_items (
 
 One row per sellable Square variation (P-10). Sync upserts on `(business_id, square_variation_id)` and deletes rows whose variation is gone from Square. Variable-price variations are skipped, so `price_minor` can be not null. `modifier_lists` holds each list's Square ID, name, selection type, and modifiers with their Square IDs and `price_minor`. The `square_*_version` columns are what `catalog.price.update` needs, since Square requires the current object version for a price change (SPEC 4).
 
+The API and the tools group rows into items (SPEC 2.9). One `CatalogItem` (CONTRACTS.md) is all rows with the same `square_item_id`: `square_item_id` is `squareItemId`, `item_name` is `name`, `description` is `description`, `modifier_lists` is `modifierLists`, `available` is true if any row has `is_available`, and each row is one entry of `variations` (`square_variation_id` is `id`, `variation_name` is `name`, plus `price_minor` and `currency`).
+
 ### 2.8 `fact_conflicts`
 
 ```sql
 create table public.fact_conflicts (
   id                 text primary key default gen_id('cfl_'),
   business_id        text not null references public.businesses (id) on delete cascade,
-  kind               text not null,
+  kind               text not null check (kind in ('hours', 'policy', 'service', 'contact', 'faq', 'menu_item')),
   key                text not null,
-  draft_fact_id      text not null references public.business_facts (id) on delete cascade,
-  authority_source   text not null check (authority_source in ('square', 'verified_fact')),
-  authority_ref      text,
-  authority_value    jsonb not null,
+  candidates         jsonb not null check (jsonb_typeof(candidates) = 'array' and jsonb_array_length(candidates) >= 2),
   required           boolean not null default true,
   state              text not null default 'open' check (state in ('open', 'resolved')),
-  resolution         text check (resolution in ('kept_authority', 'accepted_draft', 'dismissed')),
+  resolved_fact_id   text references public.business_facts (id),
   resolved_by        text references public.users (id),
   resolved_at        timestamptz,
   created_at         timestamptz not null default now(),
-  check ((state = 'resolved') = (resolved_at is not null and resolved_by is not null and resolution is not null))
+  check ((state = 'resolved') = (resolved_at is not null and resolved_by is not null))
 );
 create unique index fact_conflicts_one_open
-  on public.fact_conflicts (business_id, kind, key, draft_fact_id) where state = 'open';
+  on public.fact_conflicts (business_id, kind, key) where state = 'open';
 ```
 
-A row is written when a draft fact disagrees with the authoritative source: the Square value from `catalog_items` (`authority_ref` is the `cat_` ID) or the current verified fact (`authority_ref` is its `fact_` ID). Publish refuses with `CONFLICT_UNRESOLVED` while any row for the business has `state = 'open' and required` (application rule in the publish handler, AC-02). A conflict is resolved through `POST /api/businesses/:id/facts/propose`; the approved `local.fact.update` sets `state`, `resolution`, `resolved_by` and `resolved_at`. Choosing the draft value for a Square price does not change Square; that is the `price_edit` bundle.
+The columns are the `FactConflict` fields of CONTRACTS.md. A row is written when a draft fact disagrees with the authoritative source. `candidates` holds the draft (`factId`, `sourceType: 'upload'` or `'owner_chat'`, `value`) and the authority: the Square value from `catalog_items` (`sourceType: 'square'`, `sourceRef` the `cat_` ID) or the current verified fact (its `factId` and `sourceType`). Publish refuses with `CONFLICT_UNRESOLVED` while any row for the business has `state = 'open' and required` (application rule in the publish handler, AC-02). A conflict is resolved through `POST /api/businesses/:id/facts/propose`; the approved `local.fact.update` sets `state`, `resolved_fact_id`, `resolved_by` and `resolved_at`. `resolved_fact_id` is empty when the owner keeps the Square value. Choosing the draft value for a Square price does not change Square; that is the `price_edit` bundle.
 
 ### 2.9 `agents`
 
@@ -308,7 +308,7 @@ create table public.calls (
   caller_last4      text check (caller_last4 ~ '^[0-9]{4}$'),
   status            text not null default 'IN_PROGRESS' check (status in ('IN_PROGRESS', 'COMPLETED', 'DROPPED', 'FAILED')),
   stage             text not null check (stage in (
-    'CALL_STARTED', 'COLLECTING', 'VALIDATING', 'CUSTOMER_CONFIRMED',
+    'CALL_STARTED', 'COLLECTING', 'VALIDATING', 'UNAVAILABLE', 'CUSTOMER_CONFIRMED',
     'INQUIRY', 'SLOT_SEARCH', 'PROPOSAL')),
   fact_snapshot_ref jsonb not null default '{}',
   end_reason        text check (end_reason in ('completed', 'dropped', 'failed')),
@@ -321,7 +321,7 @@ create table public.calls (
 );
 ```
 
-`provider_call_id` is the Twilio CallSid; it is unique so a repeated Twilio webhook cannot open a second call row. A simulated call (P-18) has `channel = 'test_console'` and no CallSid, but it is still a `calls` row, so every order has a `call_id` and `agent_version_id` always comes from the call (SPEC 2.9). `stage` holds the conversation states before a proposal exists (SPEC 2.4 rulings): an order call starts at `CALL_STARTED`, a booking call at `INQUIRY`, and both end at `CUSTOMER_CONFIRMED` when the propose tool runs. `fact_snapshot_ref` holds the verified fact IDs and versions read at call start, so a call in progress keeps the hours it started with (AC-16). Only the last four digits of the caller number are kept; the confirmed message number lives in `orders.contact` after consent. `end_reason` is what `call.ended` carries.
+`provider_call_id` is the Twilio CallSid; it is unique so a repeated Twilio webhook cannot open a second call row. A simulated call (P-18) has `channel = 'test_console'` and no CallSid, but it is still a `calls` row, so every order has a `call_id` and `agent_version_id` always comes from the call (SPEC 2.9). `stage` holds the conversation states before a proposal exists (SPEC 2.4 rulings): an order call starts at `CALL_STARTED`, a booking call at `INQUIRY`, and both end at `CUSTOMER_CONFIRMED` when the propose tool runs. `UNAVAILABLE` is the stage while the caller picks another item (CONTRACTS.md `CallStage`). `fact_snapshot_ref` holds the verified fact IDs and versions read at call start, so a call in progress keeps the hours it started with (AC-16). Only the last four digits of the caller number are kept; the confirmed message number lives in `orders.contact` after consent. `end_reason` is what `call.ended` carries.
 
 ### 2.14 `approval_requests`
 
@@ -377,7 +377,7 @@ create table public.orders (
   business_id text not null references public.businesses (id) on delete cascade,
   call_id     text not null references public.calls (id),
   status      text not null default 'AWAITING_OWNER_APPROVAL' check (status in (
-    'CALL_STARTED', 'COLLECTING', 'VALIDATING', 'CUSTOMER_CONFIRMED', 'AWAITING_OWNER_APPROVAL', 'APPROVED',
+    'AWAITING_OWNER_APPROVAL', 'APPROVED',
     'CREATING_CHECKOUT', 'PAYMENT_LINK_READY', 'MESSAGE_SENT', 'PAYMENT_PENDING', 'PAID_VERIFIED', 'FULFILLMENT_READY',
     'REJECTED', 'APPROVAL_EXPIRED', 'UNAVAILABLE', 'PAYMENT_FAILED', 'CANCELLED', 'RECOVERY_REQUIRED')),
   cart        jsonb not null,
@@ -399,7 +399,7 @@ create unique index orders_square_order_id_key on public.orders (square_order_id
 create unique index orders_square_payment_link_id_key on public.orders (square_payment_link_id) where square_payment_link_id is not null;
 ```
 
-The propose tool creates the row already in `AWAITING_OWNER_APPROVAL` (SPEC 2.4 rulings). The earlier states live in `calls.stage`; the check keeps all eighteen so the column and the `OrderStatus` type stay the same list. `unique (business_id, cart_hash, call_id)` makes a repeated `propose_order` return the existing row instead of making a second proposal. The two partial unique indexes stop one Square order or link attaching to two local orders (AC-10). The last two checks make the database refuse a paid state without a Square payment ID (SPEC rule 1.3.5). `PAYMENT_LINK_READY` may go straight to `PAYMENT_PENDING` when the channel is `qr_only` or the send fails. `quote` is the `Quote` (`qte_` ID, `expiresAt`) the proposal used; quotes before a proposal live only in the call session and are not stored. `total_minor` and `currency` are copied from the quote when the proposal is stored (SPEC 2.9).
+The propose tool creates the row already in `AWAITING_OWNER_APPROVAL` (SPEC 2.4 rulings). The earlier states live in `calls.stage`, so the check holds exactly the fourteen values of the `OrderStatus` type (CONTRACTS.md). `UNAVAILABLE` here means the checkout step's re-check found an item gone. `unique (business_id, cart_hash, call_id)` makes a repeated `propose_order` return the existing row instead of making a second proposal. The two partial unique indexes stop one Square order or link attaching to two local orders (AC-10). The last two checks make the database refuse a paid state without a Square payment ID (SPEC rule 1.3.5). `PAYMENT_LINK_READY` may go straight to `PAYMENT_PENDING` when the channel is `qr_only` or the send fails. `quote` is the `Quote` (`qte_` ID, `expiresAt`) the proposal used; quotes before a proposal live only in the call session and are not stored. `total_minor` and `currency` are copied from the quote when the proposal is stored (SPEC 2.9).
 
 ### 2.16 `bookings`
 
@@ -409,7 +409,7 @@ create table public.bookings (
   business_id  text not null references public.businesses (id) on delete cascade,
   call_id      text references public.calls (id),
   status       text not null default 'AWAITING_OWNER_APPROVAL' check (status in (
-    'INQUIRY', 'SLOT_SEARCH', 'PROPOSAL', 'CUSTOMER_CONFIRMED', 'AWAITING_OWNER_APPROVAL', 'RECHECKING_SLOT',
+    'AWAITING_OWNER_APPROVAL', 'RECHECKING_SLOT',
     'BOOKED_VERIFIED', 'SLOT_CONFLICT', 'REJECTED', 'EXPIRED', 'RETRY_REQUIRED')),
   service_id   text not null,
   service_name text not null,
@@ -432,7 +432,7 @@ create unique index bookings_one_proposal_per_call_slot
   on public.bookings (business_id, call_id, service_id, start_utc) where call_id is not null;
 ```
 
-Like orders, the propose tool creates the row in `AWAITING_OWNER_APPROVAL` and the check keeps the full list. `service_id` is the `svc_` key of a `service` fact; it has no foreign key because facts are versioned. `bookings_no_overlap` is per calendar and covers `RECHECKING_SLOT` as well as `BOOKED_VERIFIED` (SPEC 2.9), so moving a booking into `RECHECKING_SLOT` is the local slot lock: a second approval for an overlapping slot fails on that update, before Google Calendar is called. The `[)` range lets back to back slots touch. It needs `btree_gist`; if the migration cannot find the gist operator class for text, install the extension into `public`. The simpler fallback, if the exclusion constraint fights us, is `create unique index on bookings (business_id, calendar_id, start_utc) where status in ('RECHECKING_SLOT', 'BOOKED_VERIFIED')`, which is safe only while every service uses one fixed slot grid. `call_id` is nullable because the `Booking` shape allows it, though both live and simulated calls set it.
+Like orders, the propose tool creates the row in `AWAITING_OWNER_APPROVAL`, and the check holds exactly the seven values of the `BookingStatus` type (CONTRACTS.md). `service_id` is the `svc_` key of a `service` fact; it has no foreign key because facts are versioned. `bookings_no_overlap` is per calendar and covers `RECHECKING_SLOT` as well as `BOOKED_VERIFIED` (SPEC 2.9), so moving a booking into `RECHECKING_SLOT` is the local slot lock: a second approval for an overlapping slot fails on that update, before Google Calendar is called. The `[)` range lets back to back slots touch. It needs `btree_gist`; if the migration cannot find the gist operator class for text, install the extension into `public`. The simpler fallback, if the exclusion constraint fights us, is `create unique index on bookings (business_id, calendar_id, start_utc) where status in ('RECHECKING_SLOT', 'BOOKED_VERIFIED')`, which is safe only while every service uses one fixed slot grid. `call_id` is nullable because the `Booking` shape allows it, though both live and simulated calls set it.
 
 ### 2.17 `action_executions`
 
@@ -448,7 +448,7 @@ create table public.action_executions (
   capability_id   text references public.capabilities (id),
   step_index      smallint not null check (step_index >= 0),
   idempotency_key text not null unique check (idempotency_key ~ '^[0-9a-f]{64}$'),
-  status          text not null default 'QUEUED' check (status in ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'NEEDS_REVIEW')),
+  status          text not null default 'QUEUED' check (status in ('QUEUED', 'RUNNING', 'SUCCEEDED', 'SKIPPED', 'FAILED', 'NEEDS_REVIEW')),
   external_ref    text,
   attempts        integer not null default 0 check (attempts between 0 and 3),
   next_attempt_at timestamptz not null default now(),
@@ -461,7 +461,7 @@ create table public.action_executions (
 );
 ```
 
-`idempotency_key` is `sha256(businessId:subjectId:actionType:approvalId)` in hex (SPEC 2.9). It is computed once at insert and sent unchanged to Square, Google and the message channel on every retry; where a provider caps key length, the adapter shortens it the same way every time. `unique (approval_id, action_type)` means a double click on Approve cannot queue a bundle twice. A worker claims a row with `update ... set status = 'RUNNING', attempts = attempts + 1, locked_by = $1, locked_at = now() where id = $2 and status = 'QUEUED' and next_attempt_at <= now() returning *`, so only one worker owns an intent. A retryable failure returns to `QUEUED` with a later `next_attempt_at`; after 3 attempts it is `FAILED`; an unknown result is `NEEDS_REVIEW`, never a blind retry (SPEC 2.9). `capability_id` follows the SPEC 2.3 mapping and is null for `local.*` steps.
+`idempotency_key` is `sha256(businessId:subjectId:actionType:approvalId)` in hex (SPEC 2.9). It is computed once at insert and sent unchanged to Square, Google and the message channel on every retry; where a provider caps key length, the adapter shortens it the same way every time. `unique (approval_id, action_type)` means a double click on Approve cannot queue a bundle twice. A worker claims a row with `update ... set status = 'RUNNING', attempts = attempts + 1, locked_by = $1, locked_at = now() where id = $2 and status = 'QUEUED' and next_attempt_at <= now() returning *`, so only one worker owns an intent. A retryable failure returns to `QUEUED` with a later `next_attempt_at`; after 3 attempts it is `FAILED`; an unknown result is `NEEDS_REVIEW`, never a blind retry (SPEC 2.9). When `MESSAGE_CHANNEL` is `qr_only`, a message step goes straight to `SKIPPED` and no `message_dispatches` row is created (SPEC 2.9). `last_error` is `ActionExecution.lastError`. `capability_id` follows the SPEC 2.3 mapping and is null for `local.*` steps.
 
 The Sheets step is authorized at approval but runs later (SPEC 2.3), and it never gets an `action_executions` row (SPEC 2.9). That is why the `action_type` check leaves out `sheets.order.append` and `sheets.booking.append`. The transaction that moves an order into `PAID_VERIFIED`, or a booking into `BOOKED_VERIFIED`, inserts the `sync_jobs` row; the approval in `action_bundle` is its authority. An order that is never paid has no Sheets row and no pending job.
 
@@ -476,7 +476,7 @@ create table public.message_dispatches (
   order_id            text references public.orders (id),
   booking_id          text references public.bookings (id),
   subject_id          text generated always as (coalesce(order_id, booking_id)) stored,
-  channel             text not null check (channel in ('surge', 'android_gateway', 'whatsapp_sandbox', 'qr_only')),
+  channel             text not null check (channel in ('surge', 'android_gateway', 'whatsapp_sandbox')),
   recipient           text not null check (recipient ~ '^\+[1-9][0-9]{6,14}$'),
   template            text not null check (template in ('checkout_link', 'booking_confirmed')),
   body_hash           text not null check (body_hash ~ '^sha256:[0-9a-f]{64}$'),
@@ -487,13 +487,13 @@ create table public.message_dispatches (
   error_code text, sent_at timestamptz, delivered_at timestamptz,
   created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
   check (num_nonnulls(order_id, booking_id) = 1),
-  check (status not in ('SENT', 'DELIVERED') or channel = 'qr_only' or provider_message_id is not null)
+  check (status not in ('SENT', 'DELIVERED') or provider_message_id is not null)
 );
 create unique index message_dispatches_provider_id_key
   on public.message_dispatches (channel, provider_message_id) where provider_message_id is not null;
 ```
 
-The adapter inserts this row with the execution's idempotency key before it calls the provider, so a retry finds the row and does not send twice. A timeout with no provider answer sets `UNKNOWN`, which needs review; a failed or unknown message does not fail the order or booking (SPEC 2.3). `order_id` and `booking_id` keep real foreign keys; `subject_id` is a generated column that gives the `MessageDispatch.subjectId` field. Only the body hash is stored; the checkout URL lives on the order. `recipient` is stored in full and must equal the number in the approved payload (application rule, checked against `payload_hash`); events show only its last four digits. The adapter adds WhatsApp's `whatsapp:` prefix; it is not stored.
+The adapter inserts this row with the execution's idempotency key before it calls the provider, so a retry finds the row and does not send twice. Under `qr_only` nothing is sent, so no row exists and nothing is ever marked sent (SPEC 2.9). A timeout with no provider answer sets `UNKNOWN`, which needs review; a failed or unknown message does not fail the order or booking (SPEC 2.3). `order_id` and `booking_id` keep real foreign keys; `subject_id` is a generated column that gives the `MessageDispatch.subjectId` field. Only the body hash is stored; the checkout URL lives on the order. `recipient` is stored in full and must equal the number in the approved payload (application rule, checked against `payload_hash`); events show only its last four digits. The adapter adds WhatsApp's `whatsapp:` prefix; it is not stored.
 
 ### 2.19 `webhook_events`
 
@@ -638,7 +638,7 @@ PRD section 10 sets which source wins. The tables implement it like this:
 | Appointment availability | Google Calendar | `calendar.availability.read` calls free/busy live. `bookings` holds proposals and verified results, not availability. |
 | Uploads and owner chat | Proposals only | They insert `business_facts` drafts with `confidence` and `source_type`. A draft becomes verified only through an approved `fact_edit`. |
 
-When extraction saves a draft that disagrees with an authority, it writes a `fact_conflicts` row in the same transaction. A draft `catalog_item` fact is compared with `catalog_items` on normalized item and variation names, and a price difference opens a required conflict (AC-02). A draft hours, policy or service fact is compared with the current verified fact for the same kind and key. The deployed agent never reads `catalog_item` facts, so it always uses the Square price. Publishing is blocked while a required conflict is `open`.
+When extraction saves a draft that disagrees with an authority, it writes a `fact_conflicts` row in the same transaction. A draft `menu_item` fact is compared with `catalog_items` on normalized item and variation names, and a price difference opens a required conflict (AC-02). A draft hours, policy or service fact is compared with the current verified fact for the same kind and key. The deployed agent never reads `menu_item` facts, so it always uses the Square price. Publishing is blocked while a required conflict is `open`.
 
 ## 6. Seed and reset
 
@@ -648,7 +648,7 @@ The seed is idempotent: every insert uses `on conflict do nothing` or an upsert 
 
 1. **Owner.** Create the auth user with the Supabase admin API from `SEED_OWNER_EMAIL` and `SEED_OWNER_PASSWORD` in `.env.local`, then insert the `users` row `usr_owner_01` with `role = 'owner'`.
 2. **Businesses.** `biz_pizza_01` ("Demo Pizza Co.", category `restaurant`) and `biz_barber_01` ("Demo Barbershop", category `barbershop`), both owned by `usr_owner_01`, time zone `America/Los_Angeles`.
-3. **Capabilities.** The thirteen rows of SPEC 2.2, shown below. `input_schema` and `output_schema` are generated from the Zod schemas in `packages/contracts`, so the registry cannot drift from the code. `handler_id` equals the capability ID.
+3. **Capabilities.** The thirteen rows of SPEC 2.2, shown below. `input_schema` and `output_schema` are generated from the Zod schemas in `packages/contracts`, so the registry cannot drift from the code. `handler_id`, `required_scopes` and `timeout_ms` come from the registry table in CONTRACTS.md section 2.
 4. **Integrations.** Square for the pizza shop (`config.locationId` from `SQUARE_LOCATION_ID`), Google Calendar for the barbershop (`config.calendarId` from `GOOGLE_CALENDAR_ID`), and `twilio`, `openai`, `google_sheets` and `message_channel` for both.
 5. **Facts.** All with `source_type = 'seed'`, `status = 'verified'`, `confidence = 1`, `version = 1`. Each business gets seven `hours` facts, keys `mon` to `sun`. The pizza shop gets `policy` facts `pickup_only`, `message_consent_required`, `special_requests` and `pickup_window`. The barbershop gets `policy` facts `booking_min_notice_minutes`, `booking_buffer_minutes` and `cancellation`, plus one `service` fact per service, keyed by its `svc_` ID, with a `ServiceOffering` value. The values come from the fixtures in `packages/contracts`.
 6. **Pizza catalog.** The seed writes the pizza menu to the Square sandbox first with `BatchUpsertCatalogObjects` and a fixed idempotency key, then runs the normal catalog sync, which fills `catalog_items`. `catalog_items` is never seeded directly, because the Square object IDs and versions exist only after the upsert.
@@ -658,7 +658,7 @@ The seed is idempotent: every insert uses `on conflict do nothing` or an upsert 
 | Capability IDs | effect | approval_mode | tier |
 |---|---|---|---|
 | `catalog.read`, `business.facts.read`, `order.quote`, `order.status.read`, `calendar.availability.read` | read | none | MUST |
-| `order.propose`, `booking.propose` | propose | creates | MUST |
+| `order.propose`, `booking.propose` | propose | creates_approval | MUST |
 | `order.checkout.prepare`, `calendar.event.create`, `sheets.rows.append` | write | required | MUST |
 | `message.checkout.send`, `message.booking.confirm` | external_message | required | MUST |
 | `catalog.price.update` | write | required | SHOULD |
@@ -718,16 +718,10 @@ On failure the worker sets `state = 'QUEUED'` and `run_after = now() + backoff` 
 
 **Functions, triggers, settings, storage:** `gen_id`, `set_updated_at`, `agent_versions_immutable`, `activity_events_append_only`, `owns_business`, the session setting `app.allow_reset`, the Storage bucket `business-files`, and the seed variables `SEED_OWNER_EMAIL` and `SEED_OWNER_PASSWORD`.
 
-**Columns not defined in SPEC or the PRD:** `users.auth_user_id`, `display_name`; `businesses.currency`; `capabilities.approval_mode`, `tier`; `integrations.config`, `last_error`; `files.name`, `size_bytes` (PRD `size`), `uploaded_by`; `business_facts.confidence`, `file_id`, `supersedes_id`, `verified_by`, `updated_at`; all `catalog_items` and `fact_conflicts` column names; `agents.channel`, `draft_spec`, `seeded`; `agent_versions.business_id`, `guardrail_version`; all `live_agent` column names; `builder_sessions.owner_id`, `agent_id`, `status`, `messages` (PRD `messages_json_ref`); `calls.agent_id`, `caller_last4` (PRD `caller_ref`), `fact_snapshot_ref`, `end_reason`, `started_at` (PRD `began_at`); `approval_requests.actor_id`, `decision_reason`; `action_executions.step_index`, `next_attempt_at`, `locked_by`, `locked_at`, `last_error`, `started_at`, `finished_at`; `message_dispatches.approval_id`, `order_id`, `booking_id`, `subject_id` (generated), `body_hash`, `sent_at`, `delivered_at`; `webhook_events.event_type`, `business_id`, `payload`, `process_error`; `sync_jobs.external_ref`, `last_error`; `activity_events.payload` (PRD `redacted_payload`).
+**Columns not defined in SPEC or the PRD:** `users.display_name`; `businesses.currency`; `capabilities.approval_mode`, `tier`; `integrations.config`, `last_error`; `files.name`, `size_bytes` (PRD `size`), `uploaded_by`; `business_facts.confidence`, `file_id`, `supersedes_id`, `verified_by`, `updated_at`; all `catalog_items` and `fact_conflicts` column names; `agents.channel`, `draft_spec`, `seeded`; `agent_versions.business_id`, `guardrail_version`; all `live_agent` column names; `builder_sessions.owner_id`, `agent_id`, `status`, `messages` (PRD `messages_json_ref`); `calls.agent_id`, `caller_last4` (PRD `caller_ref`), `fact_snapshot_ref`, `end_reason`, `started_at` (PRD `began_at`); `approval_requests.actor_id`, `decision_reason`; `action_executions.step_index`, `next_attempt_at`, `locked_by`, `locked_at`, `last_error`, `started_at`, `finished_at`; `message_dispatches.approval_id`, `order_id`, `booking_id`, `subject_id` (generated), `body_hash`, `sent_at`, `delivered_at`; `webhook_events.event_type`, `business_id`, `payload`, `process_error`; `sync_jobs.external_ref`, `last_error`; `activity_events.payload` (PRD `redacted_payload`).
 
-**Enumerated values:** `users.role`; `files.extraction_state` (`PENDING`, `RUNNING`, `DONE`, `FAILED`); `business_facts.kind` values `faq` and `catalog_item`; `fact_conflicts.authority_source` and `resolution`; `builder_sessions.status`; `calls.end_reason`; `webhook_events.source`; `sync_jobs.target` and `record_type`; `jobs.queue` and `state`.
+**Enumerated values:** `users.role`; `builder_sessions.status`; `calls.end_reason`; `webhook_events.source`; `sync_jobs.record_type`; `jobs.queue` and `state`. The values of `files.extraction_state`, `integrations.state`, `capabilities.approval_mode` and `business_facts.kind` come from CONTRACTS.md and SPEC 2.9.
 
 **Constraint and index names:** all names in sections 2, 3 and 7, including `business_facts_one_verified`, `approval_requests_one_pending_per_subject`, `fact_conflicts_one_open`, `bookings_no_overlap`, `bookings_one_proposal_per_call_slot` and `agents_active_version_fk`.
 
-**Choices other docs must follow (this file wins for table and column names):**
-1. Quotes and test console sessions (`qte_`, `tst_`) have no table. A quote lives in the call session until a proposal copies it into `orders.quote`; a test session lives in server memory. If API.md needs either to survive a server restart, it needs a table here first.
-2. `catalog_items` has one row per variation; `CatalogItem` in CONTRACTS.md has one object per item with a `variations` array. The API groups rows by `square_item_id`.
-3. `FactKind` in CONTRACTS.md lacks `faq` and `catalog_item`. API.md examples use the hours key `friday`; this doc uses keys `mon` to `sun`, as CONTRACTS.md does.
-4. `sync_jobs.target` is `google_sheets`; FLOWS.md writes `sheets`. Catalog sync events use `payload.target: "catalog"` (API.md) but catalog sync is a job, not a `sync_jobs` row.
-5. API.md uses the quote prefix `qt_`; SPEC 2.1 says `qte_`.
-6. `MessageDispatch.channel` in CONTRACTS.md omits `qr_only`, which the coordinator listed for `message_dispatches.channel`.
+**Open items:** none. Quotes and test console sessions have no table (SPEC 2.9 "Not persisted"). Catalog sync is a background job, not a `sync_jobs` row; its `sync.*` events carry `target: "catalog"` (CONTRACTS.md section 7).

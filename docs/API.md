@@ -29,7 +29,7 @@ This file defines every REST endpoint, webhook and WebSocket of `apps/server`. S
 Every non-2xx response from `/api` is an `ApiError`. `details` is sanitized: it never holds secrets, tokens, full phone numbers or raw provider responses.
 
 ```json
-{ "code": "PAYLOAD_HASH_MISMATCH", "message": "The approval payload changed since you loaded it.", "correlationId": "c0r_8f2a", "retryable": false, "details": { "approvalId": "apv_123" } }
+{ "code": "PAYLOAD_HASH_MISMATCH", "message": "The approval payload changed since you loaded it.", "correlationId": "6f1c2b9e-8f2a-4c1d-9b77-3e5a0d2c4f10", "retryable": false, "details": { "approvalId": "apv_123" } }
 ```
 
 ## 2. Error codes
@@ -79,17 +79,19 @@ Each entry lists method and path, input, success response, errors beyond the com
 
 **`PATCH /api/businesses/:id`**. Changes `name`, `contact` and `settings` only (SPEC 2.8). Sending a fact field returns `VALIDATION_FAILED`; facts change through `facts/propose`. Body `{ "name": "Demo Pizza Co." }`. Response: the profile. Errors: `NOT_FOUND`. Events: none.
 
-**`GET /api/businesses/:id/facts`**. Query: `kind` (`profile`, `hours`, `policy`, `service`), `status` (`draft`, `verified`, `superseded`; default all but `superseded`). Returns BusinessFacts and open FactConflicts. Hours are one fact per weekday; services are facts of kind `service`. Screens: Knowledge review, Agent details.
+**`GET /api/businesses/:id/facts`**. Query: `kind` (`hours`, `policy`, `service`, `contact`, `faq`, `menu_item`), `status` (`draft`, `verified`, `superseded`; default all but `superseded`). Returns BusinessFacts and open FactConflicts. Hours are one fact per weekday; services are facts of kind `service`. Screens: Knowledge review, Agent details.
 
 ```json
 { "items": [ { "id": "fact_hours_fri", "businessId": "biz_pizza_01", "kind": "hours", "key": "fri", "value": { "open": "11:00", "close": "22:00" },
                "sourceType": "seed", "status": "verified", "confidence": 1, "version": 1, "verifiedAt": "2026-11-13T08:00:00Z",
                "createdAt": "2026-11-13T08:00:00Z", "updatedAt": "2026-11-13T08:00:00Z" } ],
-  "conflicts": [ { "id": "cfl_01", "businessId": "biz_pizza_01", "draftFactId": "fact_7a1", "kind": "policy", "key": "pickup_window",
-                   "draftValue": { "minutes": 20 }, "authoritativeValue": { "minutes": 30 }, "authoritativeSource": "seed", "required": true, "state": "open" } ] }
+  "conflicts": [ { "id": "cfl_01", "businessId": "biz_pizza_01", "kind": "policy", "key": "pickup_window", "required": true, "state": "open",
+                   "candidates": [ { "factId": "fact_7a1", "sourceType": "upload", "value": { "minutes": 20 } },
+                                   { "factId": "fact_pw_01", "sourceType": "seed", "value": { "minutes": 30 } } ],
+                   "createdAt": "2026-11-13T19:00:30Z" } ] }
 ```
 
-FactConflict fields follow CONTRACTS.md; the example is illustrative.
+FactConflict fields follow CONTRACTS.md.
 
 **`POST /api/businesses/:id/facts/propose`**. Proposes a fact change, or resolves a conflict by choosing a value. Creates an approval with `bundleType: "fact_edit"`, `actorType: "owner"` and `actionBundle: ["local.fact.update"]` (P-09). The UI shows a confirm dialog and sends the decision to `POST /api/approvals/:id/decision`. Nothing changes until then. Errors: `NOT_FOUND` (fact or conflict), `INVALID_STATE` (conflict already `resolved`). Events: `approval.requested`. After approval: `approval.decided`, `execution.started`, `fact.changed`, `execution.succeeded`. Screens: Knowledge review, Agent details (opening-hours edit, P-05).
 
@@ -99,34 +101,35 @@ FactConflict fields follow CONTRACTS.md; the example is illustrative.
 
 ```json
 { "approval": { "id": "apv_f01", "businessId": "biz_pizza_01", "actorType": "owner", "bundleType": "fact_edit",
-  "actionBundle": ["local.fact.update"], "subjectId": "fact_hours_fri",
-  "payload": { "businessId": "biz_pizza_01", "subjectId": "fact_hours_fri", "kind": "hours", "key": "fri", "fromVersion": 1,
-               "newValue": { "open": "11:00", "close": "23:00" }, "actionBundle": ["local.fact.update"], "expiresAt": "2026-11-13T20:10:00Z" },
+  "actionBundle": ["local.fact.update"], "subjectId": "fact_hours_fri_d2",
+  "payload": { "businessId": "biz_pizza_01", "subjectId": "fact_hours_fri_d2", "kind": "hours", "key": "fri", "fromVersion": 1,
+               "before": { "open": "11:00", "close": "22:00" }, "after": { "open": "11:00", "close": "23:00" },
+               "actionBundle": ["local.fact.update"], "expiresAt": "2026-11-13T20:10:00Z" },
   "payloadHash": "sha256:9c1e...", "state": "PENDING", "expiresAt": "2026-11-13T20:10:00Z", "createdAt": "2026-11-13T20:00:00Z" } }
 ```
 
-To resolve a conflict, send `{ "resolvesConflictId": "cfl_01", "value": {...} }` instead of `kind` and `key`. The conflict moves to `resolved` when the edit is approved.
+The server stores the proposed value as a new draft fact, and `subjectId` is that draft's `fact_` ID (DATA-MODEL.md section 2.6). To resolve a conflict, send `{ "resolvesConflictId": "cfl_01", "value": {...} }` instead of `kind` and `key`. The conflict moves to `resolved` when the edit is approved.
 
 **`POST /api/businesses/:id/catalog/sync`**. Refreshes the `catalog_items` cache from Square (P-10). Body `{}`. Response `202 { "jobId": "job_cat_01" }`. Errors: `INTEGRATION_UNAVAILABLE`, `ENVIRONMENT_MISMATCH`. Events: `sync.queued`, then `sync.succeeded` or `sync.failed` with `payload.target: "catalog"`. Screens: Knowledge review.
 
 **`POST /api/businesses/:id/catalog/prices/propose`** (SHOULD). Proposes a Square price change. Creates an approval with `bundleType: "price_edit"`, `actorType: "owner"` and `actionBundle: ["square.catalog.price.update", "local.catalog.sync"]`, which the normal decision endpoint confirms. The server reads the variation's current Square object and `version` at proposal time. Errors: `NOT_FOUND` (variation), `INTEGRATION_UNAVAILABLE`, `ENVIRONMENT_MISMATCH`. Events: `approval.requested`. After approval: `approval.decided`, `execution.started`, `execution.succeeded` or `execution.failed`. Screens: Knowledge review, Agent details.
 
 ```json
-{ "variationId": "SQ_VAR_PEP_LG", "newPriceMinor": 2099, "currency": "USD" }
+{ "variationId": "SQ_VAR_PEP_LG", "newPriceMinor": 1900, "currency": "USD" }
 ```
 
-Response `201 { "approval": {...} }` with `payload` holding `variationId`, `fromPriceMinor`, `newPriceMinor`, `currency` and `squareVersion` (section 8).
+Response `201 { "approval": {...} }` with `payload` holding the `price_edit` fields of CONTRACTS.md section 4.
 
 ### 3.2 Files and extraction (owner: Saina)
 
 **`POST /api/businesses/:id/files`**. Multipart form, one field `file`, at most 10 MB. Accepted types (P-12): PDF (`application/pdf`), image (`image/png`, `image/jpeg`, `image/webp`), CSV (`text/csv`) and spreadsheet (`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`). Anything else, or a larger file, returns `VALIDATION_FAILED`. The file is stored privately and one structured-output extraction is queued. It saves draft facts with confidence and opens a FactConflict where a draft disagrees with an authoritative source. It never changes verified facts. Response `202`. Events: `extraction.completed` when the job ends (`payload.fileId`, `payload.extractionState`). Screens: Build an Agent, Knowledge review.
 
 ```json
-{ "file": { "id": "file_menu_01", "businessId": "biz_pizza_01", "name": "menu.pdf", "mime": "application/pdf", "size": 182044,
+{ "file": { "id": "file_menu_01", "businessId": "biz_pizza_01", "name": "menu.pdf", "mime": "application/pdf", "sizeBytes": 182044,
   "sha256": "4be0...", "extractionState": "PENDING", "draftFactIds": [], "createdAt": "2026-11-13T19:00:00Z" } }
 ```
 
-**`GET /api/files/:id?businessId=`**. Returns the same `file` object. `extractionState` is `PENDING`, `EXTRACTING`, `EXTRACTED` or `FAILED` (DATA-MODEL.md). When `EXTRACTED`, `draftFactIds` lists the new drafts and `conflictIds` lists any new conflicts. The UI refetches on `extraction.completed`. Errors: `NOT_FOUND`.
+**`GET /api/files/:id?businessId=`**. Returns the same `file` object. `extractionState` is `PENDING`, `EXTRACTING`, `EXTRACTED` or `FAILED` (CONTRACTS.md `FileRecord`). When `EXTRACTED`, `draftFactIds` lists the new drafts and `conflictIds` lists any new conflicts. The UI refetches on `extraction.completed`. Errors: `NOT_FOUND`.
 
 ### 3.3 Builder sessions (owner: Saina)
 
@@ -139,10 +142,10 @@ Response `201 { "approval": {...} }` with `payload` holding `variationId`, `from
 
 **`GET /api/builder/sessions/:id?businessId=`**. Returns the session as above. Errors: `NOT_FOUND`.
 
-**`POST /api/builder/sessions/:id/messages?businessId=`**. Sends one owner message, typed or transcribed from browser voice (`source: "text" | "voice"`). The server runs one Responses API call with strict Structured Outputs, validates the resulting `AgentSpec` against the registry and computes missing fields. An unsupported request is answered in `reply` and left out of the spec; it is not an error. Errors: `NOT_FOUND`, `INTEGRATION_UNAVAILABLE` (OpenAI). Events: none.
+**`POST /api/builder/sessions/:id/messages?businessId=`**. Sends one owner message, typed or transcribed from browser voice (`inputMode: "text" | "voice"`, as on `BuilderMessage`). The server runs one Responses API call with strict Structured Outputs, validates the resulting `AgentSpec` against the registry and computes missing fields. An unsupported request is answered in `reply` and left out of the spec; it is not an error. Errors: `NOT_FOUND`, `INTEGRATION_UNAVAILABLE` (OpenAI). Events: none.
 
 ```json
-{ "text": "I run a pizza shop and want an AI that takes pickup orders.", "source": "text" }
+{ "text": "I run a pizza shop and want an AI that takes pickup orders.", "inputMode": "text" }
 ```
 
 ```json
@@ -178,7 +181,7 @@ Agent summary: `{ id, businessId, name, template, state, activeVersionId?, activ
                    "approvalRequired": ["order.checkout.prepare", "message.checkout.send", "sheets.rows.append"] },
   "examples": [ { "scenario": "happy_path", "transcript": [ { "role": "caller", "text": "One large margherita for pickup at 7." }, { "role": "agent", "text": "That is 20 dollars and 61 cents with tax." } ],
                   "toolTrace": [ { "tool": "quote_order", "capabilityId": "order.quote", "effect": "read", "input": { "cart": { "lines": [] } },
-                                   "output": { "ok": true, "totalMinor": 2061 }, "mocked": true, "durationMs": 4 } ] } ] }
+                                   "output": { "ok": true, "quote": { "quoteId": "qte_m1", "totalMinor": 2061, "currency": "USD" } }, "mocked": true, "durationMs": 4 } ] } ] }
 ```
 
 **`POST /api/agents/:id/test?businessId=`**. One turn of the text test console against the draft spec, with the mock toolset only (P-18). **It can never cause a write (AC-03): no external call, no approval row, no activity event.** A propose tool returns a mock approval with prefix `apv_mock_`. Body `{ "message": "Two large pepperoni please" }`, plus `testSessionId` on later turns. Errors: `NOT_FOUND` (agent or test session), `INTEGRATION_UNAVAILABLE`. Events: none. Screens: Agent preview, Agent details.
@@ -186,7 +189,7 @@ Agent summary: `{ id, businessId, name, template, state, activeVersionId?, activ
 ```json
 { "testSessionId": "tst_01", "reply": "Two large pepperoni. Any extra toppings?",
   "toolTrace": [ { "tool": "read_catalog", "capabilityId": "catalog.read", "effect": "read", "input": { "query": "large pepperoni" },
-                   "output": { "ok": true, "items": [ { "id": "SQ_ITEM_PEP", "variations": [ { "id": "SQ_VAR_PEP_LG", "priceMinor": 1999 } ] } ] }, "mocked": true, "durationMs": 6 } ] }
+                   "output": { "ok": true, "items": [ { "catalogItemId": "SQ_ITEM_PEP", "name": "Pepperoni", "available": true, "variations": [ { "id": "SQ_VAR_PEP_LG", "name": "Large", "priceMinor": 2200 } ], "modifierLists": [] } ] }, "mocked": true, "durationMs": 6 } ] }
 ```
 
 When a turn is refused (for example "change the price to zero"), the response adds `"guardrail": { "refused": true, "rule": "no_fact_changes" }` and `toolTrace` shows no write.
@@ -198,13 +201,13 @@ When a turn is refused (for example "change the price to zero"), the response ad
 ```json
 { "agent": { "id": "agt_pizza_01", "state": "live", "activeVersionId": "agv_pizza_01_v2", "isLiveAgent": true },
   "version": { "id": "agv_pizza_01_v2", "agentId": "agt_pizza_01", "version": 2, "spec": { "template": "restaurant_order_taker" },
-               "knowledgeSnapshotRef": "snap_2026-11-13T19:30:00Z", "createdBy": "usr_owner_01", "publishedAt": "2026-11-13T19:30:00Z" },
+               "knowledgeSnapshotRef": { "facts": [ { "id": "fact_hours_fri", "version": 1 } ], "catalogSyncedAt": "2026-11-13T19:30:00Z" }, "createdBy": "usr_owner_01", "publishedAt": "2026-11-13T19:30:00Z" },
   "phoneNumber": "+15555550199" }
 ```
 
 To take a paused agent live again, call `publish`. If the draft has not changed since the active version, no new version is written and the current one is reactivated.
 
-**`POST /api/agents/:id/pause?businessId=`**. Body `{}`. Sets `state: "paused"`. If it was the live agent, the number then answers with a short closed message and hangs up. In-flight calls finish on their pinned version; approved bundles already queued still run. Errors: `NOT_FOUND`, `INVALID_STATE` (agent is `draft`). Events: `agent.paused`, and `live_agent.changed` if it was live. Screens: Agent details, Overview.
+**`POST /api/agents/:id/pause?businessId=`**. Body `{}`. Sets `state: "paused"`. If it was the live agent, the number then answers with a short closed message and hangs up. In-flight calls finish on their pinned version; approved bundles already queued still run. Errors: `NOT_FOUND`, `INVALID_STATE` (agent is `draft`). Events: `agent.paused`. The `live_agent` row does not change. Screens: Agent details, Overview.
 
 **`GET /api/agents/:id/versions?businessId=`**. Lists AgentVersions, newest first. Query: `limit`, `cursor`. Errors: `NOT_FOUND`. Screens: Agent details.
 
@@ -212,20 +215,20 @@ To take a paused agent live again, call `publish`. If the draft has not changed 
 
 ### 3.5 Owner voice (owner: Saina)
 
-**`POST /api/realtime/client-secret?businessId=`**. Mints a short-lived OpenAI Realtime client secret for owner browser voice in the builder (P-03). The server calls OpenAI `POST /v1/realtime/client_secrets` with the session settings (model `OPENAI_REALTIME_MODEL`, builder voice instructions, no tools). The browser then posts its SDP offer to OpenAI `/v1/realtime/calls` with that secret and talks over WebRTC. **The response never contains `OPENAI_API_KEY`.** The browser sends each final owner transcript to `POST /api/builder/sessions/:id/messages` with `source: "voice"`, so spec logic stays on the server, and the voice session speaks the returned `reply`. Body `{ "builderSessionId": "bld_01" }`. Errors: `NOT_FOUND` (session), `INTEGRATION_UNAVAILABLE`. Events: none. Screens: Build an Agent.
+**`POST /api/realtime/client-secret?businessId=`**. Mints a short-lived OpenAI Realtime client secret for owner browser voice in the builder (P-03). The server calls OpenAI `POST /v1/realtime/client_secrets` with the session settings (model `OPENAI_REALTIME_MODEL`, builder voice instructions, no tools). The browser then posts its SDP offer to OpenAI `/v1/realtime/calls` with that secret and talks over WebRTC. **The response never contains `OPENAI_API_KEY`.** The browser sends each final owner transcript to `POST /api/builder/sessions/:id/messages` with `inputMode: "voice"`, so spec logic stays on the server, and the voice session speaks the returned `reply`. Body `{ "builderSessionId": "bld_01" }`. Errors: `NOT_FOUND` (session), `INTEGRATION_UNAVAILABLE`. Events: none. Screens: Build an Agent.
 
 ```json
-{ "clientSecret": "ek_...", "expiresAt": "2026-11-13T19:11:00Z", "model": "gpt-realtime-2.1" }
+{ "clientSecret": "ek_...", "expiresAt": "2026-11-13T19:11:00Z", "model": "gpt-realtime-2.1", "builderSessionId": "bld_01" }
 ```
 
 ### 3.6 Live agent (owner: Arsh)
 
 One phone number serves both businesses, so this route is owner-scoped (P-06).
 
-**`GET /api/live-agent`**. Returns the LiveAgent. When nothing answers the number, `agentId`, `agentVersionId` and `businessId` are absent. Screens: Overview, Agent details.
+**`GET /api/live-agent`**. Returns the LiveAgent (SPEC 2.9). Every field is always present. If the agent it names is `paused`, the number plays a short closed message. Who made a switch is recorded in the `live_agent.changed` event. Screens: Overview, Agent details.
 
 ```json
-{ "phoneNumber": "+15555550199", "businessId": "biz_pizza_01", "agentId": "agt_pizza_01", "agentVersionId": "agv_pizza_01_v2", "updatedBy": "usr_owner_01", "updatedAt": "2026-11-13T19:30:00Z" }
+{ "phoneNumber": "+15555550199", "businessId": "biz_pizza_01", "agentId": "agt_pizza_01", "agentVersionId": "agv_pizza_01_v2", "updatedAt": "2026-11-13T19:30:00Z" }
 ```
 
 **`PUT /api/live-agent`**. Body `{ "agentId": "agt_barber_01" }`. The server checks the owner owns that agent's business. To leave the number unanswered, pause the live agent. Response as GET. Errors: `NOT_FOUND`, `FORBIDDEN_BUSINESS`, `INVALID_STATE` (agent not `live`). Events: `live_agent.changed`.
@@ -240,7 +243,7 @@ One phone number serves both businesses, so this route is owner-scoped (P-06).
 { "id": "apv_123", "businessId": "biz_pizza_01", "actorType": "deployed_agent", "bundleType": "order_bundle",
   "actionBundle": ["square.checkout.create", "message.checkout.send", "local.order.record", "sheets.order.append"], "subjectId": "ord_123",
   "payload": { "businessId": "biz_pizza_01", "subjectId": "ord_123", "agentVersionId": "agv_pizza_01_v2", "cartHash": "sha256:ab12...", "totalMinor": 3264,
-               "currency": "USD", "messageRecipient": "+15555550123", "messageChannel": "surge",
+               "currency": "USD", "pickupAt": "2026-11-14T02:00:00Z", "messageRecipient": "+15555550123", "messageChannel": "surge",
                "actionBundle": ["square.checkout.create", "message.checkout.send", "local.order.record", "sheets.order.append"], "expiresAt": "2026-11-13T19:52:00Z" },
   "payloadHash": "sha256:77fe...", "state": "PENDING", "expiresAt": "2026-11-13T19:52:00Z", "createdAt": "2026-11-13T19:42:00Z" }
 ```
@@ -250,7 +253,7 @@ One phone number serves both businesses, so this route is owner-scoped (P-06).
 2. `payloadHash` equals the stored hash, else `PAYLOAD_HASH_MISMATCH`.
 3. If `state` already equals the requested outcome, return `200` with the current approval and do nothing. A double click or retry is safe (AC-10).
 4. If `state` is the other outcome, `APPROVAL_ALREADY_DECIDED`. If `state` is `EXPIRED` or `now > expiresAt`, `APPROVAL_EXPIRED`.
-5. Record the decision. On approve, enqueue one execution per action type with the SPEC 2.9 idempotency key and return at once. On reject, move the subject to `REJECTED`; no external call is made (AC-08).
+5. Record the decision. On approve, enqueue one execution per action type except the Sheets step, each with the SPEC 2.9 idempotency key, and return at once. The Sheets sync job is created later, when the subject reaches `PAID_VERIFIED` or `BOOKED_VERIFIED` (SPEC 2.9). On reject, move the subject to `REJECTED`; no external call is made (AC-08).
 
 Response `200`. Execution progress arrives only as activity events; the response never waits for a provider.
 
@@ -260,7 +263,7 @@ Response `200`. Execution progress arrives only as activity events; the response
 
 Errors: `NOT_FOUND`, `PAYLOAD_HASH_MISMATCH`, `APPROVAL_ALREADY_DECIDED`, `APPROVAL_EXPIRED`, `ENVIRONMENT_MISMATCH` (approve of an `order_bundle` or `price_edit`). Events: `approval.decided` always, plus `order.status_changed` or `booking.status_changed` on every transition of the subject. Then from the executor:
 - `order_bundle`: `execution.started`, `checkout.created`, `message.sent` or `message.failed`, `execution.succeeded` or `execution.failed`, later `payment.verified` or `payment.failed` from the webhook job, then `sync.queued` and `sync.succeeded` or `sync.failed` once the order is `PAID_VERIFIED` (SPEC 2.3).
-- `booking_bundle`: `execution.started`, then `booking.verified` or `booking.slot_conflict` with `execution.failed`, `message.sent` or `message.failed`, `execution.succeeded`, then the Sheets `sync.*` events.
+- `booking_bundle`: `execution.started` and `execution.succeeded` for each step, or `booking.slot_conflict` with `execution.failed` if the slot is taken; `message.sent` or `message.failed`; `booking.verified` when `local.booking.record` moves the booking to `BOOKED_VERIFIED`; then the Sheets `sync.*` events.
 - `fact_edit`: see 3.1. `price_edit`: see 3.1.
 
 A background job sets past-due approvals to `EXPIRED` and emits `approval.expired` and the subject's status event. Screens: Approvals, Live operations, Knowledge review (confirm dialog).
@@ -282,11 +285,11 @@ A background job sets past-due approvals to `EXPIRED` and emits `approval.expire
   "createdAt": "2026-11-13T19:42:00Z", "updatedAt": "2026-11-13T19:45:00Z" }
 ```
 
-**`GET /api/orders/:id/checkout?businessId=`**. Link and QR data for Live operations. The QR code is the always-on backup (D-08). `ready` is `false` until the Square payment link exists. `message` is absent when no dispatch exists; its `state` uses the Message dispatch states. Errors: `NOT_FOUND`. Events: none. Screens: Live operations.
+**`GET /api/orders/:id/checkout?businessId=`**. Link and QR data for Live operations. The QR code is the always-on backup (D-08). `ready` is `false` until the Square payment link exists. `message` is absent when no dispatch exists (always, under `qr_only`); its fields are `MessageDispatch` fields (CONTRACTS.md). Errors: `NOT_FOUND`. Events: none. Screens: Live operations.
 
 ```json
 { "orderId": "ord_123", "ready": true, "environment": "sandbox", "checkoutUrl": "https://sandbox.square.link/u/abc", "qrText": "https://sandbox.square.link/u/abc",
-  "squarePaymentLinkId": "SQ_PL_4", "message": { "id": "msg_31", "channel": "surge", "state": "SENT", "sentAt": "2026-11-13T19:45:02Z" } }
+  "squarePaymentLinkId": "SQ_PL_4", "message": { "id": "msg_31", "channel": "surge", "status": "SENT", "sentAt": "2026-11-13T19:45:02Z" } }
 ```
 
 ### 3.9 Bookings (owner: Arsh)
@@ -314,19 +317,18 @@ A background job sets past-due approvals to `EXPIRED` and emits `approval.expire
 
 ### 3.11 Integrations health (owner: Arsh)
 
-**`GET /api/integrations/health?businessId=`**. One entry per provider. Query: `refresh=1` runs live checks now; otherwise the last stored results return. Events: none. Screens: top bar, Overview.
+**`GET /api/integrations/health?businessId=`**. Returns `IntegrationHealth` (CONTRACTS.md): one entry per SPEC 2.9 provider key. Query: `refresh=1` runs live checks now; otherwise the last stored results return. Events: none. Screens: top bar, Overview.
 
 ```json
-{ "squareEnvironment": "sandbox", "messageChannel": "surge",
-  "providers": [ { "provider": "square", "state": "ok", "environment": "sandbox", "lastCheckedAt": "2026-11-13T19:00:00Z" },
-                 { "provider": "twilio", "state": "ok", "lastCheckedAt": "2026-11-13T19:00:00Z" },
-                 { "provider": "openai", "state": "ok", "lastCheckedAt": "2026-11-13T19:00:00Z" },
-                 { "provider": "google_calendar", "state": "degraded", "detail": "free/busy slow", "lastCheckedAt": "2026-11-13T19:00:00Z" },
-                 { "provider": "google_sheets", "state": "down", "detail": "sheet not shared", "lastCheckedAt": "2026-11-13T19:00:00Z" },
-                 { "provider": "message_channel", "state": "ok", "detail": "18 of 25 messages left", "lastCheckedAt": "2026-11-13T19:00:00Z" } ] }
+{ "square": { "state": "connected", "environment": "sandbox", "lastCheckedAt": "2026-11-13T19:00:00Z" },
+  "twilio": { "state": "connected", "lastCheckedAt": "2026-11-13T19:00:00Z" },
+  "openai": { "state": "connected", "lastCheckedAt": "2026-11-13T19:00:00Z" },
+  "google_calendar": { "state": "degraded", "detail": "free/busy slow", "lastCheckedAt": "2026-11-13T19:00:00Z" },
+  "google_sheets": { "state": "disconnected", "detail": "sheet not shared", "lastCheckedAt": "2026-11-13T19:00:00Z" },
+  "message_channel": { "state": "connected", "channel": "surge", "detail": "18 of 25 messages left", "lastCheckedAt": "2026-11-13T19:00:00Z" } }
 ```
 
-`state` is `ok`, `degraded`, `down` or `unconfigured` (CONTRACTS.md). `squareEnvironment` is always `"sandbox"`; the server will not start otherwise (AC-19).
+`state` is `connected`, `degraded` or `disconnected` (CONTRACTS.md). `square.environment` is always `"sandbox"`; the server will not start otherwise (AC-19).
 
 ## 4. Webhooks (owner: Arsh)
 
@@ -335,7 +337,7 @@ Webhooks are called by providers, never by the browser, and carry no Supabase JW
 | Endpoint | Signature check | Dedupe key in `webhook_events` | Response |
 |---|---|---|---|
 | `POST /webhooks/twilio/voice` | `X-Twilio-Signature` validated with `TWILIO_AUTH_TOKEN` over the exact public URL plus the form params (`twilio.validateRequest`) | `calls.provider_call_id = CallSid` is unique; a retry finds the row and returns the same TwiML | TwiML, under 1 second, no LLM call |
-| `POST /webhooks/twilio/status` | Same as above | `source = "twilio"`, `provider_event_id = CallSid:CallStatus`, or `MessageSid:MessageStatus` when the channel is `whatsapp_sandbox` | `204`, then a job |
+| `POST /webhooks/twilio/status` | Same as above | `source = "twilio_status"`, `provider_event_id = CallSid:CallStatus`, or `MessageSid:MessageStatus` when the channel is `whatsapp_sandbox` | `204`, then a job |
 | `POST /webhooks/square` | `x-square-hmacsha256-signature` compared in constant time with HMAC-SHA256, keyed with `SQUARE_WEBHOOK_SIGNATURE_KEY`, over `SQUARE_WEBHOOK_URL` (the exact registered URL) followed by the raw body. Spike B-02 confirms whether the header is base64 | `source = "square"`, `provider_event_id = event_id`, unique on the pair | `200` well within Square's 10 seconds, then a job |
 
 **`/webhooks/twilio/voice`.** Twilio posts `CallSid`, `From`, `To`. The server reads `live_agent`, creates the `calls` row (`channel: "phone"`, status `IN_PROGRESS`), pins `agentVersionId` to the live version at that moment, mints the `streamToken`, emits `call.started` and returns:
@@ -346,7 +348,7 @@ Webhooks are called by providers, never by the browser, and carry no Supabase JW
 </Stream></Connect></Response>
 ```
 
-If no agent is live, it returns `<Say>` with a short closed message and `<Hangup/>`, and emits `call.started` then `call.ended` (`reason: "completed"`).
+If the agent named in `live_agent` is not `live` (it is paused), it returns `<Say>` with a short closed message and `<Hangup/>`, and emits `call.started` then `call.ended` (`reason: "completed"`).
 
 **`/webhooks/twilio/status`.** The job maps `CallStatus` `completed` to `COMPLETED`, `busy`, `no-answer` and `canceled` to `DROPPED`, and `failed` to `FAILED`, and emits `call.ended` with `reason` once per call, whichever of this callback or the stream `stop` comes first. A call that ends before customer confirmation produces no approval (AC-18). Message status is handled only when the channel is `whatsapp_sandbox`: it updates `message_dispatches` and emits `message.failed` on failure.
 
@@ -407,16 +409,11 @@ Paths, fields and values that SPEC v1.1 does not define. Error codes are defined
 | Added | Where |
 |---|---|
 | Header `Retry-After`; 24-hour replay of `Idempotency-Key` | sections 1 and 2 |
-| Request fields: `reason`, `resolvesConflictId` (facts propose); `variationId`, `newPriceMinor` (prices propose); `source` (builder message); `scenarios` (preview); `message`, `end` (test, sim-call); `makeLive`, `confirm` (publish, rollback); `toVersionId` (rollback); `builderSessionId` (client secret) | section 3 |
-| Response fields: `conflicts`, `draftFactIds`, `conflictIds`, `suggestions`, `stopConditions`, `progress`, `toolTrace` (`tool`, `capabilityId`, `effect`, `input`, `output`, `mocked`, `durationMs`), `guardrail`, `permissions`, `examples`, `specRevision`, `isLiveAgent`, `phoneNumber`, `ready`, `qrText`, `environment`, `message` (checkout), `messageChannel` and `squareEnvironment` (health), `clientSecret`, `model`, `payload.rolledBackFrom` | section 3 |
-| `price_edit` payload fields `variationId`, `fromPriceMinor`, `newPriceMinor`, `currency`, `squareVersion` | section 3.1 |
+| Request fields: `reason`, `resolvesConflictId` (facts propose); `variationId`, `newPriceMinor` (prices propose); `scenarios` (preview); `message`, `end` (test, sim-call); `makeLive`, `confirm` (publish, rollback); `toVersionId` (rollback); `builderSessionId` (client secret) | section 3 |
+| Response fields: `conflicts`, `suggestions`, `stopConditions`, `progress`, `toolTrace` (`tool`, `capabilityId`, `effect`, `input`, `output`, `mocked`, `durationMs`), `guardrail`, `permissions`, `examples`, `specRevision`, `isLiveAgent`, `phoneNumber`, `ready`, `qrText`, `environment`, `message` (checkout), the `knowledgeSnapshotRef` keys `facts` and `catalogSyncedAt` | section 3 |
 | Accepted upload MIME types | section 3.2 |
 | `streamToken` recipe (HMAC with `TWILIO_AUTH_TOKEN`, 60 seconds, single use); Twilio status dedupe keys; CallStatus to Call state mapping | sections 4 and 5 |
 
-Still open, needing a ruling:
-1. CONTRACTS.md `ErrorCode` lists `UNAUTHORIZED`, `FORBIDDEN`, `CONFLICT`, `APPROVAL_HASH_MISMATCH`, `PROVIDER_ERROR` and `PROVIDER_TIMEOUT`. Under SPEC 2.9 it must export section 2 of this file. `PROVIDER_ERROR` and `PROVIDER_TIMEOUT` map to `INTEGRATION_UNAVAILABLE`.
-2. CONTRACTS.md `IntegrationHealth` names the provider `message` and the time field `checkedAt`. This doc uses `message_channel` and `lastCheckedAt`, as the coordinator's brief set. One name must win.
-3. CONTRACTS.md `LiveAgent` has no `businessId` and requires `agentId`. This doc adds `businessId` (DATA-MODEL.md has `live_agent.business_id`) and leaves the agent fields absent when nothing answers.
-4. A `webhook.rejected` event needs a `businessId`, but a rejected webhook has no trusted business. Suggested rule: Twilio uses the business of the live agent, Square the business that owns `SQUARE_LOCATION_ID`.
-5. CONTRACTS.md `BusinessFact.sourceType` has `upload_csv` and `upload_pdf` only. Image and spreadsheet uploads (P-12) need values, for example `upload_image` and `upload_sheet`.
-6. The `price_edit` payload and the `FactConflict` shape are not yet in CONTRACTS.md. Section 3 shows illustrative fields until they are.
+Still open:
+1. Whether the Square signature header value is base64 (spike B-02, SPEC 2.9).
+2. The owner recovery actions in the CONTRACTS.md state machines (cancel an order, abandon a `NEEDS_REVIEW` step, retry a `RETRY_REQUIRED` booking, mark an `UNKNOWN` dispatch failed) have no endpoint here. Each needs an endpoint or a ruling that it is out of this build.

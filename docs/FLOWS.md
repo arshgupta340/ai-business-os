@@ -19,7 +19,7 @@ Each flow is a step table with these columns.
 
 **Status events.** Every change of an order state writes `order.status_changed`, and every change of a booking state writes `booking.status_changed` (SPEC 2.5). The tables list only the more specific events written in addition.
 
-**Idempotency keys.** Every external write uses the SPEC 2.9 key `sha256(businessId:subjectId:actionType:approvalId)`, computed once when the `action_executions` row is created and stored in `idempotency_key`. `subjectId` is the `ord_`, `bkg_`, `fact_` or `cat_` ID. The key is never regenerated on a timeout or retry. A new approval gives a new `approvalId` and so a new key. Any provider cap on key length is confirmed in spike B-02 (Square) or B-05 (Google).
+**Idempotency keys.** Every external write uses the SPEC 2.9 key `sha256(businessId:subjectId:actionType:approvalId)`, computed once when the `action_executions` row is created and stored in `idempotency_key` (for the Sheets step, when its sync job is created, CONTRACTS.md section 5). `subjectId` is the `ord_`, `bkg_`, `fact_` or `cat_` ID. The key is never regenerated on a timeout or retry. A new approval gives a new `approvalId` and so a new key. Any provider cap on key length is confirmed in spike B-02 (Square) or B-05 (Google).
 
 **Retries** (SPEC 2.9). A retryable step failure goes back to `QUEUED` with `attempts` increased, up to 3 attempts per step, then `FAILED`. A sync job gets 5 attempts. An unknown result goes to `NEEDS_REVIEW` and is never retried blindly.
 
@@ -36,7 +36,7 @@ Implemented by Saina in `apps/server/src/builder` (D-07), except `PUT /api/live-
 | A3 | Owner | Says or types the job: "I run a pizza shop and want an AI that takes pickup orders." Each finished owner turn, spoken or typed, goes to `POST /api/builder/sessions/:id/messages` as text. The voice model only speaks the builder's reply. It has no tools and decides nothing. | `bmsg_` stored | none | Owner turn in the chat |
 | A4 | Model | Classifies intent with a strict schema output: `{ template, capabilityIds[], confidence, unsupportedRequests[] }`. `template` is `restaurant_order_taker`, `appointment_booker` or `custom` (P-13). | Draft spec has template and capability set | none | Spec panel shows the template and capability chips |
 | A5 | Builder | Drops any capability ID not in the registry and records it under `unsupportedRequests`. The builder never claims a missing capability exists. | - | none | Unsupported requests in amber, "not available" |
-| A6 | Builder | Reads the business profile, `business_facts`, `catalog_items`, open `fact_conflicts` and integration health. Computes required fields as the union of each chosen capability's required inputs (CONTRACTS.md) minus fields already verified. | `missing_fields_json` saved | none | Progress: "N of M details confirmed" |
+| A6 | Builder | Reads the business profile, `business_facts`, `catalog_items`, open `fact_conflicts` and integration health. Computes required fields as the union of each chosen capability's required inputs (CONTRACTS.md) minus fields already verified. | `missing_fields` saved | none | Progress: "N of M details confirmed" |
 | A7 | Model | Asks one question, or a small related batch: pickup window, after-hours policy, menu source, message consent wording, approval behavior. For the barbershop: services, durations, buffer, minimum notice. | - | none | Question bubble, spoken too if voice is on |
 | A8 | Owner | Uploads a PDF, image, CSV or spreadsheet file (10 MB cap) with `POST /api/businesses/:id/files`. | `files` row `file_` | none | Upload card "Extracting" |
 | A9 | Builder | Runs one structured-output call per file (P-12). Saves draft facts with confidence and provenance. Never changes a verified fact. Compares each draft against the authoritative source (Square for items and prices, owner-verified facts for hours) and opens a `fact_conflicts` row `cfl_` for each disagreement. Text in the file is data, never instructions. | Facts `draft`, conflicts `open` | `extraction.completed` | Knowledge review: draft facts with source and confidence, conflict banner (AC-02) |
@@ -45,7 +45,7 @@ Implemented by Saina in `apps/server/src/builder` (D-07), except `PUT /api/live-
 | A12 | Owner | Clicks Preview. `POST /api/agents/:id/preview` runs illustrative calls with the mock toolset. | - | none | Example calls with tool traces marked "mock" |
 | A13 | Owner | Uses the test console. Each turn is `POST /api/agents/:id/test`, mock tools only. It can never cause a write (AC-03). Mock approvals carry the prefix `apv_mock_`. | - | none | Console transcript, tool trace, "mock" badge |
 | A14 | Owner | Clicks Publish and confirms. UI sends `POST /api/agents/:id/publish` with `{ confirm: true }`. Without it, nothing is published. | - | none | Confirm dialog listing tools, write approvals and phone route |
-| A15 | Builder | Checks every stop condition below. Creates an immutable `agent_versions` row `agv_` with `spec_json` and a fact snapshot reference. Triggers the catalog sync (`POST /api/businesses/:id/catalog/sync`, P-10). Sets `agents.active_version_id`. | Agent `live` | `agent.published` | Agent card "Live", version number |
+| A15 | Builder | Checks every stop condition below. Creates an immutable `agent_versions` row `agv_` with `spec` and `knowledge_snapshot_ref`. Triggers the catalog sync (`POST /api/businesses/:id/catalog/sync`, P-10). Sets `agents.active_version_id`. | Agent `live` | `agent.published` | Agent card "Live", version number |
 | A16 | Owner | Chooses which live agent answers the number with `PUT /api/live-agent` (P-06). New calls use it. Calls in progress keep their pinned version. | `live_agent` updated | `live_agent.changed` | Top bar: "Phone answered by: Pizza Order Assistant v1" |
 | A17 | Owner | Optional: `POST /api/agents/:id/sim-call` runs the published agent in text with the real read and propose tools (P-18). See Flow B, section 3.6. | - | - | "Simulated call" label |
 | A18 | Owner | Pause: `POST /api/agents/:id/pause`. If it is the live agent, new calls hear a short "we cannot take calls right now" message and the call ends. | Agent `paused` | `agent.paused` | Agent card "Paused" |
@@ -61,7 +61,7 @@ Implemented by Saina in `apps/server/src/builder` (D-07), except `PUT /api/live-
 7. The spec names an unsupported tool.
 8. The owner has not confirmed publish.
 
-**The builder model's prose is never executed as policy.** The model's text, typed or spoken, only helps the owner fill in fields. What runs on a call is the validated `AgentSpec` in `agent_versions.spec_json`, checked against the server-owned registry. The model cannot add a capability or change a capability's `effect`.
+**The builder model's prose is never executed as policy.** The model's text, typed or spoken, only helps the owner fill in fields. What runs on a call is the validated `AgentSpec` in `agent_versions.spec`, checked against the server-owned registry. The model cannot add a capability or change a capability's `effect`.
 
 ## 3. Flow B: pizza order over the phone (main demo)
 
@@ -70,7 +70,7 @@ Agent: the live `restaurant_order_taker` version for `biz_pizza_01`. Voice: `gpt
 | Step | Actor | What happens | State after | Activity event | Dashboard shows |
 |---|---|---|---|---|---|
 | B1 | Twilio | Caller dials the number. Twilio sends `POST /webhooks/twilio/voice`. Server verifies the Twilio request signature (method: confirm in spike B-03) and rejects it if invalid. | - | `webhook.rejected` only if invalid | - |
-| B2 | Server | Reads `live_agent`, gets the agent and its `active_version_id`, and pins that `agv_`. Creates `calls` row `call_` with `channel: phone`, unique `provider_call_id`, and `caller_ref` stored as a hash. Snapshots the current verified facts for this call. Mints a `streamToken` for this call (SPEC 2.9). No order row exists yet. | Call `IN_PROGRESS`, call stage `CALL_STARTED` | `call.started` | Live operations: new call card "Incoming call, Pizza Order Assistant v1" |
+| B2 | Server | Reads `live_agent`, gets the agent and its `active_version_id`, and pins that `agv_`. Creates `calls` row `call_` with `channel: phone`, unique `provider_call_id`, and `caller_last4` (only the last four digits are kept). Snapshots the current verified facts for this call into `fact_snapshot_ref`. Mints a `streamToken` for this call (SPEC 2.9). No order row exists yet. | Call `IN_PROGRESS`, call stage `CALL_STARTED` | `call.started` | Live operations: new call card "Incoming call, Pizza Order Assistant v1" |
 | B3 | Server | Returns TwiML that opens a bidirectional Media Stream to `wss://<PUBLIC_SERVER_URL>/ws/phone` with the `streamToken` as a stream parameter. | - | none | - |
 | B4 | Worker | Accepts the socket only for a valid `streamToken` whose call is `IN_PROGRESS`. Opens an OpenAI Realtime session with audio `g711_ulaw` both ways, the system prompt from section 8, and exactly these tools: `read_catalog`, `read_business_facts`, `quote_order`, `propose_order`, `get_order_status`. No write tool exists. | - | none | Call card "AI connected" |
 | B5 | Model | Opening line: "Hi, thanks for calling Demo Pizza Co. You are speaking with an AI assistant. I can answer menu questions and take pickup orders. What can I get for you?" | - | none | Timeline: "AI disclosed" |
@@ -85,19 +85,19 @@ Agent: the live `restaurant_order_taker` version for `biz_pizza_01`. Voice: `gpt
 | B14 | Worker | On yes, `propose_order({ cart, quoteId, contact, fulfillment })` with Contact `{ name, messageRecipient, messageConsent: true, consentAt }` and Fulfillment `{ type: "pickup", pickupAt }`. Policy checks: the cart's hash equals the quote's `cartHash`, the quote belongs to this call and has not passed `expiresAt` (else it is refused and re-quoted), consent is true. One transaction creates the `orders` row `ord_` with the immutable proposal, `totalMinor` and `currency`, and an ApprovalRequest `apv_` with `actorType: deployed_agent`, `bundleType: order_bundle`, the SPEC 2.3 action list, `subjectId`, `payload`, `payloadHash` and `expiresAt` 10 minutes later. **No external write happens.** | Call stage `CUSTOMER_CONFIRMED`, order `AWAITING_OWNER_APPROVAL`, approval `PENDING` | `proposal.created`, `approval.requested` | Approvals badge +1. Card: items, Square total, recipient, pickup time, bundle steps, expiry countdown, "Sandbox" |
 | B15 | Model | Says the wait script (3.1). | - | none | - |
 | B16 | Owner | Clicks Approve. UI sends `POST /api/approvals/:id/decision` with the decision and the `payloadHash` it displayed, plus an `Idempotency-Key` header (body: API.md). | - | none | Approve button disables itself |
-| B17 | Policy | Checks owner session, business ID, `expiresAt` in the future, and that the sent hash equals the stored hash and a fresh hash of the stored payload. One-use: `UPDATE approval_requests SET state = 'APPROVED' WHERE id = $1 AND state = 'PENDING'`. Zero rows means already decided, and the server returns a conflict. Creates one `action_executions` row per action type, each `QUEUED` with its key. | Approval `APPROVED`, order `APPROVED` | `approval.decided` | "Approved by owner" and the bundle progress list |
+| B17 | Policy | Checks owner session, business ID, `expiresAt` in the future, and that the sent hash equals the stored hash and a fresh hash of the stored payload. One-use: `UPDATE approval_requests SET state = 'APPROVED' WHERE id = $1 AND state = 'PENDING'`. Zero rows means already decided or expired: the server returns `200` with the current approval for the same decision, and `APPROVAL_ALREADY_DECIDED` or `APPROVAL_EXPIRED` otherwise (API.md 3.7). Creates one `action_executions` row per action type except the Sheets step, each `QUEUED` with its key. | Approval `APPROVED`, order `APPROVED` | `approval.decided` | "Approved by owner" and the bundle progress list |
 | B18 | Executor | `square.checkout.create` (capability `order.checkout.prepare`). Re-checks the items are still available in `catalog_items`. Calls Square `CreatePaymentLink` with an `order` object from the approved cart, `location_id = SQUARE_LOCATION_ID`, `pricing_options.auto_apply_taxes = true` (as in the quote), and the step's key as `idempotency_key`. Never calls `CreateOrder`. Saves `payment_link.id`, `url` and `order_id` on the execution row at once. | Order `CREATING_CHECKOUT` | `execution.started` | Step 1 of 4 "Creating checkout" |
 | B19 | Executor | Reads the Square order by `order_id` and compares its total and currency with the approved `totalMinor` and `currency` (read endpoint and field name: confirm in spike B-02). A mismatch stops the bundle (section 4). A match finishes the step. | Execution `SUCCEEDED`, order `PAYMENT_LINK_READY` | `checkout.created`, `execution.succeeded` | Link status "Ready", QR code |
 | B20 | Server | The dashboard calls `GET /api/orders/:id/checkout` for the link URL and QR data. The QR code is shown whatever the channel does (D-08). | - | none | QR code and link on Live operations |
-| B21 | Executor | `message.checkout.send`. Inserts one `message_dispatches` row for this key in `QUEUED`, then sends through the `MessageAdapter` to `payload.contact.messageRecipient` only, with template `checkout_link`: "Demo Pizza Co.: pay for your pickup order here: {url}. Sandbox test payment." Stores the channel message ID. | Dispatch `SENT`, order `MESSAGE_SENT` | `message.sent` | Step 2 of 4 "Link sent by {channel}" |
+| B21 | Executor | `message.checkout.send`. Inserts one `message_dispatches` row for this key in `QUEUED`, then sends through the `MessageAdapter` to the approved `payload.messageRecipient` only, with template `checkout_link`: "Demo Pizza Co.: pay for your pickup order here: {url}. Sandbox test payment." Stores the channel message ID. | Dispatch `SENT`, order `MESSAGE_SENT` | `message.sent` | Step 2 of 4 "Link sent by {channel}" |
 | B22 | Executor | `local.order.record`. Writes the Square order ID, payment link ID, URL and dispatch ID onto the `orders` row and moves the order on (SPEC 2.3). Starts the payment poller. | Order `PAYMENT_PENDING` | `execution.succeeded` | Step 3 of 4 done. "Link sent, not paid (sandbox)" |
-| B23 | Executor | `sheets.order.append` is authorized but waits. Its execution row stays `QUEUED` until the order reaches `PAID_VERIFIED` (SPEC 2.3). | - | none | Step 4 of 4 "Report after payment" |
+| B23 | Executor | `sheets.order.append` is authorized but waits. It has no execution row and no sync job until the order reaches `PAID_VERIFIED` (SPEC 2.3, 2.9). | - | none | Step 4 of 4 "Report after payment" |
 | B24 | Caller | Opens the link or scans the QR code and pays on the Square sandbox page with `4111 1111 1111 1111`, CVV `111`, any future expiry. If the link cannot be paid in sandbox, use the SPEC 4 fallback, labelled simulated. | - | none | - |
 | B25 | Square | Sends `POST /webhooks/square`. Server verifies `x-square-hmacsha256-signature`: HMAC-SHA256 over `SQUARE_WEBHOOK_URL` plus the raw body with `SQUARE_WEBHOOK_SIGNATURE_KEY` (encoding: confirm in spike B-02). Only a verified event is stored in `webhook_events`, unique on source and `event_id`. A duplicate gets 200 and stops. Responds within 10 seconds and reconciles in a job. | Webhook stored | none | - |
 | B26 | Jobs | Reconciles by reading the payment from Square. Marks paid only if status is `COMPLETED` and its `order_id`, amount, currency and location match the order. Does not wait for the Square order state, which can stay `OPEN`. Uses the read, not the webhook body, so event order does not matter. | Order `PAID_VERIFIED` | `payment.verified` | Green "Paid (sandbox), verified with Square" with payment ID. The first green state in the flow |
 | B27 | Jobs | Poller covers a late or missing webhook: every 30 seconds for 15 minutes after the link is ready, it reads the order's payments from Square and runs the B26 check. The transition is a conditional update from `PAYMENT_PENDING`, so whichever of webhook or poller comes second changes nothing. | - | none | - |
-| B28 | Jobs | `PAID_VERIFIED` releases `sheets.order.append`, which enqueues one `sync_jobs` row (target `sheets`, record type `order`, record ID `ord_`). The order moves to the kitchen queue. | Order `FULFILLMENT_READY`, sync `PENDING` | `sync.queued` | Order in "Ready to make" with pickup time |
-| B29 | Jobs | The sync job appends one row with the order ID in a record ID column. | Sync `DONE`, execution `SUCCEEDED` | `sync.succeeded` | "Reported to Sheets" tick |
+| B28 | Jobs | The transition into `PAID_VERIFIED` creates one `sync_jobs` row for `sheets.order.append` (target `google_sheets`, record type `order`, record ID `ord_`). The server then moves the paid order to the kitchen queue. | Order `FULFILLMENT_READY`, sync `PENDING` | `sync.queued` | Order in "Ready to make" with pickup time |
+| B29 | Jobs | The sync job appends one row with the order ID in a record ID column. | Sync `DONE` | `sync.succeeded` | "Reported to Sheets" tick |
 | B30 | Twilio | Call ends at any point. `POST /webhooks/twilio/status` (verified) or the stream `stop` event closes the Realtime session. | Call `COMPLETED` or `DROPPED` | `call.ended` with `reason` | Call card "Ended", duration |
 
 ### 3.1 Wait script (P-07)
@@ -120,29 +120,29 @@ The worker learns of the decision through an in-process event from the executor 
 
 ### 3.2 Example order approval payload
 
-What `propose_order` stores in `approval_requests.payload_json`. `payloadHash` is canonical JSON with sorted keys, SHA-256, prefixed `sha256:` (SPEC 2.9). Full schema: CONTRACTS.md.
+What `propose_order` stores in `approval_requests.payload`. It holds exactly the SPEC 2.9 material fields, all hashed. `payloadHash` is canonical JSON with sorted keys, SHA-256, prefixed `sha256:` (SPEC 2.9). Full schema: CONTRACTS.md section 4.
 
 ```json
 {
   "businessId": "biz_pizza_01",
   "subjectId": "ord_7Q2K",
-  "callId": "call_9F3A",
   "agentVersionId": "agv_pizza_01_v1",
-  "bundleType": "order_bundle",
+  "cartHash": "sha256:...",
+  "totalMinor": 3264,
+  "currency": "USD",
+  "pickupAt": "2026-11-14T02:00:00Z",
+  "messageRecipient": "+15555550123",
+  "messageChannel": "surge",
   "actionBundle": ["square.checkout.create", "message.checkout.send", "local.order.record", "sheets.order.append"],
-  "cart": { "lines": [{ "catalogItemId": "...", "variationId": "...", "quantity": 2, "modifierIds": ["..."] }] },
-  "quote": { "quoteId": "qte_...", "cartHash": "sha256:...", "subtotalMinor": 2998, "taxMinor": 266, "totalMinor": 3264, "currency": "USD", "quotedAt": "...", "expiresAt": "..." },
-  "contact": { "name": "Sam", "messageRecipient": "+15555550123", "messageConsent": true, "consentAt": "..." },
-  "fulfillment": { "type": "pickup", "pickupAt": "..." },
-  "messageChannel": "surge"
+  "expiresAt": "2026-11-13T19:52:00Z"
 }
 ```
 
-Any change to any field gives a different hash, so it needs a new proposal and a new approval. `actionBundle` holds the ordered action types; CONTRACTS.md has the full shape.
+Any change to any of these fields gives a different hash, so it needs a new proposal and a new approval. `callId` is not a material field; the `orders` row holds it. The full quote, cart and contact are shown to the owner from the `orders` row; the cart is bound through `cartHash`, and the quote and contact are not separately hashed.
 
 ### 3.3 Executor rules
 
-1. One bundle runs in SPEC 2.3 order. A step starts only after the previous one is `SUCCEEDED`, with two exceptions: a message step that fails or is unknown does not stop the bundle, and a Sheets step waits for `PAID_VERIFIED` or `BOOKED_VERIFIED`.
+1. One bundle runs in SPEC 2.3 order. A step starts only after the previous one is `SUCCEEDED`, with two exceptions: a message step that is `SKIPPED` (`qr_only`), fails or is unknown does not stop the bundle, and a Sheets step has no execution row and runs as a sync job once the subject reaches `PAID_VERIFIED` or `BOOKED_VERIFIED`.
 2. A worker claims a step with a conditional update from `QUEUED` to `RUNNING`. Only one worker can own it.
 3. A retry after an ambiguous Square reply first reads Square for an existing link or order before calling CreatePaymentLink again with the same key.
 4. Every external ID is saved in the same transaction that marks the step `SUCCEEDED`.
@@ -157,7 +157,7 @@ Any change to any field gives a different hash, so it needs a new proposal and a
 | `message.checkout.send` | `message.checkout.send` | `MessageAdapter.send` on `MESSAGE_CHANNEL` | one `message_dispatches` row per key | channel message ID, dispatch state |
 | `local.order.record` | none | none | execution row unique on key | external refs and transition on `orders` |
 | `sheets.order.append` | `sheets.rows.append` | Google Sheets append, by the job runner | `sync_jobs` unique on target, record type, record ID, plus record ID column check | sync state |
-| `calendar.event.create` | `calendar.event.create` | Google Calendar free/busy, then event insert | `bkg_` ID in event metadata, checked before insert | Google event ID |
+| `calendar.event.create` | `calendar.event.create` | Google Calendar free/busy, then event insert | event `id` is the step's key, so a 409 means it exists; `bkg_` ID also in `extendedProperties.private` (CONTRACTS.md section 5) | Google event ID |
 | `message.booking.confirm` | `message.booking.confirm` | `MessageAdapter.send` | one `message_dispatches` row per key | channel message ID |
 | `local.booking.record` | none | none | execution row unique on key | external refs and transition on `bookings` |
 | `sheets.booking.append` | `sheets.rows.append` | Google Sheets append | as `sheets.order.append` | sync state |
@@ -201,7 +201,7 @@ Green appears only for `PAID_VERIFIED`, `FULFILLMENT_READY` and `BOOKED_VERIFIED
 
 **Caller hangs up before confirming (AC-18).** The socket closes before `propose_order`. The call ends with `call.ended`, `reason: dropped` or `completed`. No `orders` row and no approval exist, so nothing can be approved or paid. Dashboard: "Ended before order confirmed".
 
-**Item unavailable.** During the call: `read_catalog` shows the item unavailable, or `quote_order` returns `{ ok: false, reason }` for an unavailable item. The model says so and offers available items. No order row exists. After approval: B18's re-check finds an item now unavailable. The step is `FAILED`, no Square call is made, order `UNAVAILABLE`, event `execution.failed`. Dashboard: "Item no longer available. Nothing sent."
+**Item unavailable.** During the call: `read_catalog` shows the item unavailable, or `quote_order` returns `{ ok: false, reason: "ITEM_UNAVAILABLE" }`. The call stage is `UNAVAILABLE` until the caller picks another item. The model says so and offers available items. No order row exists. After approval: B18's re-check finds an item now unavailable. The step is `FAILED`, no Square call is made, order `UNAVAILABLE`, event `execution.failed`. Dashboard: "Item no longer available. Nothing sent."
 
 **Quote total and link total differ.** B19 finds a mismatch. Step `FAILED`, order `RECOVERY_REQUIRED`, event `execution.failed`. `message.checkout.send` does not run, so the customer never gets a link with the wrong total. Dashboard: red "Square total {x} does not match approved total {y}. Not sent." A retry needs a new quote, a new proposal and a new approval.
 
@@ -211,11 +211,11 @@ Green appears only for `PAID_VERIFIED`, `FULFILLMENT_READY` and `BOOKED_VERIFIED
 |---|---|---|---|---|---|
 | Clear failure, after 3 attempts | `FAILED` | `FAILED` | `PAYMENT_LINK_READY` to `PAYMENT_PENDING` | `message.failed` | "Message failed. Show the QR code to the customer." |
 | Timeout or ambiguous reply | `UNKNOWN` | `NEEDS_REVIEW` | `PAYMENT_LINK_READY` to `PAYMENT_PENDING` | `message.failed` | "Delivery unknown. Not resent automatically." |
-| `MESSAGE_CHANNEL = qr_only` | no row | `SUCCEEDED`, skipped | `PAYMENT_LINK_READY` to `PAYMENT_PENDING` | none | QR code only |
+| `MESSAGE_CHANNEL = qr_only` | no row | `SKIPPED` | `PAYMENT_LINK_READY` to `PAYMENT_PENDING` | none | QR code only |
 
 The bundle continues with `local.order.record` in all three cases. It never sends a second message on its own.
 
-**Payment declined or abandoned (AC-12).** With the declined card `4000 0000 0000 0002`, Square's page refuses the card. If a payment event arrives, reconciliation reads the payment. Only a final failed status moves the order to `PAYMENT_FAILED` with `payment.failed` (status names: confirm in spike B-02). Nothing short of `COMPLETED` with matching fields reaches `PAID_VERIFIED`. If the customer never pays, the poller stops after 15 minutes and the order stays `PAYMENT_PENDING`, shown as "Unpaid, link open". `sheets.order.append` never runs for it. An unpaid order is never counted in the paid total or placed in "Ready to make".
+**Payment declined or abandoned (AC-12).** With the declined card `4000 0000 0000 0002`, Square's page refuses the card. If a payment event arrives, reconciliation reads the payment. Only a final failed status moves the order to `PAYMENT_FAILED` with `payment.failed` (status names: confirm in spike B-02). Nothing short of `COMPLETED` with matching fields reaches `PAID_VERIFIED`. If the customer never pays, the poller stops after 15 minutes and the order stays `PAYMENT_PENDING`, shown as "Unpaid, link open". No sync job is created, so `sheets.order.append` never runs for it. An unpaid order is never counted in the paid total or placed in "Ready to make".
 
 **Forged or duplicate webhook (AC-10, AC-11).**
 
@@ -228,7 +228,7 @@ The bundle continues with `local.order.record` in all three cases. It never send
 
 **Sheets append fails (AC-13).** The job moves to `RETRYING` with backoff, up to 5 attempts, then `FAILED` with `sync.failed`. Before each retry it reads the record ID column and skips the append if the row exists. The order stays `PAID_VERIFIED` or `FULFILLMENT_READY`. Dashboard: amber "Sheets report pending, retry {n}", and no tick until the job is `DONE`.
 
-**Owner double-clicks Approve (AC-10).** The second request updates zero rows in B17 and gets a conflict. The `Idempotency-Key` header returns the first result to a repeated request. `action_executions.idempotency_key` is unique, Square gets the same key on any retry, and `message_dispatches` has one row per key. Result: one link, one Square order, one message.
+**Owner double-clicks Approve (AC-10).** The second request updates zero rows in B17 and gets `200` with the current approval (API.md 3.7). The `Idempotency-Key` header returns the first result to a repeated request. `action_executions.idempotency_key` is unique, Square gets the same key on any retry, and `message_dispatches` has one row per key. Result: one link, one Square order, one message.
 
 ## 5. Flow C: barbershop booking on a live call (MUST)
 
@@ -238,22 +238,22 @@ Agent: `appointment_booker` for `biz_barber_01`, set as the live agent with `PUT
 |---|---|---|---|---|---|
 | C1 | Model | Opening line: "Hi, thanks for calling Demo Barbershop. You are speaking with an AI assistant. I can tell you about our services and book an appointment. How can I help?" | Call stage `INQUIRY` | `call.started` (at B2) | Call card "Booking assistant" |
 | C2 | Model | `read_business_facts` for services (facts of kind `service`, `svc_` IDs) with duration and price, and opening hours. Only listed services are offered. | - | none | Tool trace |
-| C3 | Worker | `read_calendar_availability({ serviceId, dateRange })`. Server calls Google Calendar free/busy for `GOOGLE_CALENDAR_ID` only, within business hours, in `America/Los_Angeles`. Builds candidate starts every 15 minutes. Keeps a start only if start plus duration plus buffer is free, ends within hours, and is at least the minimum notice after now. Returns at most 5 slots with local time and timezone. | Call stage `SLOT_SEARCH` | none | Slots in the trace |
+| C3 | Worker | `read_calendar_availability({ serviceId, date, maxSlots? })`, with `date` as `YYYY-MM-DD` in the business timezone. Server calls Google Calendar free/busy for `GOOGLE_CALENDAR_ID` only, within business hours, in `America/Los_Angeles`. Builds candidate starts every 15 minutes. Keeps a start only if start plus duration plus buffer is free, ends within hours, and is at least the minimum notice after now. Returns at most 5 slots with local time and timezone. | Call stage `SLOT_SEARCH` | none | Slots in the trace |
 | C4 | Model | Offers two or three slots, confirms the service, date, time and timezone, gets the name and number, and asks for message consent as in B11 and B12. | Call stage `PROPOSAL` | none | - |
-| C5 | Worker | On yes, `propose_booking({ serviceId, startAt, endAt, timezone, contact })`. Policy re-reads free/busy for that slot. If busy it returns `{ ok: false, reason, alternatives }` and the model offers them (AC-14). If free, one transaction creates the `bookings` row `bkg_` with `calendarId` and an ApprovalRequest with `bundleType: booking_bundle`, expiring in 10 minutes. No external write. | Call stage `CUSTOMER_CONFIRMED`, booking `AWAITING_OWNER_APPROVAL`, approval `PENDING` | `proposal.created`, `approval.requested` | Card: service, local time and timezone, customer, bundle steps, expiry |
+| C5 | Worker | On yes, `propose_booking({ serviceId, startUtc, customer })` with BookingCustomer `{ name, messageRecipient, messageConsent: true }`. The server computes `endUtc` from the service duration and sets `timezone`. Policy re-reads free/busy for that slot. If busy it returns `{ ok: false, reason: "SLOT_CONFLICT", alternatives }` and the model offers them (AC-14). If free, one transaction creates the `bookings` row `bkg_` with `calendarId` and an ApprovalRequest with `bundleType: booking_bundle`, expiring in 10 minutes. No external write. | Call stage `CUSTOMER_CONFIRMED`, booking `AWAITING_OWNER_APPROVAL`, approval `PENDING` | `proposal.created`, `approval.requested` | Card: service, local time and timezone, customer, bundle steps, expiry |
 | C6 | Model | "I have sent your booking request to the shop. Once they approve it, you will get a confirmation by {channelWord}. Your appointment is not booked until then." | - | none | - |
 | C7 | Owner | Approves: same decision call and checks as B16 and B17. The booking enters `RECHECKING_SLOT`, which the `bookings_no_overlap` rule covers, so this is the local slot lock (SPEC 2.9). A second booking for an overlapping slot on the same calendar fails here. | Approval `APPROVED`, booking `RECHECKING_SLOT` | `approval.decided` | "Approved, rechecking slot" |
-| C8 | Executor | `calendar.event.create`. First, a fresh free/busy read for the exact slot. Second, before any insert or retry, a lookup for an existing event carrying this `bkg_` ID in its metadata (metadata field and lookup method: confirm in spike B-05). Third, if none exists, insert one event with the `bkg_` ID in its metadata and no attendee invite (PRD 9). Saves the Google event ID on the execution row. | Step `SUCCEEDED` | `execution.started`, `execution.succeeded` | "Calendar event created" |
+| C8 | Executor | `calendar.event.create`. First, a fresh free/busy read for the exact slot. Second, before any insert or retry, a read of the event whose `id` is this step's idempotency key (CONTRACTS.md section 5; confirm in spike B-05). Third, if none exists, insert one event with that `id`, the `bkg_` ID in `extendedProperties.private` and no attendee invite (PRD 9). A 409 on insert means the event exists, so the step reads it and succeeds. Saves the Google event ID on the execution row. | Step `SUCCEEDED` | `execution.started`, `execution.succeeded` | "Calendar event created" |
 | C9 | Executor | `message.booking.confirm` through the `MessageAdapter` to the confirmed recipient with template `booking_confirmed`, one `message_dispatches` row, same unknown-result rule as B21 (P-08). A failure does not fail the booking. | Dispatch `SENT` | `message.sent` | "Confirmation sent by {channel}" |
 | C10 | Executor | `local.booking.record`: writes `google_event_id` onto the booking and moves it to verified (SPEC 2.3). | Booking `BOOKED_VERIFIED` | `booking.verified` | Green "Booked, Google event {id}" (AC-15) |
-| C11 | Jobs | `BOOKED_VERIFIED` releases `sheets.booking.append`: one sync job for (`sheets`, `booking`, `bkg_`), same retry rule as orders. | Sync `PENDING` then `DONE` | `sync.queued`, `sync.succeeded` | "Reported to Sheets" tick |
+| C11 | Jobs | The transition into `BOOKED_VERIFIED` creates the sync job for `sheets.booking.append`: one `sync_jobs` row for (`google_sheets`, `booking`, `bkg_`), same retry rule as orders. | Sync `PENDING` then `DONE` | `sync.queued`, `sync.succeeded` | "Reported to Sheets" tick |
 
 **Slot conflict branch (AC-14, AC-15).**
 
 | Step | Actor | What happens | State after | Activity event | Dashboard shows |
 |---|---|---|---|---|---|
 | X1 | Executor | C7 hits the overlap rule, or C8's free/busy finds the slot busy. No event is inserted. | Step `FAILED`, booking `SLOT_CONFLICT` | `booking.slot_conflict`, `execution.failed` | Red "Slot taken since proposal. No event created." |
-| X2 | Server | Computes up to 3 alternatives with the C3 rules and stores them on the booking. | - | none | Alternatives on the card |
+| X2 | Server | Computes up to 3 alternatives with the C3 rules and puts them in the `alternatives` field of the `booking.slot_conflict` payload. Nothing is stored on the booking row. | - | none | Alternatives on the card |
 | X3 | Model | If the call is still open, the worker tells the model, and it offers the alternatives. A chosen alternative is a new `propose_booking` and a new approval with a new `approvalId`. A changed slot never reuses the old approval. | New booking, approval `PENDING` | `proposal.created`, `approval.requested` | New card linked to the old booking |
 | X4 | Executor | `message.booking.confirm`, `local.booking.record` and `sheets.booking.append` do not run for the conflicted booking. | - | none | - |
 
@@ -266,21 +266,21 @@ A confirmation by the owner, not a third-party approval (P-09). The owner may ty
 | Step | Actor | What happens | State after | Activity event | Dashboard shows |
 |---|---|---|---|---|---|
 | D1 | Owner | Says or types in the agent details change field: "We close at 11 pm on Fridays now." | - | none | Message in the chat |
-| D2 | Model | Turns it into a structured change with a strict schema: `{ kind: "hours", key: "friday", before, after }` (one fact per weekday, SPEC 2.7). The current value comes from `business_facts`, not from the model. | - | none | "Friday close 10:00 pm to 11:00 pm" |
-| D3 | Server | `POST /api/businesses/:id/facts/propose` creates an ApprovalRequest with `actorType: owner`, `bundleType: fact_edit`, action `local.fact.update`, `subjectId` the `fact_` ID, `payload` of before and after, and `payloadHash`. | Approval `PENDING` | `approval.requested` | Confirm dialog with before and after |
+| D2 | Model | Turns it into a structured change with a strict schema: `{ kind: "hours", key: "fri", before, after }` (one fact per weekday, keys `mon` to `sun`, SPEC 2.9). The current value comes from `business_facts`, not from the model. | - | none | "Friday close 10:00 pm to 11:00 pm" |
+| D3 | Server | `POST /api/businesses/:id/facts/propose` stores the new value as a draft `business_facts` row and creates an ApprovalRequest with `actorType: owner`, `bundleType: fact_edit`, action `local.fact.update`, `subjectId` the draft's `fact_` ID, the CONTRACTS.md `fact_edit` payload (including `before` and `after`), and `payloadHash`. | Approval `PENDING` | `approval.requested` | Confirm dialog with before and after |
 | D4 | Owner | Confirms with `POST /api/approvals/:id/decision`. Policy also checks the stored `before` still equals the current verified value. If not, a new proposal is needed. | Approval `APPROVED` | `approval.decided` | Spinner on the dialog |
-| D5 | Executor | `local.fact.update`: one transaction inserts the new `business_facts` row as `verified` with `version` + 1 and `source_type: owner_chat`, and marks the old row `superseded`. | Step `SUCCEEDED` | `fact.changed` | Business Knowledge: new hours, version, "changed by owner" |
+| D5 | Executor | `local.fact.update`: one transaction marks the old row `superseded`, then turns the D3 draft (`source_type: owner_chat`) into the `verified` row with `version` + 1 and `supersedes_id` set (DATA-MODEL.md section 2.6). | Step `SUCCEEDED` | `fact.changed` | Business Knowledge: new hours, version, "changed by owner" |
 | D6 | Server | New calls snapshot facts at B2 and use the new hours. A call already in progress keeps its snapshot until it ends. | - | none | Version history line for the fact |
 
 ## 7. Flow E: owner changes an item price (SHOULD)
 
 | Step | Actor | What happens | State after | Activity event | Dashboard shows |
 |---|---|---|---|---|---|
-| E1 | Owner | Says or types "Make the large pepperoni $19." The builder maps it to one `cat_` item variation and the new price in minor units. | - | none | "Large Pepperoni $17.00 to $19.00" |
+| E1 | Owner | Says or types "Make the large pepperoni $19." The builder maps it to one `catalog_items` row (`cat_`, one per variation) and the new price in minor units. | - | none | "Large Pepperoni $22.00 to $19.00" |
 | E2 | Server | `POST /api/businesses/:id/catalog/prices/propose` creates an ApprovalRequest with `actorType: owner`, `bundleType: price_edit`, before and after price, the Square object version read now, and `payloadHash`. | Approval `PENDING` | `approval.requested` | Confirm dialog, "Changes Square (sandbox)" |
 | E3 | Owner | Confirms with `POST /api/approvals/:id/decision`. | Approval `APPROVED` | `approval.decided` | Spinner |
 | E4 | Executor | `square.catalog.price.update` (capability `catalog.price.update`): reads the full current Square object. If its `version` differs from the approved one, the step fails and a new proposal is needed. Otherwise it sends the full object with the new price and the current `version`, with the step's key (SPEC 4). | Step `SUCCEEDED` | `execution.succeeded` | "Square price updated" |
-| E5 | Executor | `local.catalog.sync`: re-reads the catalog from Square into `catalog_items`. | Step `SUCCEEDED` | `fact.changed` | Catalog shows $19.00 and the sync time |
+| E5 | Executor | `local.catalog.sync`: re-reads the catalog from Square into `catalog_items`. | Step `SUCCEEDED` | `execution.succeeded` | Catalog shows $19.00 and the sync time |
 | E6 | Worker | The next `quote_order` goes to Square CalculateOrder and so uses the new price. `read_catalog` uses the refreshed cache. | - | none | - |
 
 ## 8. Guardrails in the phone agent
@@ -355,15 +355,10 @@ Rehearsal runs (PRD 17): one with the declined card (section 4, AC-12), one with
 - Slot grid of 15 minutes, at most 5 slots returned, at most 3 alternatives on a conflict.
 - `{channelWord}` mapping from `MESSAGE_CHANNEL` to spoken words (3.1), and all wait-script and opening-line sentences.
 - Message template text for `checkout_link`.
-- Per-call fact snapshot taken at B2. Its column on `calls` is for DATA-MODEL.md to name.
-- `business_facts.source_type` value `owner_chat` (check against the CONTRACTS.md `sourceType` list).
+- Per-call fact snapshot taken at B2, stored in `calls.fact_snapshot_ref` (DATA-MODEL.md).
 - Dashboard state labels and colors (3.5).
 - The re-check of item availability at B18, which is how an order reaches `UNAVAILABLE`.
 - Reconciliation lookup through the `square.checkout.create` execution row (3.3 rule 6).
 - Approval version check in E4: a changed Square `version` fails the step and needs a new proposal.
 
-**Still open:**
-
-1. When an order never reaches `PAID_VERIFIED`, SPEC does not say what state its held `sheets.order.append` execution row ends in. This doc leaves it `QUEUED` and never runs it.
-2. API.md lists the quote prefix `qt_`, while SPEC 2.1 and CONTRACTS.md use `qte_`. This doc uses `qte_`.
-3. CONTRACTS.md names the `guardrail.refused` payload field `rule`. This doc does not name the field, to avoid a mismatch.
+**Still open:** the spike confirmations marked in the steps above (B-02 for Square read endpoints, signature encoding and payment status names; B-03 for Twilio signature and Media Stream fields; B-05 for the Google event `id` and lookup).

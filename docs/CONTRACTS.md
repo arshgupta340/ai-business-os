@@ -69,16 +69,16 @@ Input and output shapes. Server context (`businessId`, `callId`, `agentVersionId
 | Capability | Input | Output |
 |---|---|---|
 | `catalog.read` | `{ query?; includeUnavailable?: boolean }` (empty query returns the whole cached menu) | `{ items: CatalogItem[]; syncedAt }` |
-| `business.facts.read` | `{ kinds?: FactKind[] }` (default profile, hours, policy, service) | `{ facts: { kind: FactKind; key; value: unknown; version: number }[]; timezone }`, verified only |
+| `business.facts.read` | `{ kinds?: FactKind[] }` (default hours, policy, service, contact, faq; `menu_item` facts are drafts and never returned) | `{ facts: { kind: FactKind; key; value: unknown; version: number }[]; timezone }`, verified only |
 | `order.quote` | `{ cart: Cart }` | `Quote` |
 | `order.propose` | `{ cart: Cart; contact: Contact; fulfillment: Fulfillment; quoteId }` | `{ proposalId?; quote?: Quote; missingFields: string[]; approvalId? }` |
 | `order.status.read` | `{ orderId }` (same business, and same call for a caller) | `{ orderId; status: OrderStatus; paid: boolean; checkoutLinkSent: boolean }` |
 | `order.checkout.prepare` | `{ orderId; approvalId }` | `{ squareOrderId; squarePaymentLinkId; checkoutUrl }` |
-| `message.checkout.send` | `{ orderId; approvalId }` | `{ dispatchId?; status: MessageDispatchStatus \| "SKIPPED_QR_ONLY" }` |
+| `message.checkout.send` | `{ orderId; approvalId }` | `{ dispatchId?; status: MessageDispatchStatus \| "SKIPPED" }` (`SKIPPED` and no `dispatchId` when `MESSAGE_CHANNEL` is `qr_only`) |
 | `calendar.availability.read` | `{ serviceId; date: "YYYY-MM-DD" (business timezone); maxSlots?: number (1 to 5, default 5) }` | `{ slots: AvailabilitySlot[]; timezone }` on a 15 minute grid |
 | `booking.propose` | `{ serviceId; startUtc; customer: BookingCustomer }` | `{ proposalId?; approvalId?; missingFields: string[]; slot?: AvailabilitySlot }` |
 | `calendar.event.create` | `{ bookingId; approvalId }` | `{ googleEventId; calendarId }` |
-| `message.booking.confirm` | `{ bookingId; approvalId }` | `{ dispatchId?; status: MessageDispatchStatus \| "SKIPPED_QR_ONLY" }` |
+| `message.booking.confirm` | `{ bookingId; approvalId }` | `{ dispatchId?; status: MessageDispatchStatus \| "SKIPPED" }` (same `qr_only` rule) |
 | `sheets.rows.append` | `{ recordType: "order" \| "booking"; recordId }` | `{ syncJobId }`; the job owns the append |
 | `catalog.price.update` | `{ squareItemId; variationId; newPriceMinor: number; currency: "USD"; approvalId }` | `{ variationId; priceMinor: number; squareVersion: number }` |
 
@@ -101,7 +101,7 @@ Input and output shapes. Server context (`businessId`, `callId`, `agentVersionId
 | `square.catalog.price.update` | `catalog.price.update` |
 | `local.order.record`, `local.booking.record`, `local.fact.update`, `local.catalog.sync` | none: internal steps that write only our database, inside an approved bundle |
 
-Step rules: `local.order.record` and `local.booking.record` copy the external references onto the order or booking and write its state transition after the external steps. The Sheets step is authorized by the approval, but no `ActionExecution` and no sync job is created for it at approval. The transition into `PAID_VERIFIED` or `BOOKED_VERIFIED` creates its sync job. An order that is never paid has no Sheets row and no pending job. The step never blocks or reverses another step. A message step that fails or has an unknown result does not fail the order or booking, because the dashboard QR code still carries the link.
+Step rules: `local.order.record` and `local.booking.record` copy the external references onto the order or booking and write its state transition after the external steps. The Sheets step is authorized by the approval, but no `ActionExecution` and no sync job is created for it at approval. The transition into `PAID_VERIFIED` or `BOOKED_VERIFIED` creates its sync job. An order that is never paid has no Sheets row and no pending job. The step never blocks or reverses another step. A message step that fails or has an unknown result does not fail the order or booking, because the dashboard QR code still carries the link. When `MESSAGE_CHANNEL` is `qr_only`, the message step's execution is `SKIPPED` and no `MessageDispatch` is created.
 
 ## 3. Core schemas
 
@@ -126,10 +126,10 @@ type AgentSpec = {
 // Barber capabilities: business.facts.read, calendar.availability.read, booking.propose,
 //   calendar.event.create, message.booking.confirm, sheets.rows.append
 
-type FactKind = "profile" | "hours" | "policy" | "service" | "faq" | "menu_item";
+type FactKind = "hours" | "policy" | "service" | "contact" | "faq" | "menu_item"; // menu_item: upload drafts only, never a price source
 type BusinessFact = {
   id: string; businessId: string; kind: FactKind;
-  key: string;                // hours: "monday".."sunday"; policy: "pickup_window"; service: the svc_ id
+  key: string;                // hours: "mon".."sun"; policy: "pickup_window"; service: the svc_ id
   value: unknown;             // hours: { open: "HH:MM", close: "HH:MM" } | { closed: true }; service: ServiceOffering
   sourceType: "square" | "google_calendar" | "owner_chat" | "owner_ui" | "upload" | "seed"; // every file uses "upload"
   sourceRef?: string;         // bld_ or Square object id
@@ -143,25 +143,26 @@ type FactConflict = {
   id: string;                 // cfl_
   businessId: string; kind: FactKind; key: string;
   required: boolean;          // true for catalog and price conflicts; an open required conflict blocks publish
-  candidates: { factId?: string; sourceType: BusinessFact["sourceType"]; sourceRef?: string; value: unknown }[];
+  candidates: { factId?: string; sourceType: BusinessFact["sourceType"]; sourceRef?: string; value: unknown }[]; // the draft fact and the authority (Square, sourceRef the cat_ id, or the current verified fact)
   state: "open" | "resolved";
   resolvedFactId?: string; resolvedBy?: string; resolvedAt?: string; createdAt: string;
 };
 type FileRecord = {
-  id: string; businessId: string; originalName: string;
+  id: string; businessId: string; name: string; // the original file name
   mime: "application/pdf" | "image/png" | "image/jpeg" | "image/webp" | "text/csv"
       | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
   sizeBytes: number;          // at most 10 MB
   sha256: string;
   extractionState: "PENDING" | "EXTRACTING" | "EXTRACTED" | "FAILED";
-  draftFactIds?: string[]; createdAt: string;
+  draftFactIds?: string[]; conflictIds?: string[]; // both read from business_facts.file_id and fact_conflicts
+  createdAt: string;
 };
 
 type CatalogItem = {          // cache of Square (P-10); display prices only, quotes come from Square
-  id: string;                 // cat_
+  // catalog_items has one row (cat_) per sellable variation; the API and the tools group rows by squareItemId
   squareItemId: string;       // Square ITEM id; Cart.catalogItemId uses this value
-  businessId: string; name: string; description?: string; available: boolean;
-  variations: { id: string; name: string; priceMinor: number; currency: "USD" }[];
+  businessId: string; name: string; description?: string; available: boolean; // true if any variation row is available
+  variations: { id: string /* Square variation id */; name: string; priceMinor: number; currency: "USD" }[];
   modifierLists: { id: string; name: string; selectionType: "SINGLE" | "MULTIPLE";
                    modifiers: { id: string; name: string; priceMinor: number }[] }[];
   syncedAt: string;
@@ -182,7 +183,7 @@ type Fulfillment = { type: "pickup"; pickupAt: string /* UTC, inside verified ho
 
 type OrderStatus = "AWAITING_OWNER_APPROVAL" | "APPROVED" | "CREATING_CHECKOUT" | "PAYMENT_LINK_READY" | "MESSAGE_SENT"
   | "PAYMENT_PENDING" | "PAID_VERIFIED" | "FULFILLMENT_READY" | "REJECTED" | "APPROVAL_EXPIRED"
-  | "PAYMENT_FAILED" | "CANCELLED" | "RECOVERY_REQUIRED";
+  | "UNAVAILABLE" | "PAYMENT_FAILED" | "CANCELLED" | "RECOVERY_REQUIRED";
 type Order = {
   id: string; businessId: string; callId: string; status: OrderStatus;
   cart: Cart; cartHash: string; quote: Quote;
@@ -225,11 +226,11 @@ type ActionExecution = {
   stepIndex: number;           // position in actionBundle
   capabilityId?: CapabilityId; // absent for local.* steps
   idempotencyKey: string;      // section 5; unique
-  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "NEEDS_REVIEW";
+  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "SKIPPED" | "FAILED" | "NEEDS_REVIEW"; // SKIPPED: message step under qr_only
   attempts: number;            // at most 3
   externalRef?: string;
   errorCode?: ErrorCode;       // usually INTEGRATION_UNAVAILABLE, ITEM_UNAVAILABLE or SLOT_CONFLICT
-  detail?: string;             // sanitized provider message, for example "total_mismatch"
+  lastError?: string;          // sanitized provider message, for example "total_mismatch"
   createdAt: string; updatedAt: string;
 };
 type MessageDispatchStatus = "QUEUED" | "SENT" | "DELIVERED" | "FAILED" | "UNKNOWN";
@@ -237,9 +238,9 @@ type MessageDispatch = {
   id: string; businessId: string; executionId: string; subjectId: string;
   channel: "surge" | "android_gateway" | "whatsapp_sandbox";
   recipient: string;           // E.164, stored in full, never in events
-  templateKey: "checkout_link" | "booking_confirmed";
+  template: "checkout_link" | "booking_confirmed";
   status: MessageDispatchStatus; providerMessageId?: string; idempotencyKey: string; errorCode?: ErrorCode;
-  createdAt: string; updatedAt: string;
+  sentAt?: string; deliveredAt?: string; createdAt: string; updatedAt: string;
 };
 
 type CallStage = "CALL_STARTED" | "COLLECTING" | "VALIDATING" | "UNAVAILABLE" | "CUSTOMER_CONFIRMED"
@@ -247,15 +248,16 @@ type CallStage = "CALL_STARTED" | "COLLECTING" | "VALIDATING" | "UNAVAILABLE" | 
 type Call = {
   id: string; businessId: string; agentId: string; agentVersionId: string;
   channel: "phone" | "test_console";       // sim-call uses test_console and is labelled "simulated call"
-  stage?: CallStage;                        // conversation state before a proposal row exists
-  providerCallId?: string;                  // Twilio CallSid
+  stage: CallStage;                         // conversation state; stays CUSTOMER_CONFIRMED once the proposal row exists
+  providerCallId?: string;                  // Twilio CallSid; absent for test_console
   callerLast4?: string;
   status: "IN_PROGRESS" | "COMPLETED" | "DROPPED" | "FAILED";
   endReason?: "completed" | "dropped" | "failed";
-  beganAt: string; endedAt?: string;
+  startedAt: string; endedAt?: string;
 };
 type BuilderSession = {
-  id: string; businessId: string; state: "active" | "completed" | "abandoned";
+  id: string; businessId: string; status: "active" | "completed" | "abandoned";
+  messages: BuilderMessage[];
   draftSpec: Partial<AgentSpec>; missingFields: string[]; agentId?: string; createdAt: string; updatedAt: string;
 };
 type BuilderMessage = {
@@ -303,12 +305,12 @@ The server builds `payload` from stored rows, never from model output. Only thes
 
 | bundleType | Payload fields (all required) |
 |---|---|
-| `order_bundle` | `businessId`, `subjectId`, `agentVersionId`, `cartHash`, `totalMinor`, `currency`, `messageRecipient`, `messageChannel`, `actionBundle`, `expiresAt` |
+| `order_bundle` | `businessId`, `subjectId`, `agentVersionId`, `cartHash`, `totalMinor`, `currency`, `pickupAt`, `messageRecipient`, `messageChannel`, `actionBundle`, `expiresAt` |
 | `booking_bundle` | `businessId`, `subjectId`, `agentVersionId`, `serviceId`, `calendarId`, `startUtc`, `endUtc`, `timezone`, `messageRecipient`, `messageChannel`, `actionBundle`, `expiresAt` |
 | `fact_edit` | `businessId`, `subjectId`, `kind`, `key`, `fromVersion`, `before`, `after`, `actionBundle`, `expiresAt` |
 | `price_edit` (SHOULD) | `businessId`, `subjectId` (the `cat_` id), `squareItemId`, `variationId`, `fromPriceMinor`, `newPriceMinor`, `currency`, `squareVersion`, `actionBundle`, `expiresAt` |
 
-`messageChannel` is the server's `MESSAGE_CHANNEL` at proposal time. `agentVersionId` always comes from the `calls` row (SPEC 2.9). `before` is `null` when a fact is new.
+`messageChannel` is the server's `MESSAGE_CHANNEL` at proposal time. `agentVersionId` always comes from the `calls` row (SPEC 2.9). `callId` is not a material field; the order row holds it. The full quote and contact are shown to the owner from the order row but are not separately hashed (SPEC 2.9). `before` is `null` when a fact is new.
 
 **Hash recipe (SPEC 2.9).** Canonical JSON: keys sorted by code point at every depth, no whitespace, UTF-8, arrays kept in order, absent fields omitted. `payloadHash = "sha256:" + hex(sha256(canonicalJson(payload)))`, lowercase hex. `cartHash` uses the same recipe on the `Cart`, after sorting `modifierIds` inside each line and sorting lines by `variationId`, then joined `modifierIds`, then `note`.
 
@@ -335,7 +337,7 @@ The server builds `payload` from stored rows, never from model output. Only thes
 
 "Server only" means the transition happens only inside the server after it verified the provider's answer (signed webhook plus API read, or a direct API response). No client and no model output can cause it. Every order and booking transition, including stage changes on the call, writes an `order.status_changed` or `booking.status_changed` event.
 
-**Order.** The states `CALL_STARTED` to `CUSTOMER_CONFIRMED` (and the branch `UNAVAILABLE` while collecting) are conversation states. They live in `Call.stage`, not on an order. The `orders` row is created by `propose_order`, already in `AWAITING_OWNER_APPROVAL`. If the call ends before that, no order exists (AC-18).
+**Order.** The states `CALL_STARTED` to `CUSTOMER_CONFIRMED` are conversation states. They live in `Call.stage`, not on an order. The branch `UNAVAILABLE` appears in both places: as a call stage while collecting, and as an order status when the checkout step's re-check finds an item gone. The `orders` row is created by `propose_order`, already in `AWAITING_OWNER_APPROVAL`. If the call ends before that, no order exists (AC-18).
 
 | From | Event | To | Notes |
 |---|---|---|---|
@@ -351,7 +353,8 @@ The server builds `payload` from stored rows, never from model output. Only thes
 | `AWAITING_OWNER_APPROVAL` | approval `EXPIRED` | `APPROVAL_EXPIRED` | terminal |
 | `APPROVED` | executor starts `square.checkout.create` | `CREATING_CHECKOUT` | |
 | `CREATING_CHECKOUT` | Square returns link and order id | `PAYMENT_LINK_READY` | server only |
-| `CREATING_CHECKOUT` | step `FAILED` or `NEEDS_REVIEW` | `RECOVERY_REQUIRED` | |
+| `CREATING_CHECKOUT` | the step's availability re-check finds an item gone (`ITEM_UNAVAILABLE`); no Square call is made | `UNAVAILABLE` | terminal |
+| `CREATING_CHECKOUT` | step `FAILED` or `NEEDS_REVIEW` for any other reason | `RECOVERY_REQUIRED` | |
 | `RECOVERY_REQUIRED` | reconciliation finds the link | `PAYMENT_LINK_READY` | server only |
 | `PAYMENT_LINK_READY` | dispatch reaches `SENT` | `MESSAGE_SENT` | server only |
 | `MESSAGE_SENT` | `local.order.record` runs | `PAYMENT_PENDING` | |
@@ -361,7 +364,7 @@ The server builds `payload` from stored rows, never from model output. Only thes
 | `PAYMENT_FAILED` | later verified `COMPLETED` payment | `PAID_VERIFIED` | server only; creates the Sheets sync job |
 | `PAYMENT_PENDING` | payment amount or order id mismatch | `RECOVERY_REQUIRED` | server only |
 | `PAYMENT_PENDING`, `PAYMENT_FAILED`, `RECOVERY_REQUIRED` | owner cancels | `CANCELLED` | terminal |
-| `PAID_VERIFIED` | owner marks ready | `FULFILLMENT_READY` | terminal |
+| `PAID_VERIFIED` | the server queues the paid order for the kitchen, right after verification | `FULFILLMENT_READY` | server only, terminal |
 
 The payment poller checks every 30 seconds for 15 minutes after the link is ready. An order that is never paid gets no Sheets row and no pending job.
 
@@ -375,20 +378,22 @@ The payment poller checks every 30 seconds for 15 minutes after the link is read
 | `PROPOSAL` | caller confirms slot and contact | `CUSTOMER_CONFIRMED` | stage |
 | `CUSTOMER_CONFIRMED` | `propose_booking` succeeds | `AWAITING_OWNER_APPROVAL` | booking row created |
 | `AWAITING_OWNER_APPROVAL` | approval `APPROVED` | `RECHECKING_SLOT` | holds the local slot lock |
+| `AWAITING_OWNER_APPROVAL` | approval `APPROVED`, but `bookings_no_overlap` refuses `RECHECKING_SLOT` | `SLOT_CONFLICT` | terminal; the calendar step is marked `FAILED` and no Google call is made |
 | `AWAITING_OWNER_APPROVAL` | approval `REJECTED` | `REJECTED` | terminal |
 | `AWAITING_OWNER_APPROVAL` | approval `EXPIRED` | `EXPIRED` | terminal |
-| `RECHECKING_SLOT` | fresh free/busy clear and event insert returns id | `BOOKED_VERIFIED` | server only, terminal; creates the Sheets sync job |
+| `RECHECKING_SLOT` | event insert returned an id after a clear free/busy read, and `local.booking.record` runs | `BOOKED_VERIFIED` | server only, terminal; creates the Sheets sync job |
 | `RECHECKING_SLOT` | fresh free/busy shows the slot busy | `SLOT_CONFLICT` | terminal; up to 3 alternatives offered; a new slot is a new booking and approval |
-| `RECHECKING_SLOT` | step `FAILED` (Google error or timeout) | `RETRY_REQUIRED` | |
+| `RECHECKING_SLOT` | calendar step `FAILED` (Google error after 3 attempts) or `NEEDS_REVIEW` (unknown insert result) | `RETRY_REQUIRED` | |
 | `RETRY_REQUIRED` | owner retries, approval still valid, same key | `RECHECKING_SLOT` | |
 | `RETRY_REQUIRED` | reconciliation finds the event by id | `BOOKED_VERIFIED` | server only, terminal; creates the Sheets sync job |
 
 **Approval.** `PENDING` goes to `APPROVED` (owner approves with matching hash before `expiresAt`), `REJECTED` (owner rejects) or `EXPIRED` (`expiresAt` passes, by job or late decision). All three are terminal.
 
-**Execution.** Steps run in bundle order. A step starts when the step before it is `SUCCEEDED`, except that a message step that ends `FAILED` or `NEEDS_REVIEW` still lets `local.*.record` run. Sheets steps have no execution row; their sync job is created on entering `PAID_VERIFIED` or `BOOKED_VERIFIED`. There is no retry state.
+**Execution.** Steps run in bundle order. A step starts when the step before it is `SUCCEEDED`, except that a message step that ends `SKIPPED`, `FAILED` or `NEEDS_REVIEW` still lets `local.*.record` run. Sheets steps have no execution row; their sync job is created on entering `PAID_VERIFIED` or `BOOKED_VERIFIED`. There is no retry state.
 
 | From | Event | To |
 |---|---|---|
+| `QUEUED` | message step claimed while `MESSAGE_CHANNEL` is `qr_only` | `SKIPPED` (terminal; no dispatch row) |
 | `QUEUED` | worker claims the row (`FOR UPDATE SKIP LOCKED`) | `RUNNING` |
 | `RUNNING` | provider confirms the result | `SUCCEEDED` (terminal, server only) |
 | `RUNNING` | retryable error, `attempts` below 3 | `QUEUED` (`attempts` plus one, with backoff) |
@@ -400,7 +405,7 @@ The payment poller checks every 30 seconds for 15 minutes after the link is read
 
 **Sync job.** Created in `PENDING` on entering `PAID_VERIFIED` or `BOOKED_VERIFIED`, carrying the Sheets step's idempotency key. `PENDING` to `RUNNING` when the runner picks it up. `RUNNING` to `DONE` (terminal) when the row is appended or its `recordId` is already present. `RUNNING` to `RETRYING` on an error with attempts below 5. `RETRYING` to `RUNNING` when `nextRetryAt` is reached. `RUNNING` to `FAILED` (terminal) after the fifth attempt.
 
-**Message dispatch.** No dispatch row is created for `qr_only`; the step returns `SKIPPED_QR_ONLY`. No automatic resend from `UNKNOWN`.
+**Message dispatch.** No dispatch row is created for `qr_only`; the step's execution is `SKIPPED`. No automatic resend from `UNKNOWN`.
 
 | From | Event | To |
 |---|---|---|
@@ -441,7 +446,7 @@ Payloads are redacted. `guardrail.refused` names the rule that fired in `rule`. 
 | `execution.succeeded` | `{ executionId, actionType, externalRef? }` | LO, AP |
 | `execution.failed` | `{ executionId, actionType, errorCode, retryable, nextStatus }` | LO, AP |
 | `checkout.created` | `{ orderId, squareOrderId, squarePaymentLinkId, totalMinor, currency, sandbox: true }` | LO |
-| `message.sent` | `{ dispatchId, subjectId, channel, templateKey, recipientLast4 }` | LO |
+| `message.sent` | `{ dispatchId, subjectId, channel, template, recipientLast4 }` | LO |
 | `message.failed` | `{ dispatchId, subjectId, channel, status: "FAILED" \| "UNKNOWN", errorCode? }` | LO |
 | `payment.verified` | `{ orderId, squarePaymentId, amountMinor, currency, sandbox: true }` | OV, LO |
 | `payment.failed` | `{ orderId, squarePaymentId?, reason, sandbox: true }` | OV, LO |
@@ -449,12 +454,12 @@ Payloads are redacted. `guardrail.refused` names the rule that fired in `rule`. 
 | `booking.slot_conflict` | `{ bookingId, approvalId, startUtc, alternatives: { startUtc, endUtc }[] }` (at most 3) | LO, AP |
 | `order.status_changed` | `{ orderId?, callId, from?, to }` (`orderId` absent for stage changes before the proposal) | OV, LO |
 | `booking.status_changed` | `{ bookingId?, callId?, from?, to }` (same rule) | OV, LO |
-| `sync.queued` | `{ syncJobId, target: "google_sheets", recordType, recordId }` | LO |
-| `sync.succeeded` | `{ syncJobId, recordType, recordId }` | LO |
-| `sync.failed` | `{ syncJobId, recordType, recordId, attempts, final: boolean }` | LO, IN |
+| `sync.queued` | `{ target: "google_sheets" \| "catalog", syncJobId?, recordType?, recordId?, jobId? }`. Sheets events carry `syncJobId`, `recordType` and `recordId`; catalog sync events carry `jobId` | LO |
+| `sync.succeeded` | `{ target, syncJobId?, recordType?, recordId?, jobId? }` (same rule) | LO |
+| `sync.failed` | `{ target, syncJobId?, recordType?, recordId?, jobId?, attempts, final: boolean }` (same rule) | LO, IN |
 | `fact.changed` | `{ factId, kind, key, fromVersion, toVersion, sourceType }` | BK, MA |
 | `extraction.completed` | `{ fileId, mime, extractionState: "EXTRACTED" \| "FAILED", draftFactCount, conflictCount }` | BK |
-| `agent.published` | `{ agentId, agentVersionId, version, phoneNumberLast4? }` | OV, MA |
+| `agent.published` | `{ agentId, agentVersionId, version, phoneNumberLast4?, rolledBackFrom? }` (`rolledBackFrom` is the previous `agv_` id, on rollback only) | OV, MA |
 | `agent.paused` | `{ agentId }` | OV, MA |
 | `live_agent.changed` | `{ phoneNumberLast4, agentId, agentVersionId, previousAgentId? }` | OV, MA |
 | `guardrail.refused` | `{ callId, rule: GuardrailRule, toolName? }` | LO, MA |
@@ -469,7 +474,8 @@ type ToolName = "read_catalog" | "read_business_facts" | "quote_order" | "propos
   | "get_order_status" | "read_calendar_availability" | "propose_booking";
 type ToolFailureReason = Extract<ErrorCode, "QUOTE_EXPIRED" | "ITEM_UNAVAILABLE" | "SLOT_CONFLICT"
   | "VALIDATION_FAILED" | "NOT_FOUND" | "CAPABILITY_NOT_ALLOWED" | "INTEGRATION_UNAVAILABLE">;
-type ToolResult<T> = ({ ok: true } & T) | { ok: false; reason: ToolFailureReason; message?: string; quote?: Quote /* QUOTE_EXPIRED only */ };
+type ToolResult<T> = ({ ok: true } & T) | { ok: false; reason: ToolFailureReason; message?: string;
+  quote?: Quote /* QUOTE_EXPIRED only */; alternatives?: AvailabilitySlot[] /* SLOT_CONFLICT only, at most 3 */ };
 type ToolContext = { businessId: string; agentVersionId: string; callId?: string; testSessionId?: string; correlationId: string };
 interface ToolHandler {
   readonly toolset: "real" | "mock";
@@ -486,7 +492,7 @@ The real toolset (`apps/server/src/tools/real`) calls the capability handlers of
     "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "additionalProperties": false } },
   { "type": "function", "name": "read_business_facts",
     "description": "Read verified opening hours, policies and services. Answer only from this result.",
-    "parameters": { "type": "object", "properties": { "kinds": { "type": "array", "items": { "enum": ["profile","hours","policy","service","faq"] } } }, "additionalProperties": false } },
+    "parameters": { "type": "object", "properties": { "kinds": { "type": "array", "items": { "enum": ["hours","policy","service","contact","faq"] } } }, "additionalProperties": false } },
   { "type": "function", "name": "quote_order",
     "description": "Get the exact total and tax for a cart. Read the total back to the caller from this result only.",
     "parameters": { "type": "object", "required": ["cart"], "additionalProperties": false, "properties": { "cart": { "$ref": "#/$defs/Cart" } } } },
@@ -519,7 +525,7 @@ The real toolset (`apps/server/src/tools/real`) calls the capability handlers of
 | `propose_order` | `{ proposalId, quote, missingFields, approvalId }`. `proposalId` is the `ord_` id. If `missingFields` is not empty, `proposalId` and `approvalId` are absent and nothing is stored. A `quoteId` past `expiresAt` or with a different `cartHash` gets `reason: "QUOTE_EXPIRED"` with a fresh `quote` to read back. A pickup time outside verified hours gets `VALIDATION_FAILED` |
 | `get_order_status` | `{ orderId, status, paid, checkoutLinkSent }` |
 | `read_calendar_availability` | `{ slots: AvailabilitySlot[], timezone }` |
-| `propose_booking` | `{ proposalId, approvalId, missingFields, slot }`. `proposalId` is the `bkg_` id; same absent rule; a taken slot gets `reason: "SLOT_CONFLICT"` |
+| `propose_booking` | `{ proposalId, approvalId, missingFields, slot }`. `proposalId` is the `bkg_` id; same absent rule; a taken slot gets `reason: "SLOT_CONFLICT"` with up to 3 `alternatives` |
 
 ## 9. Fixtures
 
@@ -528,7 +534,7 @@ Task S-03 creates these in `packages/contracts/fixtures/`. Every file validates 
 | File | Contents |
 |---|---|
 | `businesses.json` | `biz_pizza_01` "Demo Pizza Co." and `biz_barber_01` "Demo Barbershop", category, `America/Los_Angeles`, contact |
-| `facts.pizza.json` | Verified `hours` for `monday` to `sunday`, `policy` `pickup_window` (20 minutes), `special_requests` allowed |
+| `facts.pizza.json` | Verified `hours` for `mon` to `sun`, `policy` `pickup_window` (20 minutes), `special_requests` allowed |
 | `catalog.pizza.json` | Two `CatalogItem`s: Margherita (Small 1200, Medium 1600, Large 2000) and Pepperoni (Small 1400, Medium 1800, Large 2200), sharing one MULTIPLE modifier list "Toppings" (Mushrooms 150, Olives 150, Extra cheese 200) |
 | `services.barber.json` | Three `ServiceOffering`s: Haircut 30 min 3000, Beard trim 15 min 1500, Haircut and beard 45 min 4000, buffer 5 min |
 | `facts.barber.json` | Verified `hours` and the services as `kind: "service"` facts |
@@ -548,7 +554,7 @@ The mock feed in `apps/web/mocks` replays the two timelines. Short worked exampl
 {"id":"evt_p04","businessId":"biz_pizza_01","type":"call.ended","correlationId":"call_p01","actorType":"provider","occurredAt":"2026-11-14T19:03:40Z","payload":{"callId":"call_p01","status":"COMPLETED","reason":"completed","durationSec":220}}
 {"id":"evt_p05","businessId":"biz_pizza_01","type":"approval.decided","correlationId":"call_p01","actorType":"owner","occurredAt":"2026-11-14T19:04:05Z","payload":{"approvalId":"apv_p01","subjectId":"ord_p01","decision":"APPROVED","decidedBy":"usr_owner_01"}}
 {"id":"evt_p06","businessId":"biz_pizza_01","type":"checkout.created","correlationId":"call_p01","actorType":"system","occurredAt":"2026-11-14T19:04:07Z","payload":{"orderId":"ord_p01","squareOrderId":"SQ_ORDER_1","squarePaymentLinkId":"SQ_LINK_1","totalMinor":4731,"currency":"USD","sandbox":true}}
-{"id":"evt_p07","businessId":"biz_pizza_01","type":"message.sent","correlationId":"call_p01","actorType":"system","occurredAt":"2026-11-14T19:04:09Z","payload":{"dispatchId":"msg_p01","subjectId":"ord_p01","channel":"surge","templateKey":"checkout_link","recipientLast4":"0123"}}
+{"id":"evt_p07","businessId":"biz_pizza_01","type":"message.sent","correlationId":"call_p01","actorType":"system","occurredAt":"2026-11-14T19:04:09Z","payload":{"dispatchId":"msg_p01","subjectId":"ord_p01","channel":"surge","template":"checkout_link","recipientLast4":"0123"}}
 {"id":"evt_p08","businessId":"biz_pizza_01","type":"payment.verified","correlationId":"call_p01","actorType":"provider","occurredAt":"2026-11-14T19:06:30Z","payload":{"orderId":"ord_p01","squarePaymentId":"SQ_PAY_1","amountMinor":4731,"currency":"USD","sandbox":true}}
 {"id":"evt_p09","businessId":"biz_pizza_01","type":"order.status_changed","correlationId":"call_p01","actorType":"system","occurredAt":"2026-11-14T19:06:30Z","payload":{"orderId":"ord_p01","callId":"call_p01","from":"PAYMENT_PENDING","to":"PAID_VERIFIED"}}
 ```
@@ -571,20 +577,15 @@ Until hour 2 either lead may change this file. After hour 2 the contracts are ad
 
 **Invented names** (SPEC v1.1 does not define them):
 - `approvalMode` values, every `requiredScopes` string, `handlerId` and `timeoutMs`.
-- Capability and tool fields: `includeUnavailable`, `paid`, `checkoutLinkSent`, `maxSlots` (default 5), `dispatchId`, `syncJobId`, `recordType`, `newPriceMinor`, `squareVersion`, `squareItemId`, the status `SKIPPED_QR_ONLY`.
-- `AgentSpec.template` value `custom`, knowledge scopes `services` and `faq`, `greeting`. Hours keys `monday` to `sunday`.
-- `FactConflict` fields (`required`, `candidates`, `resolvedFactId`). `FileRecord` mime list. `BuilderMessage.inputMode`, `specPatch`, `evidenceRefs`. `RealtimeClientSecret`. `IntegrationHealth.messageChannel`.
-- `ActionExecution.detail`. `IntegrationHealthEntry` fields beyond `state` and `lastCheckedAt`, and its `state` values. `CallStage` as a type, including `UNAVAILABLE`.
-- `ToolContext`, `ToolFailureReason` as a subset of `ErrorCode`, the `quote` field on `QUOTE_EXPIRED`. `AgentRunRequest` and `AgentRunResponse` (shaped after API.md section 3). `GuardrailRule` values beyond API.md's `no_fact_changes`.
-- Approval payload fields `messageChannel`, `fromVersion`, `before`, `after`, and all `price_edit` fields. `ApprovalDecision.reason`.
-- Event payload fields in section 7, including `subjectType`, `sandbox`, `nextStatus`, `final`, `alternatives`, `previousAgentId`.
+- Capability and tool fields: `includeUnavailable`, `paid`, `checkoutLinkSent`, `maxSlots` (default 5), `dispatchId`, `syncJobId`, `recordType`, `newPriceMinor`, `squareVersion`, `squareItemId`, the capability output status `SKIPPED`.
+- `AgentSpec.template` value `custom`, knowledge scopes `services` and `faq`, `greeting`.
+- `FactConflict` fields (`required`, `candidates`, `resolvedFactId`). `FileRecord` mime list and `conflictIds`. `BuilderMessage.inputMode`, `specPatch`, `evidenceRefs`. `BuilderSession.messages`. `RealtimeClientSecret`.
+- `ActionExecution.lastError`. `MessageDispatch.sentAt` and `deliveredAt`. `IntegrationHealthEntry` fields beyond `state` and `lastCheckedAt`, and its `state` values. `CallStage` as a type, including `UNAVAILABLE`.
+- `ToolContext`, `ToolFailureReason` as a subset of `ErrorCode`, the `quote` field on `QUOTE_EXPIRED` and the `alternatives` field on `SLOT_CONFLICT`. `AgentRunRequest` and `AgentRunResponse` (shaped after API.md section 3). `GuardrailRule` values beyond API.md's `no_fact_changes`.
+- Approval payload fields `fromVersion`, `before`, `after`, and all `price_edit` fields. `ApprovalDecision.reason`.
+- Event payload fields in section 7, including `subjectType`, `sandbox`, `nextStatus`, `final`, `alternatives`, `previousAgentId`, `rolledBackFrom`, and the `sync.*` target `catalog` with `jobId`.
 - Fixture prices, the Toppings list and `conflict.pizza.json`.
 
-**Still open (conflicts with other docs or SPEC):**
-1. API.md's approval example puts the whole `quote`, `contact` and `fulfillment` in `payload` and uses the prefix `qt_`. This doc hashes only the material fields of section 4 and uses `qte_` (SPEC 2.1).
-2. DATA-MODEL.md stores hours as one fact with key `weekly`. SPEC 2.7 says one fact per weekday, which this doc follows with keys `monday` to `sunday`, as API.md and FLOWS.md do.
-3. DATA-MODEL.md lets `message_dispatches.channel` be `qr_only` and allows `SENT` with no provider id. This doc creates no dispatch for `qr_only`, so `SENT` always has a provider id.
-4. FLOWS.md adds `callId` to the order approval payload. This doc leaves it out because `agentVersionId` already pins the call's version and the order row holds `callId`.
-5. FLOWS.md used lowercase tool failure reasons (`unavailable`, `slot_taken`). API.md section 2 makes the error codes the tool failure reasons, so this doc uses `ITEM_UNAVAILABLE` and `SLOT_CONFLICT`.
-6. `actorType: "owner"` on `price_edit` extends P-09, which covers fact edits only. Arsh should ratify.
-7. The 45-character cap on Square `CreatePayment` keys still needs spike B-02.
+**Still open:**
+1. The cap on Square idempotency key length for `CreatePayment` (45 characters assumed) still needs spike B-02.
+2. The transitions an owner starts after approval (cancel an order, abandon a `NEEDS_REVIEW` step, retry a `RETRY_REQUIRED` booking, mark an `UNKNOWN` dispatch failed) have no endpoint in API.md. Each needs an endpoint or a ruling that it stays out of this build.

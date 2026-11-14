@@ -16,7 +16,7 @@ The task ID prefix says where the code lives: `S` is shared, `B` is the server, 
 
 <!-- TOTALS:START -->
 
-52 tasks: 29 for Arsh, 20 for Saina, 3 for both together. 46 are MUST and 6 are SHOULD. 14 need a person for part of the work.
+53 tasks: 30 for Arsh, 20 for Saina, 3 for both together. 46 are MUST and 7 are SHOULD. 14 need a person for part of the work.
 
 <!-- TOTALS:END -->
 
@@ -123,7 +123,7 @@ While a lead does one of these, their session keeps workers busy on tasks that d
 |---|---|---|---|---|---|---|---|---|
 | S-07 | Automated end-to-end suite through simulated calls | Arsh | M | MUST | B-31, B-13 | AC-07, AC-08, AC-09, AC-12 |  | #7 |
 | B-15 | Pizza phone worker and tool handlers | Arsh | L | MUST | B-03, B-12, B-07 | AC-05, AC-06, AC-07 | yes | #22 |
-| B-17 | Publish, pause, versions and the live-agent switch | Saina | M | MUST | B-16, B-06 | AC-04 |  | #24 |
+| B-17 | Publish, pause and versions | Saina | M | MUST | B-16, B-06 | AC-04 |  | #24 |
 | B-18 | Opening-hours edit as an owner confirmation | Arsh | M | MUST | B-07, B-08 | AC-16 |  | #25 |
 | B-19 | Barbershop booking: calendar adapter and booking bundle | Arsh | L | MUST | B-05, B-11, B-14 | AC-14, AC-15 |  | #26 |
 | B-24 | Owner voice session: realtime client secret endpoint | Saina | S | MUST | B-16 | AC-01 |  | #31 |
@@ -147,6 +147,7 @@ While a lead does one of these, their session keeps workers busy on tasks that d
 | B-28 | Human fallback call routing | Arsh | M | SHOULD | B-22 |  | yes | #35 |
 | B-29 | FAQ-only custom agent from a capability subset | Saina | M | SHOULD | B-16 |  |  | #36 |
 | B-30 | Latency and cost telemetry | Arsh | M | SHOULD | B-11, B-15 |  |  | #37 |
+| B-32 | Owner recovery actions for stuck records | Arsh | M | SHOULD | B-11, B-13, B-08 |  |  | #54 |
 | U-10 | Demo polish and every UI state | Saina | L | MUST | S-04 |  |  | #48 |
 | U-11 | Outside owner tries the builder | Saina | S | MUST | U-10 | AC-20 | yes | #49 |
 | U-13 | Version history, price edit and telemetry screens | Saina | M | SHOULD | U-09 |  |  | #51 |

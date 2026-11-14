@@ -47,7 +47,7 @@ Try in this order and stop at the first that delivers a Square sandbox link to a
 4. **QR only:** nothing to set up. The dashboard always shows the QR code.
 - Variables: `MESSAGE_CHANNEL` and that channel's keys.
 
-### 6. Google Cloud (needed for the barbershop agent and the Sheets mirror, tier SHOULD)
+### 6. Google Cloud (needed for the barbershop agent and the Sheets mirror, both MUST)
 - Create a project. Enable the Calendar API and the Sheets API.
 - Create a service account and download its JSON key.
 - Create a demo calendar and a demo sheet. Share both with the service account's email address, with edit rights.

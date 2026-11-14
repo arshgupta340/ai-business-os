@@ -430,7 +430,7 @@
       "human": false,
       "done": [
         "The server verifies the Supabase JWT and checks business ownership on every business-scoped route",
-        "Routes for businesses, facts, approvals, orders, bookings, activity, integrations health and live agent match docs/API.md",
+        "Routes for businesses, facts, approvals, orders, bookings, activity, integrations health and the live agent (GET and PUT /api/live-agent, with the function publish calls) match docs/API.md",
         "Errors use the standard envelope with a correlation ID",
         "Request and response bodies are validated with the contracts package"
       ],
@@ -694,7 +694,7 @@
     },
     {
       "id": "B-17",
-      "title": "Publish, pause, versions and the live-agent switch",
+      "title": "Publish, pause and versions",
       "owner": "saina",
       "lane": "builder",
       "phase": "D",
@@ -711,12 +711,12 @@
       "done": [
         "Publish requires confirm true, is blocked by unresolved required conflicts, and writes an immutable agent version",
         "Pause stops the agent taking new calls",
-        "PUT /api/live-agent sets which published agent answers the phone number",
+        "Publishing with makeLive calls the live-agent function that Arsh's route exports; the builder does not write the live_agent table itself",
         "agent.published and agent.paused events are written"
       ],
       "read": [
-        "docs/API.md agents and live agent",
-        "docs/DATA-MODEL.md agent_versions and live_agent"
+        "docs/API.md agents",
+        "docs/DATA-MODEL.md agent_versions"
       ],
       "paths": [
         "apps/server/src/builder/publish/"
@@ -1110,6 +1110,35 @@
       "read": [
         "docs/SPEC.md P-18",
         "docs/API.md sim-call"
+      ]
+    },
+    {
+      "id": "B-32",
+      "title": "Owner recovery actions for stuck records",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "E",
+      "deps": [
+        "B-11",
+        "B-13",
+        "B-08"
+      ],
+      "size": "M",
+      "tier": "should",
+      "acs": [],
+      "human": false,
+      "paths": [
+        "apps/server/src/api/recovery/"
+      ],
+      "done": [
+        "POST /api/orders/:id/cancel cancels an order that has not been paid, and refuses one that has",
+        "POST /api/executions/:id/resolve retries or abandons a step in NEEDS_REVIEW, a booking in RETRY_REQUIRED or a message in UNKNOWN",
+        "A retry reuses the original idempotency key",
+        "Every recovery action writes an activity event and needs the signed-in owner"
+      ],
+      "read": [
+        "docs/SPEC.md P-19",
+        "docs/CONTRACTS.md state machines"
       ]
     },
     {
