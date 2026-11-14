@@ -1,0 +1,31 @@
+# Used by apps/server/deploy/Dockerfile, whose build context is the repo root.
+# Docker reads .dockerignore only from the root of the build context, so it lives here.
+
+# Secrets: never send them to a builder.
+.env
+.env.*
+!.env.example
+*service-account*.json
+*credentials*.json
+*.pem
+*.key
+
+# Not needed in the image.
+.git
+.github
+.worktrees
+.claude
+**/node_modules
+**/.next
+**/dist
+**/build
+**/coverage
+**/*.log
+docs
+scripts/*
+!scripts/check-env.mjs
+
+# The web app deploys on Vercel. Only its package.json is needed, so npm ci
+# sees the full workspace list.
+apps/web/*
+!apps/web/package.json
