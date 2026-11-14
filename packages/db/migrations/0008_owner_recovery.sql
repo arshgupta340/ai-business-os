@@ -6,9 +6,10 @@
 --
 -- Trust boundary (the 0005 and 0006 convention, unchanged): the database cannot read Square or Google.
 -- The server is the trusted reader of providers, and it is also the party that verified the owner's
--- sign-in. 0008 adds no evidence path of its own: a completion from provider evidence goes through
--- 0005's resolve_execution, with every 0005 and 0006 check on the approved material, and the routine
--- below only records the owner's decision about it.
+-- sign-in. So a caller holding the abos_app login can assert provider evidence, exactly as it can through
+-- 0005's resolve_execution today. 0008 adds no success path of its own: owner_resolve_execution passes
+-- the evidence straight to resolve_execution, with every 0005 and 0006 check on the approved material,
+-- and it records a decision only for a step it moved out of NEEDS_REVIEW itself, in the same call.
 
 -- 1. One durable recovery decision per step attempt (review finding 3). Written only by
 -- owner_resolve_execution, in the same transaction as the move it records. The runtime role may read
@@ -67,32 +68,40 @@ begin
   end loop;
 end $$;
 
--- 3. The owner's retry or abandon of a step in NEEDS_REVIEW (POST /api/executions/:id/resolve). It
--- checks the owner ID the server verified, takes the 0005 lock order (approval, step, dispatch), then:
---   * A decision already recorded for this step attempt: the identical repeat (same action and read)
---     returns the step; anything else is refused. This is consulted before any state check.
---   * retry with a "found" read (checkout_found, calendar_event_found, message_sent): records a
---     completion that resolve_execution (0005) made earlier in this same transaction. It writes no step
---     or subject state itself; it checks that this transaction wrote the SUCCEEDED step and that its
---     reference matches the saved checkout, the verified booking or the sent dispatch.
---   * retry with calendar_event_absent: the server read the calendar and found no event under the step's
---     deterministic ID. resolve_execution requeues the same row (same idempotency key, same attempt
---     count) and moves the booking RETRY_REQUIRED -> RECHECKING_SLOT. Nothing else can be requeued: a
---     checkout cannot be proven absent (the Square adapter has no read by idempotency key), and a message
---     whose delivery is unknown is never sent again (CONTRACTS: no resend from UNKNOWN).
---   * abandon: NEEDS_REVIEW -> FAILED through resolve_execution, no subject move, nothing external. A
---     provider step needs the server's absence read (calendar_event_absent). A message step needs no read
---     ('none'): its QUEUED or UNKNOWN dispatch becomes FAILED with it ("owner marks failed"); a SENT or
---     DELIVERED one is refused, since it is completed from its provider message ID instead.
+-- 3. The owner's retry or abandon of a step in NEEDS_REVIEW (POST /api/executions/:id/resolve), and the
+-- only writer of recovery_decisions. Every decision row is written in the same call that moved the step
+-- out of NEEDS_REVIEW, so no receipt exists for a step this routine did not move. In order:
+--   1. Check the action and the read code, and that p_owner is the business's owner (the ID the server
+--      verified at sign-in).
+--   2. Lock the approval, then the step (0005 lock order), scoped to the business.
+--   3. A decision already recorded for this step and its current attempt: the identical request (same
+--      action and read) returns the step; anything else is refused. This comes before any state check.
+--   4. The step must be in NEEDS_REVIEW. A step completed or moved by any other path is refused.
+--   5. Move it, always through 0005's private.resolve_execution, with all of its checks:
+--      * retry with a found read (checkout_found, calendar_event_found, message_sent): SUCCEEDED from the
+--        evidence. p_external_ref and p_checkout are passed straight through to resolve_execution and are
+--        accepted for nothing else; a message uses its stored dispatch's provider message ID.
+--      * retry with calendar_event_absent: QUEUED, the same row (same idempotency key, same attempt
+--        count); the booking moves RETRY_REQUIRED -> RECHECKING_SLOT. A checkout cannot be proven absent
+--        (the Square adapter has no read by idempotency key), and a message whose delivery is unknown is
+--        never sent again (CONTRACTS: no resend from UNKNOWN), so neither is requeued.
+--      * abandon: FAILED, no subject move, nothing external. A calendar step needs the absence read; a
+--        message step needs none ('none'), and its QUEUED or UNKNOWN dispatch becomes FAILED with it
+--        ("owner marks failed"); a SENT or DELIVERED one is refused. A checkout is never abandoned here.
+--   6. Insert the decision row for the attempt the step was in.
 -- resolve_execution writes the execution event; this routine writes the decision row (and message.failed).
-create function private.owner_resolve_execution(p_business text,p_id text,p_owner text,p_action text,p_provider_read text)
+create function private.owner_resolve_execution(p_business text,p_id text,p_owner text,p_action text,p_provider_read text,
+  p_external_ref text default null,p_checkout jsonb default null)
 returns public.action_executions language plpgsql security definer set search_path = '' as $$
 declare a public.approval_requests; x public.action_executions; d public.message_dispatches; has_dispatch boolean;
-  r public.recovery_decisions; result public.action_executions;
+  r public.recovery_decisions; result public.action_executions; found_read boolean;
 begin
   if p_action is null or p_action not in ('retry','abandon') then raise exception 'TRANSITION: recovery action must be retry or abandon'; end if;
   if p_provider_read is null or p_provider_read not in ('none','checkout_found','calendar_event_found','calendar_event_absent','message_sent') then
     raise exception 'TRANSITION: unknown provider read'; end if;
+  found_read:=p_provider_read in ('checkout_found','calendar_event_found','message_sent');
+  if (not found_read or p_action<>'retry') and (p_external_ref is not null or p_checkout is not null) then
+    raise exception 'RESULT: provider evidence is taken only with a found read on retry'; end if;
   if nullif(p_owner,'') is null or p_owner is distinct from (select owner_id from public.businesses where id=p_business) then
     raise exception 'OWNER: business owner required'; end if;
   select ar.* into a from public.approval_requests ar join public.action_executions e on e.approval_id=ar.id
@@ -104,30 +113,21 @@ begin
     if r.action=p_action and r.provider_read=p_provider_read then return x; end if;
     raise exception 'SUBJECT: another recovery decision was recorded for this attempt';
   end if;
+  if x.status<>'NEEDS_REVIEW' then raise exception 'LEASE: NEEDS_REVIEW required'; end if;
   select * into d from public.message_dispatches where execution_id=x.id and business_id=p_business for update;
   has_dispatch:=found;
 
-  if p_action='retry' and p_provider_read in ('checkout_found','calendar_event_found','message_sent') then
-    -- "Completed in this transaction": the step row was last written by this transaction (its xmin is
-    -- the current transaction ID), so an ordinary success from earlier cannot be claimed as recovery.
-    if x.status<>'SUCCEEDED' or (select e.xmin from public.action_executions e where e.id=x.id) is distinct from pg_catalog.xid(pg_catalog.pg_current_xact_id()) then
-      raise exception 'LEASE: a found effect is recorded only after resolve_execution completed the step in this transaction'; end if;
-    if not (
-      (p_provider_read='checkout_found' and x.action_type='square.checkout.create' and x.square_order_id is not null
-        and x.external_ref=x.square_order_id and exists(select 1 from public.orders o where o.id=a.subject_id and o.business_id=p_business
-          and o.square_order_id=x.square_order_id))
-      or (p_provider_read='calendar_event_found' and x.action_type='calendar.event.create' and exists(select 1 from public.bookings b
-          where b.id=a.subject_id and b.business_id=p_business and b.status='BOOKED_VERIFIED' and b.google_event_id=x.external_ref))
-      or (p_provider_read='message_sent' and x.action_type like 'message.%' and has_dispatch and d.status in ('SENT','DELIVERED')
-          and d.provider_message_id=x.external_ref))
-    then raise exception 'RESULT: the completed step does not match the provider read'; end if;
-    insert into public.recovery_decisions(business_id,execution_id,attempt,action,decided_by,provider_read,result_status)
-      values(p_business,x.id,x.attempts,'retry',p_owner,p_provider_read,'SUCCEEDED');
-    return x;
-  end if;
-
-  if x.status<>'NEEDS_REVIEW' then raise exception 'LEASE: NEEDS_REVIEW required'; end if;
-  if x.action_type like 'message.%' then
+  if p_action='retry' and found_read then
+    if p_provider_read='checkout_found' and x.action_type='square.checkout.create' and nullif(p_external_ref,'') is not null then
+      result:=private.resolve_execution(p_business,p_id,'SUCCEEDED',p_external_ref,false,p_checkout);
+    elsif p_provider_read='calendar_event_found' and x.action_type='calendar.event.create' and nullif(p_external_ref,'') is not null and p_checkout is null then
+      result:=private.resolve_execution(p_business,p_id,'SUCCEEDED',p_external_ref,false,null);
+    elsif p_provider_read='message_sent' and x.action_type like 'message.%' and has_dispatch and d.status in ('SENT','DELIVERED')
+      and d.provider_message_id is not null and (p_external_ref is null or p_external_ref=d.provider_message_id) and p_checkout is null then
+      result:=private.resolve_execution(p_business,p_id,'SUCCEEDED',d.provider_message_id,false,null);
+    else raise exception 'RESULT: the provider read does not fit this step';
+    end if;
+  elsif x.action_type like 'message.%' then
     if p_action='retry' then raise exception 'SUBJECT: a message whose delivery is unknown is never sent again'; end if;
     if p_provider_read<>'none' then raise exception 'RESULT: a message abandon takes no provider read'; end if;
     if has_dispatch and d.status in ('SENT','DELIVERED') then
@@ -149,12 +149,12 @@ begin
     raise exception 'RESULT: this step needs a provider read that proves nothing was written';
   end if;
   insert into public.recovery_decisions(business_id,execution_id,attempt,action,decided_by,provider_read,result_status)
-    values(p_business,result.id,result.attempts,p_action,p_owner,p_provider_read,result.status);
+    values(p_business,x.id,x.attempts,p_action,p_owner,p_provider_read,result.status);
   return result;
 end $$;
 
 -- Only abos_app may call the two entry points, as 0005 and 0006 grant theirs.
 revoke all on function private.mark_stale_dispatches_unknown(text) from public,anon,authenticated,service_role,abos_app;
 grant execute on function private.mark_stale_dispatches_unknown(text) to abos_app;
-revoke all on function private.owner_resolve_execution(text,text,text,text,text) from public,anon,authenticated,service_role,abos_app;
-grant execute on function private.owner_resolve_execution(text,text,text,text,text) to abos_app;
+revoke all on function private.owner_resolve_execution(text,text,text,text,text,text,jsonb) from public,anon,authenticated,service_role,abos_app;
+grant execute on function private.owner_resolve_execution(text,text,text,text,text,text,jsonb) to abos_app;

@@ -220,18 +220,21 @@ export interface RecoveryDecisionRow {
   provider_read: RecoveryProviderRead; result_status: 'SUCCEEDED' | 'QUEUED' | 'FAILED'; decided_at: Date;
 }
 /**
- * 0008. Records the signed-in owner's retry or abandon of a NEEDS_REVIEW step, one decision per step
- * attempt. An identical repeat returns the step; another action for the same attempt is refused.
- * - retry + a found read: records a completion that `resolveExecution` made earlier in this transaction.
+ * 0008. The signed-in owner's retry or abandon of a NEEDS_REVIEW step, and the only writer of its
+ * decision (one per step attempt). An identical repeat returns the step; another action for the same
+ * attempt, or a step not in NEEDS_REVIEW, is refused. Every move goes through 0005's resolve_execution:
+ * - retry + a found read: SUCCEEDED; `externalRef` and `checkout` are passed straight to resolve_execution.
  * - retry + `calendar_event_absent`: requeues the same row with the same idempotency key.
  * - abandon: FAILED; a message's QUEUED or UNKNOWN dispatch becomes FAILED (read `none`).
- * The owner ID and the read are the trusted server's (DATA-MODEL, "Trust boundary").
+ * The owner ID and the evidence are the trusted server's (DATA-MODEL, "Trust boundary").
  */
 export function ownerResolveExecution(db: QueryExecutor, args: {
   businessId: string; executionId: string; ownerUserId: string; action: 'retry' | 'abandon'; providerRead: RecoveryProviderRead;
+  externalRef?: string | null; checkout?: CheckoutReferences;
 }): Promise<ExecutionRow> {
-  return row(db, 'select * from private.owner_resolve_execution($1,$2,$3,$4,$5)',
-    [args.businessId,args.executionId,args.ownerUserId,args.action,args.providerRead]);
+  return row(db, 'select * from private.owner_resolve_execution($1,$2,$3,$4,$5,$6,$7)',
+    [args.businessId,args.executionId,args.ownerUserId,args.action,args.providerRead,args.externalRef ?? null,
+      args.checkout ? JSON.stringify(args.checkout) : null]);
 }
 /** 0008. The recorded owner decision for this step attempt, if any. */
 export function recoveryDecision(db: QueryExecutor, args: { businessId: string; executionId: string; attempt: number }): Promise<RecoveryDecisionRow | null> {

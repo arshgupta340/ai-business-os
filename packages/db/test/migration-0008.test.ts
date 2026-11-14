@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { PGlite } from '@electric-sql/pglite';
 import { activityEventFromRow } from '@abos/contracts';
-import { BOOKING_BUNDLE, ORDER_BUNDLE, createBooking, createMigratedDb, createOrder, createOwner, createSupabaseLikeDb, migrationDb, uniq } from './helpers';
+import { BOOKING_BUNDLE, ORDER_BUNDLE, asOwner, createBooking, createMigratedDb, createOrder, createOwner, createSupabaseLikeDb, migrationDb, uniq } from './helpers';
 import { applyMigrations, readMigrations } from '../src/migrate';
 import * as runtime from '../src/runtime';
 import * as pkg from '../src/index';
@@ -76,8 +76,10 @@ async function crashedMessage() {
   await crash(p, 1);
   return { ...p, dispatchId: d.id, messageId: p.executions[1]!.id };
 }
-const resolve = (p: Approved, executionId: string, action: 'retry' | 'abandon', providerRead: runtime.RecoveryProviderRead, extra: { ownerUserId?: string; businessId?: string } = {}) =>
-  app(() => runtime.ownerResolveExecution(db, { businessId: extra.businessId ?? p.businessId, executionId, ownerUserId: extra.ownerUserId ?? p.ownerUserId, action, providerRead }));
+const resolve = (p: Approved, executionId: string, action: 'retry' | 'abandon', providerRead: runtime.RecoveryProviderRead,
+  extra: { ownerUserId?: string; businessId?: string; externalRef?: string; checkout?: runtime.CheckoutReferences } = {}) =>
+  app(() => runtime.ownerResolveExecution(db, { businessId: extra.businessId ?? p.businessId, executionId, ownerUserId: extra.ownerUserId ?? p.ownerUserId, action, providerRead,
+    ...(extra.externalRef ? { externalRef: extra.externalRef } : {}), ...(extra.checkout ? { checkout: extra.checkout } : {}) }));
 const decisions = async (executionId: string) => (await db.query<Row>('select * from public.recovery_decisions where execution_id=$1 order by attempt', [executionId])).rows;
 async function crashedCheckout() {
   const p = await approved();
@@ -177,51 +179,77 @@ describe('owner_resolve_execution: one recorded decision per step attempt (revie
   });
 });
 
-describe('owner_resolve_execution: no evidence path of its own (review finding 1)', () => {
-  it('invented references through the routine cannot produce SUCCEEDED, PAYMENT_LINK_READY or BOOKED_VERIFIED', async () => {
+describe('owner_resolve_execution: one routine completes and records (second review)', () => {
+  it('takes evidence only with a found read on retry, and only in the shape 0005 needs', async () => {
     const c = await crashedCheckout();
-    for (const read of ['checkout_found', 'none', 'message_sent'] as const) await expect(resolve(c, c.executions[0]!.id, 'retry', read)).rejects.toThrow(/LEASE|SUBJECT|RESULT/);
-    expect((await step(c.executions[0]!.id)).status).toBe('NEEDS_REVIEW');
-    expect((await one('select status from public.orders where id=$1', [c.subjectId])).status).toBe('RECOVERY_REQUIRED');
-    // The first 0008 signature, which took a reference, checkout JSON and an absence flag, is gone.
-    await expect(app(() => db.query("select * from private.owner_resolve_execution($1,$2,$3,'retry','invented-order',false,'{}'::jsonb)", [c.businessId, c.executions[0]!.id, c.ownerUserId])))
+    const id = c.executions[0]!.id;
+    const refs = { squareOrderId: 'sq-x', paymentLinkId: 'link-x', url: 'https://example.test/x' };
+    await expect(resolve(c, id, 'retry', 'checkout_found')).rejects.toThrow(/RESULT: the provider read does not fit this step/);
+    await expect(resolve(c, id, 'abandon', 'checkout_found', { externalRef: 'sq-x', checkout: refs })).rejects.toThrow(/RESULT: provider evidence is taken only with a found read on retry/);
+    await expect(resolve(c, id, 'retry', 'none', { externalRef: 'sq-x' })).rejects.toThrow(/RESULT: provider evidence is taken only/);
+    await expect(resolve(c, id, 'retry', 'calendar_event_found', { externalRef: 'sq-x' })).rejects.toThrow(/does not fit this step/);
+    // The first 0008 signature (reference, absence flag, checkout JSON in other positions) is gone.
+    await expect(app(() => db.query("select * from private.owner_resolve_execution($1,$2,$3,'retry','invented-order',false,'{}'::jsonb)", [c.businessId, id, c.ownerUserId])))
       .rejects.toThrow(/does not exist/);
-    const b = await crashedBooking();
-    await expect(resolve(b, b.executions[0]!.id, 'retry', 'calendar_event_found')).rejects.toThrow(/LEASE/);
-    expect(await one('select status, google_event_id from public.bookings where id=$1', [b.subjectId])).toEqual({ status: 'RETRY_REQUIRED', google_event_id: null });
-    expect(await decisions(c.executions[0]!.id)).toEqual([]);
-    expect(await decisions(b.executions[0]!.id)).toEqual([]);
+    expect((await step(id)).status).toBe('NEEDS_REVIEW');
+    expect((await one('select status from public.orders where id=$1', [c.subjectId])).status).toBe('RECOVERY_REQUIRED');
+    expect(await decisions(id)).toEqual([]);
   });
 
-  it('a found read is recorded only after resolve_execution completed the step in the same transaction, and must match it', async () => {
+  it('a step completed through 0005 directly gets no owner decision afterwards, in the same transaction or later', async () => {
     const b = await crashedBooking();
     const id = b.executions[0]!.id;
     const eventId = String((await step(id)).idempotency_key);
     await app(async () => {
       await db.exec('begin');
       try {
-        // The 0005 completion, with its material checks: the server's calendar read found the event.
         await runtime.resolveExecution(db, { businessId: b.businessId, executionId: id, status: 'SUCCEEDED', externalRef: eventId, nothingWritten: false });
-        await expect(runtime.ownerResolveExecution(db, { businessId: b.businessId, executionId: id, ownerUserId: b.ownerUserId, action: 'retry', providerRead: 'message_sent' })).rejects.toThrow(/does not match/);
+        await expect(runtime.ownerResolveExecution(db, { businessId: b.businessId, executionId: id, ownerUserId: b.ownerUserId, action: 'retry', providerRead: 'calendar_event_found', externalRef: eventId }))
+          .rejects.toThrow(/LEASE: NEEDS_REVIEW required/);
       } finally { await db.exec('rollback'); }
+    });
+    await app(() => runtime.resolveExecution(db, { businessId: b.businessId, executionId: id, status: 'SUCCEEDED', externalRef: eventId, nothingWritten: false }));
+    await expect(resolve(b, id, 'retry', 'calendar_event_found', { externalRef: eventId })).rejects.toThrow(/LEASE: NEEDS_REVIEW required/);
+    await expect(resolve(b, id, 'retry', 'calendar_event_found')).rejects.toThrow(/LEASE: NEEDS_REVIEW required/);
+    expect(await decisions(id)).toEqual([]);
+  });
+
+  it('a found read completes the step through 0005 and records it in the same call, also inside a savepoint; a repeat returns it with one row', async () => {
+    const b = await crashedBooking();
+    const id = b.executions[0]!.id;
+    const eventId = String((await step(id)).idempotency_key);
+    await app(async () => {
       await db.exec('begin');
       try {
-        await runtime.resolveExecution(db, { businessId: b.businessId, executionId: id, status: 'SUCCEEDED', externalRef: eventId, nothingWritten: false });
-        expect(await runtime.ownerResolveExecution(db, { businessId: b.businessId, executionId: id, ownerUserId: b.ownerUserId, action: 'retry', providerRead: 'calendar_event_found' })).toMatchObject({ status: 'SUCCEEDED' });
+        await db.exec('savepoint recovery');
+        expect(await runtime.ownerResolveExecution(db, { businessId: b.businessId, executionId: id, ownerUserId: b.ownerUserId, action: 'retry', providerRead: 'calendar_event_found', externalRef: eventId }))
+          .toMatchObject({ status: 'SUCCEEDED', external_ref: eventId });
+        await db.exec('release savepoint recovery');
         await db.exec('commit');
       } catch (error) { await db.exec('rollback'); throw error; }
     });
     expect(await one('select status, google_event_id from public.bookings where id=$1', [b.subjectId])).toEqual({ status: 'BOOKED_VERIFIED', google_event_id: eventId });
-    // In a later transaction the identical repeat returns the recorded result.
+    expect(await decisions(id)).toEqual([expect.objectContaining({ attempt: 1, action: 'retry', provider_read: 'calendar_event_found', result_status: 'SUCCEEDED', decided_by: b.ownerUserId })]);
+    const n = (await events(b.businessId)).length;
+    expect(await resolve(b, id, 'retry', 'calendar_event_found', { externalRef: eventId })).toMatchObject({ status: 'SUCCEEDED' });
     expect(await resolve(b, id, 'retry', 'calendar_event_found')).toMatchObject({ status: 'SUCCEEDED' });
-    // A found claim on a step that an ordinary worker completed earlier is refused.
-    const done = await approved('booking_bundle');
-    await app(async () => {
-      const l = lease(done, 0, 'w-done');
-      await runtime.runtimeClaimExecution(db, l);
-      await runtime.verifyBooking(db, { ...l, googleEventId: 'ev-' + uniq() });
-    });
-    await expect(resolve(done, done.executions[0]!.id, 'retry', 'calendar_event_found')).rejects.toThrow(/LEASE: a found effect/);
+    expect(await decisions(id)).toHaveLength(1);
+    expect(await events(b.businessId)).toHaveLength(n);
+  });
+
+  it('a found checkout passes the evidence to 0005, whose checks still apply', async () => {
+    const c = await crashedCheckout();
+    const id = c.executions[0]!.id;
+    // 0005 refuses evidence whose order ID is not the reference, and a URL that is not https.
+    await expect(resolve(c, id, 'retry', 'checkout_found', { externalRef: 'sq-a', checkout: { squareOrderId: 'sq-b', paymentLinkId: 'l', url: 'https://example.test/c' } }))
+      .rejects.toThrow(/RESULT: checkout evidence required/);
+    await expect(resolve(c, id, 'retry', 'checkout_found', { externalRef: 'sq-a', checkout: { squareOrderId: 'sq-a', paymentLinkId: 'l', url: 'http://example.test/c' } }))
+      .rejects.toThrow(/RESULT: checkout evidence required/);
+    expect(await decisions(id)).toEqual([]);
+    const refs = { squareOrderId: 'sq-' + c.subjectId, paymentLinkId: 'link-' + c.subjectId, url: 'https://example.test/c' };
+    expect(await resolve(c, id, 'retry', 'checkout_found', { externalRef: refs.squareOrderId, checkout: refs })).toMatchObject({ status: 'SUCCEEDED' });
+    expect((await one('select status, square_order_id from public.orders where id=$1', [c.subjectId]))).toEqual({ status: 'PAYMENT_LINK_READY', square_order_id: refs.squareOrderId });
+    expect((await decisions(id)).map((d) => d.provider_read)).toEqual(['checkout_found']);
   });
 });
 
@@ -321,14 +349,7 @@ describe('owner_resolve_execution: message whose delivery is unknown', () => {
     });
     const id = p.executions[1]!.id;
     await expect(resolve(p, id, 'abandon', 'none')).rejects.toThrow(/SUBJECT: a sent message is completed/);
-    await app(async () => {
-      await db.exec('begin');
-      try {
-        await runtime.resolveExecution(db, { businessId: p.businessId, executionId: id, status: 'SUCCEEDED', externalRef: providerId, nothingWritten: false });
-        await runtime.ownerResolveExecution(db, { businessId: p.businessId, executionId: id, ownerUserId: p.ownerUserId, action: 'retry', providerRead: 'message_sent' });
-        await db.exec('commit');
-      } catch (error) { await db.exec('rollback'); throw error; }
-    });
+    await expect(resolve(p, id, 'retry', 'message_sent', { externalRef: 'pm-other' })).rejects.toThrow(/does not fit this step/);
     const first = await resolve(p, id, 'retry', 'message_sent');
     const second = await resolve(p, id, 'retry', 'message_sent');
     expect(first).toMatchObject({ status: 'SUCCEEDED', external_ref: providerId });
@@ -365,8 +386,20 @@ describe('0008 privileges', () => {
     expect(check).toMatchObject({ writes_approvals: false, writes_executions: false, writes_dispatches: false, writes_sync_jobs: false, writes_receipts: false });
   });
 
+  it('a signed-in owner (authenticated) reads only their own business decisions and writes none', async () => {
+    const mine = await crashedBooking();
+    const theirs = await crashedBooking();
+    await resolve(mine, mine.executions[0]!.id, 'abandon', 'calendar_event_absent');
+    await resolve(theirs, theirs.executions[0]!.id, 'abandon', 'calendar_event_absent');
+    const seen = await asOwner(db, mine.owner.authUserId, async () => (await db.query<Row>('select business_id, execution_id from public.recovery_decisions')).rows);
+    expect(seen).toEqual([{ business_id: mine.businessId, execution_id: mine.executions[0]!.id }]);
+    await expect(asOwner(db, mine.owner.authUserId, () => db.query("update public.recovery_decisions set action='retry'"))).rejects.toMatchObject({ code: '42501' });
+    await expect(asOwner(db, mine.owner.authUserId, () => db.query('select * from private.owner_resolve_execution($1,$2,$3,$4,$5)',
+      [mine.businessId, mine.executions[0]!.id, mine.ownerUserId, 'abandon', 'calendar_event_absent']))).rejects.toMatchObject({ code: '42501' });
+  });
+
   it('the two entry points are SECURITY DEFINER with an empty search_path, executable by abos_app only', async () => {
-    for (const sig of ['private.mark_stale_dispatches_unknown(text)', 'private.owner_resolve_execution(text,text,text,text,text)']) {
+    for (const sig of ['private.mark_stale_dispatches_unknown(text)', 'private.owner_resolve_execution(text,text,text,text,text,text,jsonb)']) {
       const f = await one(`select prosecdef, proconfig::text config from pg_proc where oid=$1::regprocedure`, [sig]);
       expect(f, sig).toEqual({ prosecdef: true, config: '{"search_path=\\"\\""}' });
       for (const role of ['public', 'anon', 'authenticated', 'service_role']) {
@@ -418,7 +451,7 @@ describe('0008 on a database that already has 0001 to 0007', () => {
       const added = after.filter((x) => !before.includes(x)).map((x) => x.split(' = ')[0]!);
       // Two routines, and the recovery_decisions table with its own constraints, policies, trigger and key.
       expect(added.filter((k) => !k.includes('recovery_decisions'))).toEqual([
-        'private.mark_stale_dispatches_unknown(text)', 'private.owner_resolve_execution(text,text,text,text,text)']);
+        'private.mark_stale_dispatches_unknown(text)', 'private.owner_resolve_execution(text,text,text,text,text,text,jsonb)']);
       expect(added).toEqual(expect.arrayContaining(['recovery_decisions', 'recovery_decisions.recovery_decisions_append_only',
         'recovery_decisions.runtime_read', 'recovery_decisions.recovery_decisions_owner_read', 'recovery_decisions_pkey']));
       expect((await fresh.query(rows)).rows[0]).toEqual(rowsBefore);
