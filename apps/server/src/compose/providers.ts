@@ -14,6 +14,7 @@ import { createSandboxSquareClient, createSquareAdapter, type SquareAdapter } fr
 import { createPriceAdapter, type PriceAdapter } from '../adapters/square/price';
 import type { Env } from '../env';
 import type { HealthProbe } from './health';
+import { SHEETS_TABS } from './executor';
 import { createTwilioRequestValidator, createWsOpenAISocketFactory, type OpenAISocketFactory, type TwilioRequestValidator } from '../voice/plugin';
 
 export type ProviderKey = 'square' | 'twilio' | 'openai' | 'google_calendar' | 'google_sheets' | 'message_channel';
@@ -84,6 +85,23 @@ export function calendarProbe(client: FreeBusyClient, calendarId: string, now: (
   };
 }
 
+type SheetTitlesClient = { spreadsheets: { get(input: { spreadsheetId: string; fields?: string }): Promise<{ data: { sheets?: { properties?: { title?: string | null } | null }[] | null } }> } };
+
+/**
+ * The Sheets health probe reads the tab titles: the reporting job appends to the Orders and Bookings
+ * tabs and never creates them, so a shared sheet without them would fail every job (live run 2026-11-14).
+ */
+export function sheetsProbe(client: SheetTitlesClient, spreadsheetId: string): HealthProbe {
+  return async () => {
+    try {
+      const res = await client.spreadsheets.get({ spreadsheetId, fields: 'sheets.properties.title' });
+      const titles = new Set((res.data.sheets ?? []).map((s) => s.properties?.title ?? ''));
+      const missingTabs = [SHEETS_TABS.order, SHEETS_TABS.booking].filter((t) => !titles.has(t));
+      return missingTabs.length ? { ok: false, detail: `sheet missing tabs: ${missingTabs.join(', ')}` } : { ok: true, detail: 'sheet shared' };
+    } catch { return { ok: false, detail: 'sheet not readable by the service account' }; }
+  };
+}
+
 export function buildProviders(env: Env, now: () => Date, overrides: Partial<Providers> = {}): Providers {
   const status = {} as Record<ProviderKey, ProviderStatus>;
   // Every probe is a read: list one payment, read calendar or sheet metadata, read the account or models.
@@ -132,10 +150,7 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
     const client = sheets({ version: 'v4', auth: sheetsAuth });
     sheetsAdapter = createSheetsAdapter({ client });
     const spreadsheetId = env.GOOGLE_SHEET_ID;
-    probes.google_sheets = async () => {
-      try { await client.spreadsheets.get({ spreadsheetId, fields: 'spreadsheetId' }); return fixed(true, 'sheet shared'); }
-      catch { return fixed(false, 'sheet not readable by the service account'); }
-    };
+    probes.google_sheets = sheetsProbe(client as unknown as SheetTitlesClient, spreadsheetId);
     status.google_sheets = ok();
   }
 

@@ -31,6 +31,21 @@ export interface TurnDeps {
   model: AgentModel;
   now(): Date;
   newId(prefix: string): string;
+  /** Structured logger. A refused tool is logged by name length only, never its name or arguments. */
+  log?: { warn(data: Record<string, unknown>, msg: string): void } | undefined;
+}
+
+/**
+ * Live run 2026-11-14 (7219b86): turns carry only spoken text, so after propose_order the model no longer saw
+ * its own tool result and told the caller nothing was submitted. Once the call has a proposal (stage
+ * CUSTOMER_CONFIRMED, kept on the call row), every later turn is told so. Sim-call and the AgentPhone path
+ * both run turns this way (D-12); the Twilio relay keeps function call outputs in its Realtime session.
+ */
+export function proposalSentNote(template: AgentSpec['template'], stage: CallStage): string | undefined {
+  if (stage !== 'CUSTOMER_CONFIRMED') return undefined;
+  return template === 'appointment_booker'
+    ? 'On this call you already sent this booking request to the shop for approval with propose_booking. If the caller asks or says goodbye, tell them the request was sent to the shop for approval and they will hear once the owner approves it. Do not call propose_booking again, and never say it is not submitted.'
+    : 'On this call you already sent this order to the shop for approval with propose_order. If the caller asks or says goodbye, tell them the order was sent to the shop for approval and that a payment link will follow once the owner approves it. Do not call propose_order again, and never say it is not submitted.';
 }
 
 export interface TurnInput {
@@ -73,7 +88,15 @@ export async function runAgentTurn(deps: TurnDeps, input: TurnInput): Promise<Tu
     if (calls > MAX_TOOL_CALLS_PER_TURN) return { ok: false, reason: 'VALIDATION_FAILED', message: 'Too many tool calls in one turn.' };
     const named = ToolNameSchema.safeParse(rawName);
     // There is no tool for any write or external_message capability (AGENTS rule 6).
-    if (!named.success || !tools.includes(named.data)) return { ok: false, reason: 'CAPABILITY_NOT_ALLOWED', message: 'This agent does not have that tool.' };
+    if (!named.success || !tools.includes(named.data)) {
+      // Recorded as the phone relay records it: guardrail.refused with a fixed code, and a log line with
+      // the name's length only. The name and the arguments came from the model and are never stored.
+      const known = named.success ? named.data : undefined;
+      deps.log?.warn({ callId, tool: known ?? 'unknown_tool', nameLength: rawName.length }, known ? 'sim-call: model asked for a tool this agent does not have' : 'sim-call: model asked for an unknown tool');
+      await emitActivity(deps.db, { id: deps.newId('evt_'), businessId, correlationId: callId, type: 'guardrail.refused', actorType: 'deployed_agent',
+        occurredAt: deps.now().toISOString(), payload: { callId, rule: 'unsupported_request', reasonCode: known ? 'tool_not_allowed' : 'unknown_tool', ...(known ? { toolName: known } : {}) } });
+      return { ok: false, reason: 'CAPABILITY_NOT_ALLOWED', message: 'This agent does not have that tool.' };
+    }
     const tool: ToolName = named.data;
     const result = await session.toolset.handler.call(tool, (rawInput ?? {}) as never, ctx);
     const stage = nextStage(spec.template, session.stage, tool, result);
@@ -81,9 +104,10 @@ export async function runAgentTurn(deps: TurnDeps, input: TurnInput): Promise<Tu
     return result;
   };
   let reply: string;
+  const sentNote = proposalSentNote(spec.template, session.stage);
   try {
     ({ reply } = await deps.model.respond({
-      instructions: `${agentInstructions(spec as Parameters<typeof agentInstructions>[0], input.businessName)}\n${PLAIN_SPEECH_RULE}`,
+      instructions: `${agentInstructions(spec as Parameters<typeof agentInstructions>[0], input.businessName)}\n${PLAIN_SPEECH_RULE}${sentNote ? `\n${sentNote}` : ''}`,
       history: session.history, message: input.message, tools, now: deps.now(), executeTool,
     }));
   } catch {

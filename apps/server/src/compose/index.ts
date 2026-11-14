@@ -127,6 +127,8 @@ export interface ComposedServer {
   stopJobs(): Promise<void>;
   now(): Date;
   newId(prefix: string): string;
+  /** The server's structured logger (the one the seams use). */
+  log: SeamDeps['log'];
 }
 
 /** For server-side reads that no caller can cancel (the voice worker's pinned snapshot, sim-call). */
@@ -345,7 +347,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   let sweep: ReturnType<typeof setInterval> | undefined;
   return {
     env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, prices, recovery, fallback, decisions,
-    databaseProbe: hasDb ? async () => (await db.query('select 1 as ok', [])).rows.length === 1 : undefined, telemetry: telemetryOptions, health, telephony, agentphone, now, newId,
+    databaseProbe: hasDb ? async () => (await db.query('select 1 as ok', [])).rows.length === 1 : undefined, telemetry: telemetryOptions, health, telephony, agentphone, now, newId, log,
     async close() { if (pool) await pool.end(); },
     async assertRuntimeRole() { if (hasDb) await assertRestrictedRuntimeRole(db); },
     startJobs() {

@@ -235,6 +235,15 @@ type ActionExecution = {
   createdAt: string; updatedAt: string;
 };
 type MessageDispatchStatus = "QUEUED" | "SENT" | "DELIVERED" | "FAILED" | "UNKNOWN";
+// SyncJobSchema mirrors sync_jobs, with nullable columns omitted.
+type SyncJob = {
+  id: string; businessId: string; target: "google_sheets";
+  recordType: "order" | "booking"; recordId: string;
+  state: "PENDING" | "RUNNING" | "DONE" | "RETRYING" | "FAILED";
+  attempts: number; // integer, 0 through 5
+  nextRetryAt: string; externalRef?: string; lastError?: string;
+  createdAt: string; updatedAt: string;
+};
 type MessageDispatch = {
   id: string; businessId: string; executionId: string; subjectId: string;
   channel: "surge" | "android_gateway" | "whatsapp_sandbox" | "agentphone";
@@ -284,7 +293,8 @@ type IntegrationHealthEntry = {
   detail?: string;
 };
 type IntegrationHealth = Record<IntegrationProvider, IntegrationHealthEntry>; // GET /api/integrations/health
-type LiveAgent = { phoneNumber: string; businessId: string; agentId: string; agentVersionId: string; updatedAt: string };
+type LiveAgent = { phoneNumber: string; businessId: string; agentId?: string; agentVersionId?: string; updatedAt?: string };
+// Empty case, when no agent answers the number: phoneNumber and businessId only (SPEC 2.9).
 ```
 
 **Agent run modes (P-18).** Both endpoints take one text turn and return the same shape.
@@ -307,6 +317,8 @@ type GuardrailRule = "no_fact_changes" | "no_secret_reveal" | "no_approval_bypas
 
 ## 4. Approval payloads
 
+`payloadHash(payload, bundleType?)` accepts an optional bundle type. When supplied, it validates the whole payload with that bundle's strict schema before hashing and throws on a mismatch or extra field. Omitting it preserves the existing bundle inference and material-field projection.
+
 The server builds `payload` from stored rows, never from model output. The payload holds exactly the material fields below and nothing else. `payloadHash` is the SHA-256 of the canonical JSON of the whole payload, so the stored hash is the hash of the stored payload. The payload schemas are strict: an extra field, such as `callId` or `messageConsent`, is refused.
 
 | bundleType | Payload fields (all required unless marked) |
@@ -322,7 +334,7 @@ The server builds `payload` from stored rows, never from model output. The paylo
 
 **Rules.**
 - An approval is one-use. The only move out of `PENDING` is one conditional update, so a second, different decision gets `APPROVAL_ALREADY_DECIDED`.
-- `expiresAt` is `createdAt` plus 10 minutes. A decision after that gets `APPROVAL_EXPIRED`.
+- `expiresAt` is `createdAt` plus 10 minutes. A decision at or after that gets `APPROVAL_EXPIRED`. The refusal does not expire the row; the expiry job does.
 - The decision carries `payloadHash`. If it differs from the stored hash, the server returns `PAYLOAD_HASH_MISMATCH`.
 - The executor recomputes the hash from current rows before every step. Any change to a material field (cart, total, recipient, channel, slot, calendar, fact value, price) stops the bundle and needs a new approval.
 
@@ -393,23 +405,26 @@ The payment poller checks every 30 seconds for 15 minutes after the link is read
 | `RETRY_REQUIRED` | owner retries, approval still valid, same key | `RECHECKING_SLOT` | |
 | `RETRY_REQUIRED` | reconciliation finds the event by id | `BOOKED_VERIFIED` | server only, terminal; creates the Sheets sync job |
 
-**Approval.** `PENDING` goes to `APPROVED` (owner approves with matching hash before `expiresAt`), `REJECTED` (owner rejects) or `EXPIRED` (`expiresAt` passes, by job or late decision). All three are terminal.
+**Approval.** `PENDING` goes to `APPROVED` (owner approves with matching hash before `expiresAt`), `REJECTED` (owner rejects) or `EXPIRED` (the expiry job, `private.expire_approvals`, finds it still `PENDING` at or after `expiresAt`). All three are terminal. A decision at or after `expiresAt` is refused with `APPROVAL_EXPIRED` and leaves the row `PENDING` until that job runs. A repeat of a recorded decision with the same outcome, owner and reason changes nothing and writes no second `approval.decided` event.
 
 **Execution.** Steps run in bundle order. A step starts when the step before it is `SUCCEEDED`, except that a message step that ends `SKIPPED`, `FAILED` or `NEEDS_REVIEW` still lets `local.*.record` run. Sheets steps have no execution row; their sync job is created on entering `PAID_VERIFIED` or `BOOKED_VERIFIED`. There is no retry state.
 
 | From | Event | To |
 |---|---|---|
-| `QUEUED` | message step claimed while the approval's `messageChannel` is `qr_only` | `SKIPPED` (terminal; no dispatch row) |
-| `QUEUED` | worker claims the row (`FOR UPDATE SKIP LOCKED`) | `RUNNING` |
+| (row created) | approval decided `APPROVED`, message step, and the approval's `messageChannel` is `qr_only` | `SKIPPED` (terminal; no dispatch row; the row is created in this state and is never `QUEUED`) |
+| (row created) | approval decided `APPROVED`, every other step | `QUEUED` |
+| `QUEUED` | worker claims the row with `claim_execution` or `claim_next_execution` | `RUNNING` (`attempts` plus one) |
 | `RUNNING` | provider confirms the result | `SUCCEEDED` (terminal, server only) |
-| `RUNNING` | retryable error, `attempts` below 3 | `QUEUED` (`attempts` plus one, with backoff) |
+| `RUNNING` | retryable error, `attempts` below 3 | `QUEUED` (with backoff; `attempts` does not change here, because it is counted on the claim) |
 | `RUNNING` | non-retryable error, or third attempt failed | `FAILED` (terminal) |
 | `RUNNING` | outcome unknown (timeout after send) | `NEEDS_REVIEW` |
 | `NEEDS_REVIEW` | reconciliation finds the external object | `SUCCEEDED` (terminal, server only) |
 | `NEEDS_REVIEW` | reconciliation proves nothing happened | `QUEUED` (same key) |
 | `NEEDS_REVIEW` | owner abandons the step | `FAILED` (terminal) |
 
-**Sync job.** Created in `PENDING` on entering `PAID_VERIFIED` or `BOOKED_VERIFIED`, carrying the Sheets step's idempotency key. `PENDING` to `RUNNING` when the runner picks it up. `RUNNING` to `DONE` (terminal) when the row is appended or its `recordId` is already present. `RUNNING` to `RETRYING` on an error with attempts below 5. `RETRYING` to `RUNNING` when `nextRetryAt` is reached. `RUNNING` to `FAILED` (terminal) after the fifth attempt.
+The database routines of migration 0004 allow less than this table. `finish_execution` accepts a result only for a `RUNNING` step, from the worker and attempt that hold it, and the claim routines accept only `QUEUED` rows. So the three rows out of `NEEDS_REVIEW` have no routine today, and a `RUNNING` step whose worker stopped stays `RUNNING`. Migration 0005, not yet applied, adds resolving a `NEEDS_REVIEW` step and stale lease recovery.
+
+**Sync job.** Created in `PENDING` on entering `PAID_VERIFIED` or `BOOKED_VERIFIED`, carrying the Sheets step's idempotency key. `PENDING` to `RUNNING` when the runner picks it up with `claim_sync_job`, which adds one to `attempts`. `RUNNING` to `DONE` (terminal) when the row is appended or its `recordId` is already present. `RUNNING` to `RETRYING` on an error with attempts below 5. `RETRYING` to `RUNNING` when `nextRetryAt` is reached. `RUNNING` to `FAILED` (terminal) after the fifth attempt.
 
 **Message dispatch.** No dispatch row is created for `qr_only`; the step's execution is `SKIPPED`. No automatic resend from `UNKNOWN`.
 
@@ -423,6 +438,8 @@ The payment poller checks every 30 seconds for 15 minutes after the link is read
 | `SENT` | verified delivery callback: delivered | `DELIVERED` (terminal, server only) |
 | `SENT` | verified delivery callback: failed | `FAILED` (terminal) |
 
+The database routine of migration 0004 allows less than this table. `update_dispatch` allows `QUEUED` to move to `SENT`, `DELIVERED`, `FAILED` or `UNKNOWN`, and `SENT` to move to `DELIVERED`, and only while the message step's execution is `RUNNING` under the calling worker and attempt. It refuses every change from `UNKNOWN`, and it refuses `SENT` to `FAILED`. So the two rows out of `UNKNOWN` and the row from `SENT` to `FAILED` have no routine today. Migration 0005, not yet applied, changes how an `UNKNOWN` dispatch is resolved.
+
 Only `whatsapp_sandbox` and `agentphone` (D-12) can reach `DELIVERED`. `SENT` is the last state for every other channel. The `MessageDispatch` schema refuses `DELIVERED` on any other channel.
 
 **Fact.** An approved `fact_edit` targets the existing verified row. When `local.fact.update` runs, that row becomes `superseded` and the approved value is inserted as a new `verified` row in the same transaction. `superseded` is terminal. **Fact conflict.** `open` to `resolved` when the owner picks a candidate (or an approved edit carries `resolvesConflictId`); `resolved` is terminal.
@@ -433,14 +450,14 @@ Only `whatsapp_sandbox` and `agentphone` (D-12) can reach `DELIVERED`. `SENT` is
 
 ## 7. Activity events
 
-Until migration 0005, `decide_and_enqueue` and `expire_approvals` write `order.status_changed` and `booking.status_changed` with `{ subjectId, from, to }` only. An `order.status_changed` row received over Realtime does not parse with `activityEventFromRow`, because `callId` is required, so the client treats every Realtime insert as a signal to refetch. From migration 0005, the routines write the full contract payload: `orderId` or `bookingId`, `callId` when the subject has one, `from`, and `to`; call journeys use the call ID as `correlationId`. The activity list route continues filling these fields for older rows.
+Until migration 0005, which is not yet applied, `decide_and_enqueue` and `expire_approvals` write `order.status_changed` and `booking.status_changed` with `{ subjectId, from, to }` only. They also give every event they write (those two, `approval.decided` and `approval.expired`) the approval ID as `correlationId`, on call journeys too. An `order.status_changed` row received over Realtime does not parse with `activityEventFromRow`, because `callId` is required, so the client treats every Realtime insert as a signal to refetch. From migration 0005, the routines write the full contract payload: `orderId` or `bookingId`, `callId` when the subject has one, `from`, and `to`; call journeys use the call ID as `correlationId`. The activity list route continues filling these fields for older rows.
 
 ```ts
 type ActivityEvent = { id: string; businessId: string; type: ActivityEventType; correlationId: string;
   actorType: "owner" | "deployed_agent" | "system" | "provider"; occurredAt: string; payload: object };
 ```
 
-Payloads are redacted. `guardrail.refused` names the rule that fired in `rule` and the specific reason in `reasonCode`. Phone numbers appear only as `recipientLast4`, `callerLast4` or `phoneNumberLast4`. Card data never appears in any field. Customer names appear as first name only. Other than the pre-migration status events described above, `correlationId` is the `call_` id for call journeys, the `bld_` id for builder journeys, the `file_` id for extraction and the `apv_` id for owner edits. Screens: OV Overview, LO Live operations (the sidebar item "Activity", SPEC 2.9), AP Approvals, MA My Agents, BK Business Knowledge, IN Integrations.
+Payloads are redacted. `guardrail.refused` names the rule that fired in `rule` and the specific reason in `reasonCode`. Phone numbers appear only as `recipientLast4`, `callerLast4` or `phoneNumberLast4`. Card data never appears in any field. Customer names appear as first name only. Other than the pre-migration decision, expiry and status events described above, `correlationId` is the `call_` id for call journeys, the `bld_` id for builder journeys, the `file_` id for extraction and the `apv_` id for owner edits. Screens: OV Overview, LO Live operations (the sidebar item "Activity", SPEC 2.9), AP Approvals, MA My Agents, BK Business Knowledge, IN Integrations.
 
 | Type | Payload | Screens |
 |---|---|---|
@@ -465,13 +482,13 @@ Payloads are redacted. `guardrail.refused` names the rule that fired in `rule` a
 | `sync.queued` | `{ target: "google_sheets" \| "catalog", syncJobId?, recordType?, recordId?, jobId? }`. Sheets events carry `syncJobId`, `recordType` and `recordId`; catalog sync events carry `jobId` | LO |
 | `sync.succeeded` | `{ target, syncJobId?, recordType?, recordId?, jobId? }` (same rule) | LO |
 | `sync.failed` | `{ target, syncJobId?, recordType?, recordId?, jobId?, attempts, final: boolean }` (same rule) | LO, IN |
-| `fact.changed` | `{ factId, kind, key, fromVersion, toVersion, sourceType }` | BK, MA |
+| `fact.changed` | `{ factId, kind, key, fromVersion, toVersion, sourceType, resolvedConflictId? }` (`cfl_` ID when resolving a conflict, including keeping the authoritative value; refresh publish eligibility) | BK, MA |
 | `extraction.completed` | `{ fileId, mime, extractionState: "EXTRACTED" \| "FAILED", draftFactCount, conflictCount }` | BK |
 | `agent.published` | `{ agentId, agentVersionId, version, phoneNumberLast4?, rolledBackFrom? }` (`rolledBackFrom` is the previous `agv_` id, on rollback only) | OV, MA |
 | `agent.paused` | `{ agentId }` | OV, MA |
 | `live_agent.changed` | `{ phoneNumberLast4, agentId, agentVersionId, previousAgentId? }` | OV, MA |
 | `guardrail.refused` | `{ callId?, executionId?, approvalId?, reasonCode, rule: GuardrailRule, toolName? }`. `reasonCode` is a machine code of 1 to 64 characters matching `^[A-Za-z0-9_][A-Za-z0-9_.:-]*$`, for example `fact_change_forbidden` or `approval_pending`. `callId` is set for a refusal on a call, `executionId` and `approvalId` for a refusal in the executor or the approval engine | LO, MA |
-| `webhook.rejected` | `{ provider: "square" | "twilio" | "agentphone", reason\| "twilio", reason: "signature_invalid" \| "malformed" }`. `businessId` is the business that owns the integration the webhook URL belongs to, read from `integrations`. Nothing from the request body is trusted, stored or copied | IN, LO |
+| `webhook.rejected` | `{ provider: "square" \| "twilio" \| "agentphone", reason: "signature_invalid" \| "malformed" }`. `businessId` is the business that owns the integration the webhook URL belongs to, read from `integrations`. Nothing from the request body is trusted, stored or copied | IN, LO |
 
 ## 8. Agent tools
 
@@ -549,7 +566,7 @@ Task S-03 creates these in `packages/contracts/fixtures/`. Every file validates 
 | `timeline.pizza-order.jsonl` | One `ActivityEvent` per line, `call.started` to `payment.verified`, including every `order.status_changed` |
 | `timeline.booking.jsonl` | One `ActivityEvent` per line, `proposal.created` to `booking.verified` |
 
-`materializeFixtures(now)` from `@abos/contracts/fixtures` returns a deep copy of the whole fixture world with every timestamp shifted by one delta, so the fixture now (`FIXTURE_NOW`, `2026-11-14T20:30:00Z`) lands on `now`, and with every `payloadHash` recomputed. The `PENDING` approvals are then live at `now`. `shiftTimeline(timeline, startAt)` and `materializeTimeline(timeline, startAt)` move one timeline. The mock feed in `apps/web/mocks` replays the two timelines. Short worked examples follow; the fixture files carry every line. Tax is illustrative; Square computes the real value.
+`materializeFixtures(now)` from `@abos/contracts/fixtures` returns a deep copy. Approvals and expiry, quotes, calls and event occurrence times keep their distance from `FIXTURE_NOW`. Pickups, booking slots, availability alternatives and busy blocks keep their authored weekday and local time in the business timezone, including across daylight saving changes. Each authored local day moves to the nearest matching weekday, with pending pickups in the future and pending bookings beyond minimum notice. Related slots and busy blocks share that date. Every approval hash is recomputed; cart hashes and idempotency keys stay unchanged. `materializeBusyBlocks(now)` supplies the same shifted calendar to the mock toolset. `shiftTimeline(timeline, startAt)` and `materializeTimeline(timeline, startAt)` retain their elapsed-time replay behavior. Short worked examples follow; the fixture files carry every line. Tax is illustrative; Square computes the real value.
 
 ```jsonl
 {"id":"evt_p01","businessId":"biz_pizza_01","type":"call.started","correlationId":"call_p01","actorType":"provider","occurredAt":"2026-11-14T19:00:00Z","payload":{"callId":"call_p01","agentId":"agt_pizza_01","agentVersionId":"agv_pizza_01_v1","channel":"phone","callerLast4":"0123"}}

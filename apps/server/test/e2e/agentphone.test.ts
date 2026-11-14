@@ -100,6 +100,22 @@ describe('AgentPhone voice turns (TELEPHONY_PROVIDER=agentphone)', () => {
     for (const r of stored) { expect(r.p).not.toMatch(/pepperoni|\+1555|Sam/); expect(r.processed_at).not.toBeNull(); }
   });
 
+  it('remembers the proposal it already sent: later turns are told it went for approval, not to propose again (7219b86)', async () => {
+    let instructions = '';
+    w.model.push(async ({ instructions: i }) => { instructions = i; return 'Your order was sent to the shop for approval.'; });
+    const r = await signed(w, voiceTurn('call_ap_1', 'Did my order go through?'));
+    expect(chunks(r.payload)).toEqual([{ text: 'Your order was sent to the shop for approval.' }]);
+    expect(instructions).toContain('On this call you already sent this order to the shop for approval with propose_order.');
+    expect(instructions).toContain('Do not call propose_order again');
+    const stage = (await w.t.db.query("select stage from calls where provider_call_id = 'call_ap_1'", [])).rows[0];
+    expect(stage).toEqual({ stage: 'CUSTOMER_CONFIRMED' });
+    // A fresh call has no such note.
+    let fresh = '';
+    w.model.push(async ({ instructions: i }) => { fresh = i; return 'Hello.'; });
+    await signed(w, voiceTurn('call_ap_fresh', 'Hi'));
+    expect(fresh).not.toContain('already sent');
+  });
+
   it('hands the agent read and propose tools only (rule 6)', () => {
     const tools = w.app.composed.agentphone.voice!.toolsOf('call_ap_1')!;
     expect(tools).toEqual(expect.arrayContaining(['quote_order', 'propose_order']));

@@ -254,6 +254,17 @@ describe('VoiceSession: failures', () => {
     expect(session.canStart()).toBe(true);
   });
 
+  it('counts the rate limit down on its own clock, not Date.now', async () => {
+    const {fakes, session} = setup({mintError: apiError('RATE_LIMITED', {retryAfterSeconds: 30})});
+    expect(session.retryInMs()).toBeNull();
+    await session.start();
+    expect(session.retryInMs()).toBe(30_000);
+    fakes.advance(12_000);
+    expect(session.retryInMs()).toBe(18_000);
+    fakes.advance(60_000);
+    expect(session.retryInMs()).toBe(0);
+  });
+
   it('RATE_LIMITED without retryAfterSeconds waits 60 seconds', async () => {
     const {fakes, session} = setup({mintError: apiError('RATE_LIMITED')});
     await session.start();

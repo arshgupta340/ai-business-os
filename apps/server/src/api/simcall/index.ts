@@ -21,6 +21,8 @@ import type { RealToolset } from '../../tools/real/types';
 import { initialTurnStage, runAgentTurn, type TurnSession } from './turn';
 import type { CallsStore } from '../../compose/ports';
 
+// Moved to turn.ts (D-12) so sim-call and the AgentPhone path share it; re-exported for existing imports.
+export { proposalSentNote } from './turn';
 const MAX_SESSIONS = 200;
 
 export interface SimCallDeps {
@@ -32,6 +34,8 @@ export interface SimCallDeps {
   model: AgentModel;
   now(): Date;
   newId(prefix: string): string;
+  /** Structured logger. A refused tool is logged by name length only, never its name or arguments. */
+  log?: { warn(data: Record<string, unknown>, msg: string): void };
 }
 
 type Session = TurnSession;

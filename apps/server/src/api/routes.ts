@@ -280,6 +280,14 @@ export async function apiRoutes(app: FastifyInstance, deps: ApiDependencies): Pr
         const order = await one(db, 'orders', id, businessId);
         const messages = await db.query('select * from public.message_dispatches where business_id = $1 and order_id = $2 order by created_at desc, id desc limit 1', [businessId, id]);
         const message = messages.rows[0] ? mapRow(messages.rows[0]) : undefined;
+        // Fail closed (FLOWS 4): a dispatch still QUEUED whose step is no longer running (a worker died in
+        // the send and stale recovery sent the step to review) may have been sent. The row cannot be
+        // corrected: update_dispatch needs the step's live lease and update_dispatch_status takes only
+        // SENT, DELIVERED or FAILED. Show it as UNKNOWN rather than as waiting to be sent.
+        if (message && message.status === 'QUEUED' && typeof message.executionId === 'string') {
+          const step = (await db.query('select status from public.action_executions where id = $1 and business_id = $2', [message.executionId, businessId])).rows[0] as { status?: string } | undefined;
+          if (step?.status !== 'RUNNING' && step?.status !== 'QUEUED') message.status = 'UNKNOWN';
+        }
         const ready = typeof order.checkoutUrl === 'string' && typeof order.squarePaymentLinkId === 'string' && typeof order.squareOrderId === 'string';
         return { orderId: id, ready, environment: 'sandbox', ...(ready ? { checkoutUrl: order.checkoutUrl, qrText: order.checkoutUrl, squarePaymentLinkId: order.squarePaymentLinkId } : {}), ...(message ? { message } : {}) };
       }

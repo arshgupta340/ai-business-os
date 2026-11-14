@@ -22,8 +22,11 @@ export async function emitActivity(tx: QueryInterface, event: unknown): Promise<
   // Schemas remove unknown fields, including raw contact objects and card details.
   const candidate = ActivityEventSchema.parse(event);
   const safe = ActivityEventSchema.parse({ ...candidate, payload: redact(candidate.payload) });
+  // occurred_at takes the database clock, as the routines' own events do, so the feed keeps its order
+  // when the server clock drifts from the database's (live run 2026-11-14: about 7 seconds).
+  // clock_timestamp(), not now(): several events in one transaction keep their emit order.
   await tx.query(`insert into activity_events
     (id, business_id, type, correlation_id, actor_type, occurred_at, payload)
-    values ($1,$2,$3,$4,$5,$6,$7)`, [safe.id, safe.businessId, safe.type, safe.correlationId,
-    safe.actorType, safe.occurredAt, JSON.stringify(safe.payload)]);
+    values ($1,$2,$3,$4,$5,pg_catalog.clock_timestamp(),$6)`, [safe.id, safe.businessId, safe.type, safe.correlationId,
+    safe.actorType, JSON.stringify(safe.payload)]);
 }

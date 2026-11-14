@@ -57,7 +57,7 @@ export function createAgentPhoneWiring(deps: {
   const enabled = selected && !!ap && missing.length === 0;
   const liveAgent = dbLiveAgentPort(deps.db);
   const voice = enabled ? createAgentPhoneVoice({ db: deps.db, liveAgent, calls: deps.calls, toolsetFor: deps.toolsetFor, model: deps.model,
-    decisions: deps.decisions, now: deps.now, newId: deps.newId, ...(deps.turnTimeoutMs !== undefined ? { turnTimeoutMs: deps.turnTimeoutMs } : {}) }) : undefined;
+    decisions: deps.decisions, now: deps.now, newId: deps.newId, log: deps.log, ...(deps.turnTimeoutMs !== undefined ? { turnTimeoutMs: deps.turnTimeoutMs } : {}) }) : undefined;
 
   const off: FastifyPluginAsync = async (app) => {
     // Own parser scope: the body is never read. 503 tells the provider to retry later.

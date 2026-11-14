@@ -141,7 +141,14 @@ export function fakeCalendarClient() {
       return { data: { calendars: Object.fromEntries(input.requestBody.items.map((i) => [i.id, { busy: blocks }])) } };
     } },
     events: {
-      async list() { return { data: { items: [...events.values()].map((e): GoogleEvent => ({ id: e.id, status: 'confirmed', htmlLink: `https://calendar.example.test/${e.id}` })) } }; },
+      // Google returns only the events that carry every private property asked for (key=value).
+      async list(input) {
+        const wanted = (input.privateExtendedProperty ?? []).map((p) => { const at = p.indexOf('='); return [p.slice(0, at), p.slice(at + 1)] as const; });
+        const items = [...events.values()]
+          .filter((e) => wanted.every(([key, value]) => e.extendedProperties?.private?.[key] === value))
+          .map((e): GoogleEvent => ({ id: e.id, status: 'confirmed', htmlLink: `https://calendar.example.test/${e.id}` }));
+        return { data: { items } };
+      },
       async get({ eventId }) {
         const e = events.get(eventId);
         if (!e) throw Object.assign(new Error('not found'), { code: 404 });

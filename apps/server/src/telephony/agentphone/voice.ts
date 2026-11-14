@@ -46,6 +46,8 @@ export interface AgentPhoneVoiceDeps {
   decisions?: CallDecisionsPort | undefined;
   now(): Date;
   newId(prefix: string): string;
+  /** A refused tool is logged by name length only (shared runner). */
+  log?: { warn(data: Record<string, unknown>, msg: string): void } | undefined;
   /** Bound on one turn; AgentPhone's own default webhook timeout is 30 seconds. */
   turnTimeoutMs?: number;
 }

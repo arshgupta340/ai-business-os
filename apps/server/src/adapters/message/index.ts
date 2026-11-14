@@ -226,6 +226,8 @@ export function createMessageAdapter(config: MessageAdapterConfig): MessageAdapt
   }), (json) => acknowledged(json, 'sid', 'status', WHATSAPP.accepted, WHATSAPP.failed));
 }
 
+const OUTCOME_STATUSES: readonly string[] = ['SENT', 'DELIVERED', 'FAILED', 'UNKNOWN'];
+
 function existingResult(record: DispatchRecord): SendOnceResult {
   return { status: record.status, providerMessageId: record.providerMessageId, errorCode: record.errorCode, needsReview: record.status === 'UNKNOWN' || record.status === 'QUEUED' };
 }
@@ -237,6 +239,7 @@ export async function sendOnce(store: MessageStore, adapter: MessageAdapter, inp
   if (adapter.channel === 'qr_only') return { status: 'SKIPPED', needsReview: false };
   if (!E164Schema.safeParse(input.to).success || !IdempotencyKeySchema.safeParse(input.dispatchKey).success) return { ...invalid(), needsReview: false };
   const unknown = (): SendOnceResult => ({ ...unavailable('UNKNOWN'), needsReview: true });
+  let recorded = false;
   try {
     const existing = await store.findByKey(input.dispatchKey);
     if (existing) return existingResult(existing);
@@ -252,11 +255,13 @@ export async function sendOnce(store: MessageStore, adapter: MessageAdapter, inp
       const winner = await store.findByKey(input.dispatchKey);
       return winner ? existingResult(winner) : unknown();
     }
+    recorded = true;
     let result: SendResult;
     try { result = await adapter.send({ to: input.to, body: input.body, idempotencyKey: input.dispatchKey }); }
     catch { result = unavailable('UNKNOWN'); }
-    // A network adapter must not claim it skipped after the dispatch was recorded.
-    const outcome: DispatchOutcome = result.status === 'SKIPPED' ? unavailable('UNKNOWN') : result;
+    // A network adapter must not claim it skipped after the dispatch was recorded, and a status outside
+    // the contract is an unknown send (FLOWS 4), never stored as given.
+    const outcome: DispatchOutcome = result.status === 'SKIPPED' || !OUTCOME_STATUSES.includes(result.status) ? unavailable('UNKNOWN') : result;
     if (outcome.status === 'SENT' && !outcome.providerMessageId) {
       await store.recordOutcome(input.dispatchKey, unavailable('UNKNOWN'));
       return unknown();
@@ -264,7 +269,10 @@ export async function sendOnce(store: MessageStore, adapter: MessageAdapter, inp
     await store.recordOutcome(input.dispatchKey, outcome);
     return { ...outcome, needsReview: outcome.status === 'UNKNOWN' };
   } catch {
-    // Preserve the consumed attempt if storing the outcome fails. Never resend it.
+    // Preserve the consumed attempt if storing the outcome fails. Never resend it. A recorded dispatch
+    // whose outcome could not be stored is marked UNKNOWN (FLOWS 4) when the store still allows it,
+    // so it is not left QUEUED.
+    if (recorded) { try { await store.recordOutcome(input.dispatchKey, unavailable('UNKNOWN')); } catch { /* left for review */ } }
     return unknown();
   }
 }

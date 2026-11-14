@@ -135,18 +135,23 @@ export function useVoiceSession({businessId, thread, deps, mint = defaultMint, i
   // Re-render when a rate limit runs out, so the button enables again.
   const [, setTick] = useState(0);
   useEffect(() => {
-    if (current.retryAt === null) return;
-    const wait = current.retryAt - Date.now();
-    if (wait <= 0) return;
+    // retryAt is on the session's clock (deps.now), not necessarily Date.now.
+    const wait = sessionRef.current?.retryInMs() ?? null;
+    if (wait === null || wait <= 0) return;
     const handle = window.setTimeout(() => setTick((n) => n + 1), wait + 50);
     return () => window.clearTimeout(handle);
   }, [current.retryAt]);
+
+  const retryInMs = voice.retryInMs();
+  const retryInSeconds = retryInMs === null ? null : Math.ceil(retryInMs / 1000);
 
   const displayPhase: VoiceDisplayPhase = isConnected && thread.isSending ? 'sending' : current.phase;
 
   return {
     state: current,
     phase: displayPhase,
+    /** Seconds until voice may start again after a rate limit, or null. */
+    retryInSeconds,
     canStart: voice.canStart() && !!businessId && !!thread.sessionId,
     isActive: voice.isActive,
     start: useCallback(() => void sessionRef.current?.start(), []),
