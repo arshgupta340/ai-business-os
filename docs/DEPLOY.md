@@ -284,15 +284,18 @@ These are application code changes, not part of B-09. They are listed so the own
 - **`twilio` (default).** Unchanged: `/webhooks/twilio/voice` and `/ws/phone` answer calls through the Realtime relay. `/webhooks/agentphone` answers 503 and reads nothing.
 - **`agentphone`.** `/webhooks/agentphone` answers each caller turn with our agent (the same model and read and propose tools as sim-call, so it needs `OPENAI_API_KEY` and `OPENAI_BUILDER_MODEL`). `/webhooks/twilio/voice` answers 503. If an AgentPhone variable is missing, `/webhooks/agentphone` also answers 503, and the phone-line entry in integration health says `telephony provider agentphone: missing ...`.
 
+Before either AgentPhone setting (`TELEPHONY_PROVIDER=agentphone` or `MESSAGE_CHANNEL=agentphone`) is turned on, apply migration `0007_agentphone_channel.sql`. Run `npm run migrate -w @abos/db` with `DATABASE_URL` set to the owner (admin) database connection, not the runtime role's connection. Migration 0007 lets the database accept the `agentphone` value: it widens the channel check on message dispatches and the source check on webhook events, and lets an order or booking approval name `agentphone` as its message channel. If it is skipped, every AgentPhone webhook insert fails a check constraint. With `MESSAGE_CHANNEL=agentphone`, every `propose_order` and `propose_booking` also fails, so Twilio calls break too.
+
 To switch to AgentPhone:
-1. Set the four `AGENTPHONE_*` variables and `TELEPHONY_PROVIDER=agentphone` on the host, then redeploy.
-2. Run `npm run register-webhooks -- --agentphone-only --apply`, copy the new `AGENTPHONE_WEBHOOK_SECRET` to the host, and redeploy again. Setting the webhook rotates the secret, so run it only when the address changes.
-3. Publish the agent again from the dashboard. Publish binds the live agent to the selected provider's number (`AGENTPHONE_PHONE_NUMBER`); until then a call to the AgentPhone number hears "this number is not taking calls".
-4. Check `GET /api/integrations/health?refresh=1`: the phone-line entry should say `agentphone number readable`.
+1. Apply migration 0007 as described above. Do this first.
+2. Set the four `AGENTPHONE_*` variables and `TELEPHONY_PROVIDER=agentphone` on the host, then redeploy.
+3. Run `npm run register-webhooks -- --agentphone-only --apply`, copy the new `AGENTPHONE_WEBHOOK_SECRET` to the host, and redeploy again. Setting the webhook rotates the secret, so run it only when the address changes.
+4. Publish the agent again from the dashboard. Publish binds the live agent to the selected provider's number (`AGENTPHONE_PHONE_NUMBER`); until then a call to the AgentPhone number hears "this number is not taking calls".
+5. Check `GET /api/integrations/health?refresh=1`: the phone-line entry should say `agentphone number readable`.
 
 To switch back: set `TELEPHONY_PROVIDER=twilio` (or remove it), redeploy and publish again so the live agent points at `TWILIO_PHONE_NUMBER`. The Twilio console settings were never touched, so nothing needs re-registering on Twilio.
 
-Texting is separate: `MESSAGE_CHANNEL=agentphone` sends the approved checkout or booking message through AgentPhone with either telephony provider, once AgentPhone's 10DLC registration is approved. Its delivery status is read from AgentPhone's message history every minute; there is no receipt webhook. Integration health shows the message channel as connected only when AgentPhone reports outbound SMS `enabled` on the number; until then publish refuses an agent that sends messages.
+Texting is separate: apply migration 0007 first (see above), then `MESSAGE_CHANNEL=agentphone` sends the approved checkout or booking message through AgentPhone with either telephony provider, once AgentPhone's 10DLC registration is approved. Its delivery status is read from AgentPhone's message history every minute; there is no receipt webhook. Integration health shows the message channel as connected only when AgentPhone reports outbound SMS `enabled` on the number; until then publish refuses an agent that sends messages.
 
 ## Registering the webhooks with one command
 

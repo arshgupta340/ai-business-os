@@ -142,3 +142,7 @@ Vendor facts are in `docs/notes-agentphone.md`, each with its URL. None was test
 - **A dropped request (review of #105).** If AgentPhone closes a voice turn's request before the reply (whether it does on barge-in is not documented), the turn is abandoned like one past its bound: no further tool call, and its reply is not kept.
 - **Refusal causes in the log (review of #105).** A refused AgentPhone delivery logs one fixed cause: `mismatch`, `missing`, `stale`, `id_format`, `timestamp_format` or `routing_fields`. The ID patterns (`signature.ts`, `events.ts`), the list field names (`client.ts`) and the call-end status values are untested guesses, marked as such in the code. If the first live delivery answers 401 with `id_format` or 400 with `routing_fields`, widen the pattern.
 - **Web app.** `apps/web` has exhaustive `Record` maps of message channels and webhook providers (`integrations-view.ts`, `HealthSection.tsx`). The backend added the `agentphone` labels there with the owner's authorization while the UI lead was away; that commit changes nothing else in `apps/web`.
+
+## Migration 0007 not applied (2026-11-14)
+
+- Migration 0007 (`0007_agentphone_channel.sql`) is not applied to the live database yet. Keep `TELEPHONY_PROVIDER` and `MESSAGE_CHANNEL` off `agentphone` until it is (docs/DEPLOY.md, "Switching the telephony provider").

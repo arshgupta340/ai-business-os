@@ -66,10 +66,18 @@ describe("builder sessions", () => {
 
   it("createRealtimeClientSecret answers an ApiError the Build screen can fall back from when OpenAI is not configured", async () => {
     // No OpenAI key reaches the builder in this world, so no secret is minted and nothing goes to the network.
-    const err = (await rejection(api.createRealtimeClientSecret(PIZZA, { builderSessionId: sessionId }))) as ApiError;
+    // The session above was closed when its agent was created, so this uses an open one.
+    const open = await api.createBuilderSession(PIZZA);
+    const err = (await rejection(api.createRealtimeClientSecret(PIZZA, { builderSessionId: open.id }))) as ApiError;
     expect(err).toBeInstanceOf(ApiError);
     expect(err.kind).toBe("http");
     expect(err.code).toBe("INTEGRATION_UNAVAILABLE");
+  });
+
+  it("createRealtimeClientSecret on a session whose agent was created answers INVALID_STATE", async () => {
+    const err = (await rejection(api.createRealtimeClientSecret(PIZZA, { builderSessionId: sessionId }))) as ApiError;
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.code).toBe("INVALID_STATE");
   });
 });
 
