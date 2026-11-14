@@ -299,12 +299,13 @@ describe('voice plugin: every started call ends (issue #95 item 6)', () => {
   });
 
   it('a call whose stream connected in time is not ended by the expiry of its credential', async () => {
-    const t = await build({ tokenTtlMs: 60 });
+    // A life long enough for the stream to connect on a slow machine, then a wait past its end.
+    const t = await build({ tokenTtlMs: 500 });
     const token = tokenOf((await t.post()).body);
     const ws = await t.app.injectWS('/ws/phone');
     ws.send(JSON.stringify({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ1', customParameters: { streamToken: token } } }));
     await vi.waitFor(() => expect(t.openaiSocketFactory).toHaveBeenCalledTimes(1));
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 700));
     expect(t.calls.endCall).not.toHaveBeenCalled();
     ws.send(JSON.stringify({ event: 'stop' }));
     await vi.waitFor(() => expect(t.calls.endCall).toHaveBeenCalledWith('call_test_01', 'completed'));
