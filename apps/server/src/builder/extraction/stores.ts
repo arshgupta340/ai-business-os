@@ -1,6 +1,8 @@
-import { PIZZA_CATALOG } from '../fixtures';
-import type { BusinessFact, FactKind } from '../pending-contracts';
-import type { ExtractionActivityEvent, ExtractionState, FactConflict, FileRecord } from './types';
+import type { ActivityEventOf, BusinessFact, ExtractionState, FactConflict, FactKind, FileRecord } from '@abos/contracts';
+import { pizzaCatalogRows } from '@abos/contracts/fixtures';
+
+// The two events this module writes, as the package defines them.
+export type ExtractionActivityEvent = ActivityEventOf<'extraction.completed' | 'fact.changed'>;
 
 // Persistence for uploads, behind small interfaces. The in-memory versions
 // run until the database and Supabase Storage land (B-06). Each record is
@@ -164,8 +166,8 @@ export class InMemoryConflictStore implements ConflictStore {
 // ---------------------------------------------------------------------------
 // Catalog reader: one row per sellable variation, as in catalog_items
 // (DATA-MODEL.md 2.7). The real cache table belongs to the backend lead; the
-// fixture version derives rows from the temporary pizza catalog. Its `cat_`
-// IDs are made up here (`cat_` plus the lowercased Square variation ID).
+// fixture version reads the shared fixture rows (`pizzaCatalogRows`), so the
+// `cat_` IDs are the fixture ones (for example `cat_marg_lg`).
 
 export interface CatalogVariationRow {
   id: string; // cat_
@@ -184,18 +186,18 @@ export interface CatalogReader {
 
 export class FixtureCatalogReader implements CatalogReader {
   async listVariations(businessId: string): Promise<CatalogVariationRow[]> {
-    return PIZZA_CATALOG.filter((item) => item.businessId === businessId).flatMap((item) =>
-      item.variations.map((v) => ({
-        id: `cat_${v.id.toLowerCase()}`,
+    return pizzaCatalogRows
+      .filter((row) => row.businessId === businessId)
+      .map(({ id, squareItemId, squareVariationId, itemName, variationName, priceMinor, currency }) => ({
+        id,
         businessId,
-        squareItemId: item.squareItemId,
-        squareVariationId: v.id,
-        itemName: item.name,
-        variationName: v.name,
-        priceMinor: v.priceMinor,
-        currency: v.currency,
-      })),
-    );
+        squareItemId,
+        squareVariationId,
+        itemName,
+        variationName,
+        priceMinor,
+        currency,
+      }));
   }
 }
 

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import type { BusinessFact } from '../pending-contracts';
+import type { BusinessFact, FactConflict, FileRecord } from '@abos/contracts';
+import { assertContractEvent } from '../events';
 import type { BusinessKnowledge } from '../session/knowledge';
 import { isoZ } from '../time';
 import { apiError, newId } from '../util';
@@ -8,8 +9,8 @@ import { checkUpload, decodeCsv } from './file-check';
 import { ExtractorUnavailable, type DocumentExtractor, type ExtractionInput } from './model';
 import { sanitizeExtraction } from './sanitize';
 import { readXlsxRows, ROW_LIMITS } from './spreadsheet';
-import type { ActivityEventSink, CatalogReader, ConflictStore, FileStore, StoredFile, UploadFactStore } from './stores';
-import { XLSX_MIME, type ExtractionActivityEvent, type FactConflict, type FileRecord } from './types';
+import { XLSX_MIME } from './file-check';
+import type { ActivityEventSink, CatalogReader, ConflictStore, ExtractionActivityEvent, FileStore, StoredFile, UploadFactStore } from './stores';
 
 // Upload, extraction and conflict resolution (API.md 3.2 and 3.12).
 //
@@ -218,7 +219,9 @@ export class ExtractionService {
       payload: { fileId: stored.record.id, mime: stored.record.mime, extractionState, draftFactCount, conflictCount },
     };
     try {
-      await this.deps.events.write(event);
+      // Checked against the contract first: an event that does not match is
+      // never written, and the warning below is logged instead.
+      await this.deps.events.write(assertContractEvent(event));
     } catch {
       this.log.warn({ fileId: stored.record.id }, 'extraction.completed event was not written');
     }
@@ -266,7 +269,9 @@ export class ExtractionService {
           },
         };
         try {
-          await this.deps.events.write(event);
+          // Checked against the contract first: an event that does not match is
+          // never written, and the warning below is logged instead.
+          await this.deps.events.write(assertContractEvent(event));
         } catch {
           this.log.warn({ conflictId: conflict.id }, 'fact.changed event was not written');
         }

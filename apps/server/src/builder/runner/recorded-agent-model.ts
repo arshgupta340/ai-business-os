@@ -1,10 +1,18 @@
-import { TIMEZONE } from '../fixtures';
-import type { AvailabilitySlot, ToolOutput, ToolResult } from '../pending-contracts';
-import { isoZ, localDate, zonedToUtc } from '../time';
+import { SEEDED_TIMEZONE, type AvailabilitySlot, type ToolResult } from '@abos/contracts';
+import { serviceHaircut, SQ } from '@abos/contracts/fixtures';
+import { addDays, isoZ, localDate, zonedToUtc } from '../time';
 import { normalizeScriptText } from '../session/recorded-builder-model';
 import { whatICanDo } from './guardrails';
-import { businessDate } from './mock-toolset';
 import type { AgentModel, AgentTurnInput } from './agent-model';
+
+// Both seeded businesses use this timezone (SPEC 2.1).
+const TIMEZONE = SEEDED_TIMEZONE;
+const HAIRCUT = serviceHaircut.id;
+
+// A date in the business timezone, offsetDays after the local date of `now`.
+export function businessDate(now: Date, offsetDays = 0): string {
+  return addDays(localDate(now, TIMEZONE), offsetDays);
+}
 
 // Replays scripted agent turns for the test console and preview, used when
 // OPENAI_API_KEY is absent. Each script asks the runner for tools through
@@ -30,6 +38,26 @@ export const AGENT_SCRIPTS = {
 
 type Script = (input: AgentTurnInput) => Promise<string>;
 
+// The caller asks for tomorrow. The barbershop is closed on some days (Sunday
+// and Monday in the shared fixtures), so the script looks from tomorrow up to
+// six days on and takes the first day with open slots. Each day is one
+// availability call, so the trace shows every day it looked at.
+async function firstOpenDay(
+  executeTool: AgentTurnInput['executeTool'],
+  now: Date,
+  maxSlots: number,
+): Promise<{ date: string; offset: number; slots: AvailabilitySlot[] } | 'error' | undefined> {
+  for (let offset = 1; offset <= 7; offset += 1) {
+    const date = businessDate(now, offset);
+    const r = (await executeTool('read_calendar_availability', { serviceId: HAIRCUT, date, maxSlots })) as ToolResult<'read_calendar_availability'>;
+    if (!r.ok) return 'error';
+    if (r.slots.length > 0) return { date, offset, slots: r.slots };
+  }
+  return undefined;
+}
+
+const weekday = (date: string) => new Intl.DateTimeFormat('en-US', { timeZone: TIMEZONE, weekday: 'long' }).format(zonedToUtc(date, '12:00', TIMEZONE));
+
 const money = (minor: number) => `${Math.floor(minor / 100)} dollars and ${minor % 100} cents`;
 const clock = (iso: string) =>
   new Intl.DateTimeFormat('en-US', { timeZone: TIMEZONE, hour: 'numeric', minute: '2-digit' }).format(new Date(iso));
@@ -47,20 +75,20 @@ const orderRequest: Script = async ({ executeTool, tools }) => {
   if (!tools.includes('propose_order')) {
     return ['I cannot take orders on this call.', whatICanDo(tools)].filter(Boolean).join(' ');
   }
-  const r = (await executeTool('read_catalog', { query: 'large pepperoni' })) as ToolResult<ToolOutput['read_catalog']>;
+  const r = (await executeTool('read_catalog', { query: 'large pepperoni' })) as ToolResult<'read_catalog'>;
   if (!r.ok || r.items.length === 0) return 'I could not find pepperoni on the menu right now.';
   return 'One large pepperoni for pickup. Any extra toppings?';
 };
 
 const SCRIPTS: Record<string, Script> = {
   [AGENT_SCRIPTS.pizzaBrowse]: async ({ executeTool }) => {
-    const r = (await executeTool('read_catalog', { query: 'large pepperoni' })) as ToolResult<ToolOutput['read_catalog']>;
+    const r = (await executeTool('read_catalog', { query: 'large pepperoni' })) as ToolResult<'read_catalog'>;
     if (!r.ok || r.items.length === 0) return 'I could not find pepperoni on the menu right now.';
     return 'Two large pepperoni. Any extra toppings?';
   },
 
   [AGENT_SCRIPTS.pizzaHours]: async ({ executeTool, now }) => {
-    const r = (await executeTool('read_business_facts', { kinds: ['hours'] })) as ToolResult<ToolOutput['read_business_facts']>;
+    const r = (await executeTool('read_business_facts', { kinds: ['hours'] })) as ToolResult<'read_business_facts'>;
     if (!r.ok) return 'I cannot read the opening hours right now.';
     const day = new Intl.DateTimeFormat('en-US', { timeZone: TIMEZONE, weekday: 'short' }).format(now).toLowerCase().slice(0, 3);
     const today = r.facts.find((f) => f.key === day)?.value as { open?: string; close?: string; closed?: boolean } | undefined;
@@ -69,8 +97,8 @@ const SCRIPTS: Record<string, Script> = {
   },
 
   [AGENT_SCRIPTS.pizzaOrder]: async ({ executeTool, now }) => {
-    const cart = { lines: [{ catalogItemId: 'SQ_ITEM_PEP', variationId: 'SQ_VAR_PEP_LG', quantity: 2, modifierIds: [] }] };
-    const q = (await executeTool('quote_order', { cart })) as ToolResult<ToolOutput['quote_order']>;
+    const cart = { lines: [{ catalogItemId: SQ.itemPepperoni, variationId: SQ.varPepperoniLarge, quantity: 2, modifierIds: [] }] };
+    const q = (await executeTool('quote_order', { cart })) as ToolResult<'quote_order'>;
     if (!q.ok) return 'I could not price that order. Could you tell me the order again?';
     let pickup = zonedToUtc(localDate(now, TIMEZONE), '19:00', TIMEZONE);
     if (pickup.getTime() <= now.getTime()) pickup = zonedToUtc(businessDate(now, 1), '19:00', TIMEZONE);
@@ -79,14 +107,14 @@ const SCRIPTS: Record<string, Script> = {
       contact: { name: 'Sam', messageRecipient: '+15555550123', messageConsent: true, consentAt: isoZ(now) },
       fulfillment: { type: 'pickup', pickupAt: isoZ(pickup) },
       quoteId: q.quote.quoteId,
-    })) as ToolResult<ToolOutput['propose_order']>;
+    })) as ToolResult<'propose_order'>;
     const total = money(q.quote.totalMinor);
     if (!p.ok) return `Your total is ${total} with tax, but I could not send the order to the shop. ${p.message ?? ''}`.trim();
     return `Two large pepperoni come to ${total} with tax, for pickup at ${clock(isoZ(pickup))}. I sent the order to the shop for approval. Once they approve, the payment link will come by text.`;
   },
 
   [AGENT_SCRIPTS.faqHours]: async ({ executeTool }) => {
-    const r = (await executeTool('read_business_facts', { kinds: ['hours'] })) as ToolResult<ToolOutput['read_business_facts']>;
+    const r = (await executeTool('read_business_facts', { kinds: ['hours'] })) as ToolResult<'read_business_facts'>;
     if (!r.ok) return 'I cannot read the opening hours right now.';
     const sat = r.facts.find((f) => f.key === 'sat')?.value as { open?: string; close?: string; closed?: boolean } | undefined;
     if (!sat) return 'I do not have our Saturday hours. Please check with the shop.';
@@ -95,7 +123,7 @@ const SCRIPTS: Record<string, Script> = {
   },
 
   [AGENT_SCRIPTS.faqMenu]: async ({ executeTool }) => {
-    const r = (await executeTool('read_catalog', {})) as ToolResult<ToolOutput['read_catalog']>;
+    const r = (await executeTool('read_catalog', {})) as ToolResult<'read_catalog'>;
     if (!r.ok || r.items.length === 0) return 'I do not have a menu to read from right now.';
     const items = r.items.filter((i) => i.available);
     if (items.length === 0) return 'Nothing on the menu is available right now.';
@@ -109,27 +137,26 @@ const SCRIPTS: Record<string, Script> = {
   [AGENT_SCRIPTS.faqInjection]: orderRequest,
 
   [AGENT_SCRIPTS.barberAvailability]: async ({ executeTool, now }) => {
-    const r = (await executeTool('read_calendar_availability', { serviceId: 'svc_cut', date: businessDate(now, 1), maxSlots: 3 })) as ToolResult<
-      ToolOutput['read_calendar_availability']
-    >;
-    if (!r.ok) return 'I cannot read the calendar right now.';
-    if (r.slots.length === 0) return 'We have no open haircut times tomorrow. Would another day work?';
-    return `Tomorrow I have a haircut at ${r.slots.map((s) => clock(s.startUtc)).join(', ')}. Which time works for you?`;
+    const found = await firstOpenDay(executeTool, now, 3);
+    if (found === 'error') return 'I cannot read the calendar right now.';
+    if (!found) return 'We have no open haircut times this week. Please check with the shop.';
+    const times = found.slots.map((s) => clock(s.startUtc)).join(', ');
+    if (found.offset === 1) return `Tomorrow I have a haircut at ${times}. Which time works for you?`;
+    return `We are closed tomorrow. On ${weekday(found.date)} I have a haircut at ${times}. Which time works for you?`;
   },
 
   [AGENT_SCRIPTS.barberBook]: async ({ executeTool, now }) => {
-    const a = (await executeTool('read_calendar_availability', { serviceId: 'svc_cut', date: businessDate(now, 1), maxSlots: 1 })) as ToolResult<
-      ToolOutput['read_calendar_availability']
-    >;
-    const first: AvailabilitySlot | undefined = a.ok ? a.slots[0] : undefined;
-    if (!first) return 'That time is no longer open. Would you like another time?';
+    const found = await firstOpenDay(executeTool, now, 1);
+    const first: AvailabilitySlot | undefined = found && found !== 'error' ? found.slots[0] : undefined;
+    if (!found || found === 'error' || !first) return 'That time is no longer open. Would you like another time?';
     const p = (await executeTool('propose_booking', {
-      serviceId: 'svc_cut',
+      serviceId: HAIRCUT,
       startUtc: first.startUtc,
       customer: { name: 'Ana', messageRecipient: '+15555550124', messageConsent: true },
-    })) as ToolResult<ToolOutput['propose_booking']>;
+    })) as ToolResult<'propose_booking'>;
     if (!p.ok) return 'That time was just taken. Would you like another time?';
-    return `I sent a haircut at ${clock(first.startUtc)} tomorrow to the shop for approval. You will get a text once it is confirmed.`;
+    const day = found.offset === 1 ? 'tomorrow' : `on ${weekday(found.date)}`;
+    return `I sent a haircut at ${clock(first.startUtc)} ${day} to the shop for approval. You will get a text once it is confirmed.`;
   },
 };
 

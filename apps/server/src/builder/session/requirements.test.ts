@@ -1,10 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import type { BusinessFact } from '../pending-contracts';
+import type { BusinessFact } from '@abos/contracts';
 import { TEMPLATE_CAPABILITIES } from '../registry';
 import { FixtureBusinessKnowledge, type BusinessContext } from './knowledge';
 import { computeFieldStatus, requiredFields, stopConditions, suggestions } from './requirements';
 
 const knowledge = new FixtureBusinessKnowledge();
+
+// The shared fixtures already hold the consent and notice policies (seeded as
+// if an earlier interview had answered them). These tests remove them to show
+// how a missing field is found and then answered.
+async function contextWithout(businessId: string, keys: string[]): Promise<BusinessContext> {
+  const ctx = (await knowledge.getContext(businessId))!;
+  return { ...ctx, verifiedFacts: ctx.verifiedFacts.filter((f) => !(f.kind === 'policy' && keys.includes(f.key))) };
+}
 const pizzaSpec = { template: 'restaurant_order_taker' as const, capabilities: [...TEMPLATE_CAPABILITIES.restaurant_order_taker] };
 const barberSpec = { template: 'appointment_booker' as const, capabilities: [...TEMPLATE_CAPABILITIES.appointment_booker] };
 
@@ -33,22 +41,25 @@ describe('missing-field computation', () => {
   it('is the union of the capability requirements, without duplicates', () => {
     const fields = requiredFields(barberSpec);
     expect(fields).toContain('services');
-    expect(fields).toContain('policy.minimum_notice');
+    expect(fields).toContain('policy.min_notice');
     expect(fields.filter((f) => f === 'policy.message_consent')).toHaveLength(1);
   });
 
   it('subtracts verified facts and the catalog for the pizza shop', async () => {
-    const ctx = (await knowledge.getContext('biz_pizza_01'))!;
-    const status = computeFieldStatus({ ...pizzaSpec, name: 'A', goal: 'B' }, ctx, []);
+    const full = computeFieldStatus({ ...pizzaSpec, name: 'A', goal: 'B' }, (await knowledge.getContext('biz_pizza_01'))!, []);
+    expect(full.missing).toEqual([]);
+    expect(full.evidence).toContain('fact_pizza_policy_message_consent');
+    const status = computeFieldStatus({ ...pizzaSpec, name: 'A', goal: 'B' }, await contextWithout('biz_pizza_01', ['message_consent']), []);
     expect(status.missing).toEqual(['policy.message_consent']);
-    expect(status.evidence).toContain('fact_pz_policy_pickup_window');
+    expect(status.evidence).toContain('fact_pizza_policy_pickup_window');
   });
 
   it('counts a draft answer from this session as answered', async () => {
-    const ctx = (await knowledge.getContext('biz_barber_01'))!;
+    expect(computeFieldStatus({ ...barberSpec, name: 'A', goal: 'B' }, (await knowledge.getContext('biz_barber_01'))!, []).missing).toEqual([]);
+    const ctx = await contextWithout('biz_barber_01', ['min_notice', 'message_consent']);
     const before = computeFieldStatus({ ...barberSpec, name: 'A', goal: 'B' }, ctx, []);
-    expect(before.missing).toEqual(['policy.minimum_notice', 'policy.message_consent']);
-    const after = computeFieldStatus({ ...barberSpec, name: 'A', goal: 'B' }, ctx, [draft('biz_barber_01', 'policy', 'minimum_notice')]);
+    expect(before.missing).toEqual(['policy.min_notice', 'policy.message_consent']);
+    const after = computeFieldStatus({ ...barberSpec, name: 'A', goal: 'B' }, ctx, [draft('biz_barber_01', 'policy', 'min_notice')]);
     expect(after.missing).toEqual(['policy.message_consent']);
   });
 
@@ -67,7 +78,7 @@ describe('missing fields for the FAQ-only subset', () => {
   it('follow from the two read capabilities only', () => {
     const fields = requiredFields({ ...faqSpec, capabilities: [...faqSpec.capabilities] });
     expect(fields).toEqual(['name', 'goal', 'catalog.items', 'hours.mon', 'hours.tue', 'hours.wed', 'hours.thu', 'hours.fri', 'hours.sat', 'hours.sun']);
-    for (const f of ['policy.pickup_window', 'policy.special_requests', 'policy.message_consent', 'policy.minimum_notice', 'services']) {
+    for (const f of ['policy.pickup_window', 'policy.special_requests', 'policy.message_consent', 'policy.min_notice', 'services']) {
       expect(fields).not.toContain(f);
     }
   });

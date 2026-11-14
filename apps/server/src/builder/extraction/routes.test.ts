@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../../app';
 import { parseEnv } from '../../env';
 import { BARBER_ROWS, HOURS_CSV, INJECTION_TEXT, jpeg, multipartBody, pdf, PIZZA_MENU_TEXT, png, webp, xlsx } from './test-samples';
-import { MAX_UPLOAD_BYTES, XLSX_MIME } from './types';
+import { MAX_UPLOAD_BYTES, XLSX_MIME } from './file-check';
 
 // Route tests through buildApp and app.inject, on recorded extraction. The
 // OpenAI key is blanked and BUILDER_DEV_AUTH=1 opts in to the development
@@ -44,7 +44,8 @@ async function getFile(businessId: string, id: string) {
 async function waitExtracted(businessId: string, id: string) {
   for (let i = 0; i < 200; i++) {
     const res = await getFile(businessId, id);
-    const file = res.json().file;
+    // GET /api/files/:id answers the FileRecord itself (the package's getFile response).
+    const file = res.json();
     if (file.extractionState === 'EXTRACTED' || file.extractionState === 'FAILED') return file;
     await new Promise((r) => setTimeout(r, 5));
   }

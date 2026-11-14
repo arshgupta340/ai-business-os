@@ -1,4 +1,4 @@
-import type { AgentSpec, AgentStatus, AgentTemplate, BuilderSession, BusinessFact } from '../pending-contracts';
+import type { AgentSpec, AgentStatus, AgentTemplate, BuilderSession, BusinessFact } from '@abos/contracts';
 
 // Persistence behind small interfaces. The in-memory versions below are what
 // runs until the database lands (task B-06). Each record is shaped after its
@@ -7,7 +7,8 @@ import type { AgentSpec, AgentStatus, AgentTemplate, BuilderSession, BusinessFac
 // cross businesses.
 
 // builder_sessions (DATA-MODEL.md 2.12). `ownerId` is the owner_id column.
-export interface BuilderSessionRecord extends BuilderSession {
+// `progress` is computed on every read, so it is not stored.
+export interface BuilderSessionRecord extends Omit<BuilderSession, 'progress'> {
   ownerId: string;
 }
 

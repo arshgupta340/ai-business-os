@@ -5,7 +5,7 @@ import { buildApp } from '../../app';
 import { parseEnv } from '../../env';
 import { UnverifiedSeedOwnerAuth } from '../auth';
 import { builderPlugin } from '../index';
-import { ToolNameSchema } from '../pending-contracts';
+import { ToolNameSchema } from '@abos/contracts';
 import type { RealtimeMinter } from './minter';
 import { MINTS_PER_WINDOW } from './index';
 
