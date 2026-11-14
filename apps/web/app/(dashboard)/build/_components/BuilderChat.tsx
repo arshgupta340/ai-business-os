@@ -24,7 +24,7 @@ import {VStack} from '@astryxdesign/core/VStack';
 import type {BuilderMessage} from '@/lib/api';
 import {formatTime} from '@/lib/format';
 import {useBuilderThreadContext, type PendingTurn} from '../_hooks/useBuilderThread';
-import {EXAMPLE_PROMPTS} from '../_lib/spec';
+import {builderSendErrorView, EXAMPLE_PROMPTS} from '../_lib/spec';
 import {VoiceControl} from '../voice/VoiceControl';
 
 function MessageTime({iso, timeZone}: {iso: string; timeZone: string}) {
@@ -60,33 +60,21 @@ function Turn({message, timeZone}: {message: BuilderMessage; timeZone: string}) 
   );
 }
 
-function errorTitle(pending: Extract<PendingTurn, {status: 'failed'}>) {
-  return pending.error.code === 'INTEGRATION_UNAVAILABLE' ? 'The builder is not available right now' : 'Your message was not sent';
-}
-
-function errorDescription(pending: Extract<PendingTurn, {status: 'failed'}>) {
-  const {error} = pending;
-  if (error.code === 'INTEGRATION_UNAVAILABLE') {
-    const provider = typeof error.details?.provider === 'string' ? error.details.provider : 'The builder';
-    return `${provider} is not responding. Your message is kept below, so you can send it again.`;
-  }
-  return error.message;
-}
-
 function PendingOwnerTurn({pending, onRetry, onEdit}: {pending: PendingTurn; onRetry: () => void; onEdit: () => void}) {
   const failed = pending.status === 'failed' ? pending : null;
+  const view = failed ? builderSendErrorView(failed.error) : null;
   return (
     <ChatMessage sender="user" name="You">
       <ChatMessageBubble metadata={<ChatMessageMetadata status={failed ? 'error' : 'sending'} />}>{pending.text}</ChatMessageBubble>
-      {failed ? (
+      {failed && view ? (
         <ChatMessageBubble variant="ghost" width="100%">
           <Banner
-            status={failed.error.code === 'INTEGRATION_UNAVAILABLE' ? 'warning' : 'error'}
-            title={errorTitle(failed)}
-            description={errorDescription(failed)}
+            status={view.tone}
+            title={view.title}
+            description={view.description}
             endContent={
               <HStack gap={2} wrap="wrap">
-                {failed.error.retryable ? <Button label="Try again" variant="primary" size="sm" onClick={onRetry} /> : null}
+                {view.canRetry ? <Button label="Try again" variant="primary" size="sm" onClick={onRetry} /> : null}
                 <Button label="Edit message" size="sm" onClick={onEdit} />
               </HStack>
             }>

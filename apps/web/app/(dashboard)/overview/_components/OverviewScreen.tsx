@@ -11,6 +11,7 @@ import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {EmptyState} from '@/components/EmptyState';
 import {PageHeader} from '@/components/PageHeader';
+import {RefreshFailedNotice} from '@/components/RefreshFailedNotice';
 import {useActivityFeed, type ActivityFeedStatus} from '@/lib/api';
 import {useBusiness} from '@/lib/session';
 import {ActivitySection} from './ActivitySection';
@@ -47,6 +48,7 @@ export function OverviewScreen() {
   return (
     <VStack gap={6}>
       <PageHeader title="Overview" description={`${business.name}, times in ${timeZone}`} />
+      <RefreshFailedNotice businessId={businessId} />
       {feedNote ? <Text type="supporting">{feed.source === 'mock' ? `${feedNote} Mock data.` : feedNote}</Text> : null}
 
       <TodaySection businessId={businessId} timeZone={timeZone} />

@@ -191,6 +191,67 @@ describe('Build an Agent', () => {
     expect(screen.queryByText('The builder is not available right now')).toBeNull();
   });
 
+  it('after "session changed, send it again" it refetches the session, keeps it and offers Try again', async () => {
+    let failOnce = true;
+    server.use(
+      http.post(`${A}/builder/sessions/:id/messages`, () => {
+        if (!failOnce) return undefined;
+        failOnce = false;
+        return HttpResponse.json(
+          {
+            code: 'INVALID_STATE',
+            message: 'This builder session changed while the message was handled. Send it again.',
+            correlationId: 'cor_changed',
+            retryable: false,
+            details: {state: 'active'},
+          },
+          {status: 409},
+        );
+      }),
+    );
+    renderScreen();
+    await screen.findByText('What would you like an agent to do for your business?');
+    const sessionSearch = nav.get();
+    const sessionReads = () => requests.filter((r) => r.method === 'GET' && /\/api\/builder\/sessions\/bld_[^/]+$/.test(new URL(r.url).pathname));
+    const readsBefore = sessionReads().length;
+    await send('I run a pizza shop and want an AI that takes pickup orders');
+    expect(await screen.findByText('Send your message again')).toBeTruthy();
+    expect(screen.getByText(/Your message was not lost/)).toBeTruthy();
+    await waitFor(() => expect(sessionReads().length).toBeGreaterThan(readsBefore));
+    // The session is kept: same URL, no new session.
+    expect(nav.get()).toBe(sessionSearch);
+    expect(createCalls()).toHaveLength(1);
+    await clickButton('Try again');
+    expect(await screen.findByText(/latest pickup time/)).toBeTruthy();
+    expect(screen.queryByText('Send your message again')).toBeNull();
+    expect(messageCalls()).toHaveLength(2);
+  });
+
+  it('after a closed session it says so, refetches it and offers no Try again', async () => {
+    server.use(
+      http.post(`${A}/builder/sessions/:id/messages`, () =>
+        HttpResponse.json(
+          {code: 'INVALID_STATE', message: 'This builder session is closed.', correlationId: 'cor_closed', retryable: true, details: {state: 'completed'}},
+          {status: 409},
+        ),
+      ),
+    );
+    renderScreen();
+    await screen.findByText('What would you like an agent to do for your business?');
+    const sessionSearch = nav.get();
+    const sessionReads = () => requests.filter((r) => r.method === 'GET' && /\/api\/builder\/sessions\/bld_[^/]+$/.test(new URL(r.url).pathname));
+    const readsBefore = sessionReads().length;
+    await send('Take pickup orders');
+    expect(await screen.findByText('This builder session is closed')).toBeTruthy();
+    expect(screen.getByText(/Start a new session to keep building/)).toBeTruthy();
+    // Even though the server marked it retryable, a closed session takes no more messages.
+    expect(screen.queryByRole('button', {name: 'Try again'})).toBeNull();
+    expect(screen.getByRole('button', {name: 'Edit message'})).toBeTruthy();
+    await waitFor(() => expect(sessionReads().length).toBeGreaterThan(readsBefore));
+    expect(nav.get()).toBe(sessionSearch);
+    expect(createCalls()).toHaveLength(1);
+  });
+
   it('lists stop conditions and keeps Continue disabled even with nothing missing', async () => {
     server.use(
       http.post(`${A}/builder/sessions/:id/messages`, ({params}) =>
@@ -210,7 +271,66 @@ describe('Build an Agent', () => {
     await send('Take pickup orders');
     expect(await screen.findByText('This draft is blocked')).toBeTruthy();
     expect(screen.getByText('The business has no timezone.')).toBeTruthy();
+    expect(screen.getByRole('link', {name: 'Open Settings'}).getAttribute('href')).toBe('/settings');
     expect(screen.getByRole('button', {name: 'Continue'}).getAttribute('aria-disabled')).toBe('true');
+  });
+
+  it('collapses required answers into one line, lists publish-only issues apart, and keeps Continue on', async () => {
+    const errors: unknown[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args) => void errors.push(args));
+    // After the turn the session read is the real server's: every question answered.
+    let answered = false;
+    server.use(
+      http.get(`${A}/builder/sessions/:id`, ({params}) => {
+        if (!answered) return undefined;
+        const at = '2026-11-13T19:00:00Z';
+        const sessionId = String(params.id);
+        return HttpResponse.json({
+          id: sessionId,
+          businessId: PIZZA,
+          status: 'active',
+          messages: [
+            {id: 'bmsg_o', sessionId, role: 'owner', inputMode: 'text', text: 'Take pickup orders', createdAt: at},
+            {id: 'bmsg_y', sessionId, role: 'assistant', inputMode: 'text', text: 'All answered.', createdAt: at},
+          ],
+          draftSpec: {template: 'restaurant_order_taker', name: 'Pizza Order Assistant'},
+          missingFields: [],
+          progress: {answered: 6, required: 6},
+          createdAt: at,
+          updatedAt: at,
+        });
+      }),
+      http.post(`${A}/builder/sessions/:id/messages`, ({params}) => {
+        answered = true;
+        return HttpResponse.json({
+          reply: {id: 'bmsg_y', sessionId: String(params.id), role: 'assistant', inputMode: 'text', text: 'All answered.', createdAt: '2026-11-13T19:00:00Z'},
+          draftSpec: {template: 'restaurant_order_taker', name: 'Pizza Order Assistant'},
+          missingFields: [],
+          suggestions: [],
+          stopConditions: [
+            {code: 'missing_required_fact'},
+            {code: 'missing_required_fact'},
+            {code: 'empty_catalog'},
+            {code: 'missing_required_fact'},
+          ],
+          progress: {answered: 6, required: 6},
+          unsupportedRequests: [],
+        });
+      }),
+    );
+    renderScreen();
+    await screen.findByText('What would you like an agent to do for your business?');
+    await send('Take pickup orders');
+    expect(await screen.findByText('Needed before you publish')).toBeTruthy();
+    expect(screen.getAllByText('3 required answers are not confirmed yet. Confirm each one in the chat or in Approvals.')).toHaveLength(1);
+    expect(screen.getByText(/The catalog has no items/)).toBeTruthy();
+    expect(screen.getByRole('link', {name: 'Open Approvals'}).getAttribute('href')).toBe('/approvals');
+    expect(screen.getByRole('link', {name: 'Open Business Knowledge'}).getAttribute('href')).toBe('/knowledge');
+    expect(screen.queryByText('This draft is blocked')).toBeNull();
+    expect(screen.queryByText(/block the draft/)).toBeNull();
+    await waitFor(() => expect(screen.getByRole('button', {name: 'Continue'}).getAttribute('aria-disabled')).not.toBe('true'));
+    expect(errors.filter((e) => String(e).includes('same key'))).toEqual([]);
+    spy.mockRestore();
   });
 
   it('enables Continue after the full interview, creates the draft and goes to the preview', async () => {

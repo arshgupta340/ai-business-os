@@ -27,7 +27,8 @@ function CallsTile({businessId, timeZone}: {businessId: string; timeZone: string
   let body;
   if (calls.isPending) {
     body = <LoadingState label="Loading calls" />;
-  } else if (calls.error) {
+  } else if (!calls.data) {
+    // No data at all: the first load failed. A failed refetch keeps the old data and the page header says so.
     body = <BlockError title="Could not load calls" error={calls.error} onRetry={() => void calls.refetch()} />;
   } else {
     const summary = summarizeCalls(calls.data.items, since);
@@ -83,7 +84,8 @@ function ApprovalsTile({businessId}: {businessId: string}) {
   let body;
   if (approvals.isPending) {
     body = <LoadingState label="Loading approvals" />;
-  } else if (approvals.error) {
+  } else if (!approvals.data) {
+    // No data at all: the first load failed. A failed refetch keeps the old data and the page header says so.
     body = (
       <BlockError title="Could not load approvals" error={approvals.error} onRetry={() => void approvals.refetch()} />
     );

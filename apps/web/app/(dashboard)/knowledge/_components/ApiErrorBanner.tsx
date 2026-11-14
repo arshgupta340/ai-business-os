@@ -4,7 +4,24 @@ import {Banner} from '@astryxdesign/core/Banner';
 import {Button} from '@astryxdesign/core/Button';
 import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
+import {PROVIDER_LABELS} from '@/components/shell/ConnectionHealth';
 import {isApiError} from '@/lib/api';
+
+/**
+ * The real server's answer to POST /api/conflicts/:id/resolve for a conflict
+ * that lives only in the database: INTEGRATION_UNAVAILABLE with
+ * details.use naming facts/propose with resolvesConflictId
+ * (apps/server/src/app.ts on origin/arsh/integration). It is not an outage,
+ * so a retry would get the same answer.
+ */
+export function isResolveOnFactsList(error: unknown): boolean {
+  return (
+    isApiError(error) &&
+    error.code === 'INTEGRATION_UNAVAILABLE' &&
+    typeof error.details?.use === 'string' &&
+    error.details.use.includes('resolvesConflictId')
+  );
+}
 
 /** Owner-facing text for an error from the API layer (screen data map, "Rules every screen follows" 9). */
 export function errorText(error: unknown): string {
@@ -17,7 +34,11 @@ export function errorText(error: unknown): string {
     case 'ENVIRONMENT_MISMATCH':
       return 'Square is not in sandbox. Payment work is refused.';
     case 'INTEGRATION_UNAVAILABLE': {
-      const provider = typeof error.details?.provider === 'string' ? error.details.provider : 'A provider';
+      if (isResolveOnFactsList(error)) {
+        return 'This server resolves this conflict with a change that you confirm in Approvals. Nothing changed yet.';
+      }
+      const raw = typeof error.details?.provider === 'string' ? error.details.provider : null;
+      const provider = raw ? ((PROVIDER_LABELS as Record<string, string>)[raw] ?? raw) : 'A provider';
       return `${provider} is not responding.`;
     }
     case 'VALIDATION_FAILED': {
@@ -42,7 +63,8 @@ export function ApiErrorBanner({
   title?: string;
   onRetry?: () => void;
 }) {
-  const retryable = isApiError(error) ? error.retryable : true;
+  // A conflict resolved from the facts list gets the same answer on every retry.
+  const retryable = isApiError(error) ? error.retryable && !isResolveOnFactsList(error) : true;
   const correlationId = isApiError(error) ? error.correlationId : undefined;
   return (
     <Banner

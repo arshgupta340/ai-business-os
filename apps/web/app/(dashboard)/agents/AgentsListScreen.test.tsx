@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
-import {cleanup, render, screen} from '@testing-library/react';
+import {act, cleanup, fireEvent, render, screen, waitFor} from '@testing-library/react';
 import {http, HttpResponse} from 'msw';
 import {useState, type ReactNode} from 'react';
+import {QueryClient} from '@tanstack/react-query';
 import {QueryClientProvider} from '@tanstack/react-query';
 import {afterEach, beforeAll, describe, expect, it} from 'vitest';
 import {createApiQueryClient} from '@/lib/api';
 import {BusinessProvider} from '@/lib/session';
 import {BUSINESS_STORAGE_KEY} from '@/lib/session/business-selection';
-import {server} from '@/mocks/server';
+import {mockControls, server} from '@/mocks/server';
 import {TEST_BASE_URL, useMockServer} from '@/mocks/test-setup';
 import {AgentsListScreen} from './_components/AgentsListScreen';
 
@@ -22,8 +23,11 @@ afterEach(() => {
   window.localStorage.clear();
 });
 
+let lastClient: QueryClient | null = null;
+
 function Providers({children}: {children: ReactNode}) {
   const [client] = useState(createApiQueryClient);
+  lastClient = client;
   return (
     <QueryClientProvider client={client}>
       <BusinessProvider>{children}</BusinessProvider>
@@ -82,5 +86,26 @@ describe('AgentsListScreen', {timeout: 20_000}, () => {
     expect(await screen.findByText('Could not load your agents', undefined, {timeout: 10_000})).toBeTruthy();
     expect(screen.getByText('Unexpected server error.')).toBeTruthy();
     expect(screen.getByRole('button', {name: 'Try again'})).toBeTruthy();
+  });
+
+  it('keeps the list when a background refetch fails, says so in one line, and Try again refreshes', async () => {
+    renderList();
+    await screen.findByText('Pizza Order Assistant answers the phone number.');
+    expect(screen.queryByText('Could not refresh. Showing the last data we have.')).toBeNull();
+    mockControls.simulateRequestFailure?.({path: '/api/agents'});
+    await act(async () => {
+      await lastClient!.refetchQueries({type: 'active'});
+    });
+    expect(await screen.findByText('Could not refresh. Showing the last data we have.', {}, {timeout: 10_000})).toBeTruthy();
+    // The old list stays on screen, with no full error in its place.
+    expect(screen.getByRole('link', {name: /Pizza FAQ Line/})).toBeTruthy();
+    expect(screen.queryByText('Could not load your agents')).toBeNull();
+
+    mockControls.clearRequestFailures?.();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', {name: 'Try again'}));
+    });
+    await waitFor(() => expect(screen.queryByText('Could not refresh. Showing the last data we have.')).toBeNull());
+    expect(screen.getByRole('link', {name: /Pizza FAQ Line/})).toBeTruthy();
   });
 });
