@@ -1,20 +1,28 @@
 import { z } from 'zod';
 import { AgentSpecSchema, type AgentSpec, type AgentStatus } from './pending-contracts';
 import { validateCapabilitySet } from './registry';
+import { toVersionView, type AgentVersionRecord, type AgentVersionView } from './publish/stores';
 import type { AgentDraftStore, AgentRecord, BuilderSessionStore } from './session/stores';
 import { apiError, newId } from './util';
 
 // Agent drafts (API.md 3.4, the B-16 part: create, read, list). Publish, pause,
-// versions and rollback are task B-17. The seams it needs are here:
-// AgentRecord.state and activeVersionId, AgentDraftStore.update, and the
-// LiveAgentReader below.
+// versions and rollback are in publish/ (B-17, B-27). This file only reads
+// what they write: the live-agent pointer through LiveAgentReader, and the
+// active version through ActiveVersionReader.
 
 // Reads whether an agent answers the phone number. The live_agent table and
-// its route are Arsh's (SPEC 2.9). Until that exists nothing is live.
+// its route are Arsh's (SPEC 2.9). The plugin wires this to the publish
+// module's LiveAgentStore.
 export interface LiveAgentReader {
   isLiveAgent(businessId: string, agentId: string): Promise<boolean>;
 }
 export const noLiveAgent: LiveAgentReader = { isLiveAgent: async () => false };
+
+// Reads one published version (agent_versions). The publish module's
+// AgentVersionStore fits this.
+export interface ActiveVersionReader {
+  get(businessId: string, id: string): Promise<AgentVersionRecord | undefined>;
+}
 
 export interface AgentSummary {
   id: string;
@@ -23,6 +31,7 @@ export interface AgentSummary {
   template: AgentRecord['template'];
   state: AgentStatus;
   activeVersionId?: string;
+  activeVersion?: AgentVersionView;
   draftSpec: AgentSpec;
   isLiveAgent: boolean;
   createdAt: string;
@@ -39,6 +48,7 @@ export interface AgentServiceDeps {
   agents: AgentDraftStore;
   sessions: BuilderSessionStore;
   liveAgent: LiveAgentReader;
+  activeVersions?: ActiveVersionReader;
   now: () => Date;
 }
 
@@ -120,6 +130,7 @@ export class AgentService {
   }
 
   async summary(agent: AgentRecord): Promise<AgentSummary> {
+    const active = agent.activeVersionId && this.deps.activeVersions ? await this.deps.activeVersions.get(agent.businessId, agent.activeVersionId) : undefined;
     return {
       id: agent.id,
       businessId: agent.businessId,
@@ -127,6 +138,7 @@ export class AgentService {
       template: agent.template,
       state: agent.state,
       ...(agent.activeVersionId ? { activeVersionId: agent.activeVersionId } : {}),
+      ...(active ? { activeVersion: toVersionView(active) } : {}),
       draftSpec: agent.draftSpec,
       isLiveAgent: await this.deps.liveAgent.isLiveAgent(agent.businessId, agent.id),
       createdAt: agent.createdAt,

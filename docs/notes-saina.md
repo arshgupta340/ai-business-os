@@ -160,3 +160,25 @@ An open required conflict from an upload reaches the builder interview as the `o
 - The real OpenAI path has never run. The request shapes for file and image input come from the official docs and are tested against a fake client.
 - The recorded outputs were written by hand. A document is recognized by a marker phrase, so an unknown document extracts to zero facts until there is a key.
 - New dependency `exceljs` pulls in `uuid@8`, which `npm audit` flags as moderate. The advisory is about a caller-supplied buffer, which exceljs does not use.
+
+## B-17 publish, pause and versions, and B-27 rollback (2026-11-13)
+
+Routes: `POST /api/agents/:id/publish`, `POST /api/agents/:id/pause`, `GET /api/agents/:id/versions`, `POST /api/agents/:id/rollback`. Everything is in `apps/server/src/builder/publish`. The version store, the live-agent pointer, the event sink and the catalog sync are in-memory or do-nothing stand-ins behind interfaces, passed through `options.publish`, until the database and the Square adapter are wired in.
+
+A published version is a deep frozen copy of the spec. No code path updates or deletes one. One publish runs at a time per agent (an in-memory lock, so it holds for one server process only).
+
+### Choices made where the docs were silent
+
+- Publish does not require owner chat answers to be verified. No publish rule asks for it. Open question for Arsh: the deployed agent reads verified facts only, so an answer given in the builder chat is never seen by the agent unless a `fact_edit` confirms it.
+- Publishing a live agent with an unchanged draft writes a new version. API.md covers only the paused case, where no new version is written.
+- Pause is allowed only from `live` and does not change which agent answers the number (API.md: "The `live_agent` row does not change").
+- Rollback follows API.md 3.4 and DATA-MODEL 2.10: it points the active version back at the earlier one and writes no row. A paused agent goes live on rollback, and the draft spec is not changed. API.md is silent on both.
+- `makeLive` defaults to false. If the agent already answers the number, the number follows its new version even with `makeLive: false`.
+- Publish runs the catalog sync on every call, then the conflict check, then spec validation, in the order API.md lists them. The other stop conditions in FLOWS (missing price, missing time zone, an integration down) are not checked at publish. Open question for Arsh.
+- The phone number is included in the publish response only when the agent answers it afterwards. Pause returns `{ agent }`.
+- Events use the `agt_` ID as `correlationId` and `actorType: "owner"`.
+- With no `TWILIO_PHONE_NUMBER`, the in-memory pointer uses the example number from API.md 3.6.
+
+### Not verified
+
+- No database, no real Square sync, no real live-agent table or route.
