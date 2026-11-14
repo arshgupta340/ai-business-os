@@ -142,6 +142,15 @@ export function dbFileStore(db: Db, options: { abandonedAfterMs?: number } = {})
 
 // ---------- draft business_facts from uploads ----------
 
+// ORDER. The builder's in-memory stores return facts and conflicts in the order they were saved, and
+// callers rely on it (`conflictIds[0]` is the first conflict an extraction opened). The tables have no
+// sequence column, the builder's timestamps have whole seconds and its IDs are random, so "order by
+// the builder's created_at, id" is a random order within one extraction. Upload facts and conflicts
+// therefore take created_at from the database clock at insert, as the events do, and never a time at
+// or before the last row saved (of the same file for a fact, of the same business for a conflict):
+// a clock can answer two statements with the same instant. One extraction saves its rows one
+// statement after another, so within it created_at is the save order.
+
 function factFromRow(r: Row): BusinessFact {
   return {
     id: String(r.id), businessId: String(r.business_id), kind: r.kind as BusinessFact['kind'], key: String(r.key), value: r.value as BusinessFact['value'],
@@ -162,10 +171,13 @@ export function dbUploadFactStore(db: Db): UploadFactStore {
       if (f.status !== 'draft') throw new Error('Uploads write draft facts only.');
       if (f.sourceType !== 'upload' || !f.fileId) throw new Error('An upload fact needs sourceType "upload" and a fileId.');
       // The file must be a file of the same business: the row is inserted only when that holds.
-      const r = await db.query(`insert into public.business_facts (id, business_id, kind, key, value, source_type, source_ref, file_id, status, confidence, version, created_at, updated_at)
-        select $1,$2,$3,$4,$5::jsonb,'upload',$6,$7,'draft',$8,$9,$10,$11
+      // created_at and updated_at: the database clock, and always after the file's last fact (see ORDER above).
+      const r = await db.query(`with t as (select greatest(pg_catalog.clock_timestamp(),
+          (select max(created_at) + interval '1 microsecond' from public.business_facts where business_id = $2 and file_id = $7)) as at)
+        insert into public.business_facts (id, business_id, kind, key, value, source_type, source_ref, file_id, status, confidence, version, created_at, updated_at)
+        select $1,$2,$3,$4,$5::jsonb,'upload',$6,$7,'draft',$8,$9,t.at,t.at from t
         where exists (select 1 from public.files where id = $7 and business_id = $2) returning id`,
-      [f.id, f.businessId, f.kind, f.key, json(f.value), f.sourceRef ?? null, f.fileId, f.confidence, f.version, f.createdAt, f.updatedAt]);
+      [f.id, f.businessId, f.kind, f.key, json(f.value), f.sourceRef ?? null, f.fileId, f.confidence, f.version]);
       if (r.rows.length === 0) throw new Error(`unknown file ${f.fileId}`);
     },
     async get(businessId, id) {
@@ -216,9 +228,10 @@ export function dbConflictStore(db: Db): ConflictStore {
   return {
     async insert(c) {
       await db.query(`insert into public.fact_conflicts (id, business_id, kind, key, candidates, required, state, resolved_fact_id, resolved_by, resolved_at, created_at)
-        values ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11)
+        values ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10, greatest(pg_catalog.clock_timestamp(),
+          (select max(created_at) + interval '1 microsecond' from public.fact_conflicts where business_id = $2)))
         on conflict (business_id, kind, key) where state = 'open' do nothing`,
-      [c.id, c.businessId, c.kind, c.key, JSON.stringify(c.candidates), c.required, c.state, c.resolvedFactId ?? null, c.resolvedBy ?? null, c.resolvedAt ?? null, c.createdAt]);
+      [c.id, c.businessId, c.kind, c.key, JSON.stringify(c.candidates), c.required, c.state, c.resolvedFactId ?? null, c.resolvedBy ?? null, c.resolvedAt ?? null]);
     },
     async get(businessId, id) {
       return (await list('select * from public.fact_conflicts where id = $1 and business_id = $2', [id, businessId]))[0];
