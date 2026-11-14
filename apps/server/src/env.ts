@@ -20,10 +20,32 @@ export function loadEnvFile(): void {
   if (file) process.loadEnvFile(file);
 }
 
-// Only what the skeleton needs. Each feature task adds its own variables here
-// and marks them required once the feature cannot run without them.
-// Names are defined in docs/SPEC.md section 3.3.
+// Integration variables stay optional at startup. Routes report unavailable
+// integrations when needed. Names are defined in docs/SPEC.md section 3.3.
 const EnvSchema = z.object({
+  DATABASE_URL: z.url().optional(),
+  SUPABASE_URL: z.url().optional(),
+  SUPABASE_ANON_KEY: z.string().min(1).optional(),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
+  WEB_ORIGIN: z.url().optional(),
+  OPENAI_API_KEY: z.string().min(1).optional(),
+  OPENAI_BUILDER_MODEL: z.string().min(1).optional(),
+  OPENAI_REALTIME_MODEL: z.string().min(1).optional(),
+  SQUARE_ACCESS_TOKEN: z.string().min(1).optional(),
+  SQUARE_LOCATION_ID: z.string().min(1).optional(),
+  SQUARE_WEBHOOK_SIGNATURE_KEY: z.string().min(1).optional(),
+  SQUARE_WEBHOOK_URL: z.url().optional(),
+  TWILIO_ACCOUNT_SID: z.string().min(1).optional(),
+  TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
+  TWILIO_PHONE_NUMBER: z.string().regex(/^\+[1-9][0-9]{6,14}$/).optional(),
+  MESSAGE_CHANNEL: z.enum(['surge', 'android_gateway', 'whatsapp_sandbox', 'qr_only']).optional(),
+  SURGE_API_KEY: z.string().min(1).optional(),
+  SURGE_ACCOUNT_ID: z.string().min(1).optional(),
+  ANDROID_GATEWAY_URL: z.url().optional(),
+  ANDROID_GATEWAY_API_KEY: z.string().min(1).optional(),
+  GOOGLE_SERVICE_ACCOUNT_JSON: z.string().min(1).optional(),
+  GOOGLE_CALENDAR_ID: z.string().min(1).optional(),
+  GOOGLE_SHEET_ID: z.string().min(1).optional(),
   PORT: z.coerce.number().int().positive().default(4000),
   PUBLIC_SERVER_URL: z.url().optional(),
   // AC-19: this build is sandbox only. Any other value stops the server.
