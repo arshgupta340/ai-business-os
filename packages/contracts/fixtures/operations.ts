@@ -7,6 +7,7 @@ import {
   type OrderCheckout,
   type Page,
   type TelemetryResponse,
+  type SyncJob,
 } from '../src/index';
 import { messageDispatches } from './executions';
 import { orderAwaitingApproval, orderFulfilled, orderPaid, orderPaymentPending } from './orders';
@@ -23,6 +24,22 @@ export const integrationHealth = {
   google_sheets: { state: 'connected', lastCheckedAt: CHECKED_AT },
   message_channel: { state: 'connected', channel: 'surge', detail: '18 of 25 demo messages left', lastCheckedAt: CHECKED_AT },
 } satisfies IntegrationHealth;
+
+export const integrationHealthDisconnected: IntegrationHealth = {
+  ...integrationHealth, google_sheets: { state: 'disconnected', lastCheckedAt: CHECKED_AT, detail: 'Reconnect Google Sheets to resume sync.' },
+};
+export const syncJobRetrying: SyncJob = {
+  id: 'syn_demo_88', businessId: PIZZA_BUSINESS_ID, target: 'google_sheets', recordType: 'order', recordId: orderPaid.id,
+  state: 'RETRYING', attempts: 2, nextRetryAt: '2026-11-14T20:32:00Z', lastError: 'Google Sheets is disconnected.',
+  createdAt: '2026-11-14T19:24:00Z', updatedAt: CHECKED_AT,
+};
+export const syncJobs: SyncJob[] = [syncJobRetrying];
+
+/** A resolution response event. Keeping Square supersedes the draft without creating a new fact version. */
+export const factConflictResolvedEvent: ActivityEvent = {
+  id: 'evt_conflict_resolved_88', businessId: PIZZA_BUSINESS_ID, type: 'fact.changed', correlationId: 'cfl_pizza_01', actorType: 'owner', occurredAt: '2026-11-14T20:31:00Z',
+  payload: { factId: 'fact_pizza_menu_marg_lg_d1', kind: 'menu_item', key: 'margherita_large', fromVersion: 1, toVersion: 1, sourceType: 'upload', resolvedConflictId: 'cfl_pizza_01' },
+};
 
 function checkoutFor(order: typeof orderPaymentPending): OrderCheckout {
   if (order.checkoutUrl === undefined) return { orderId: order.id, ready: false, environment: 'sandbox' };
@@ -77,6 +94,7 @@ export const otherActivityEvents = [
 
 /** Every stored event, oldest first. */
 export const allActivityEvents: ActivityEvent[] = [
+  factConflictResolvedEvent,
   ...pizzaOrderTimeline.entries.map((e) => e.event),
   ...barberBookingTimeline.entries.map((e) => e.event),
   ...barberSlotConflictTimeline.entries.map((e) => e.event),
