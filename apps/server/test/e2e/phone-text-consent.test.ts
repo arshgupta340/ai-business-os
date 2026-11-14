@@ -39,6 +39,8 @@ describe('phone text consent on the composed server', () => {
 
   async function callAndPropose(providerCallId: string, said: string) {
     const writesBefore = counts(w);
+    const sendsBefore = w.messages.sent.length;
+    const squareBefore = w.square.writes.length;
     const call = await phoneCall(w, PIZZA, providerCallId);
     call.toolset.dispose();
     const relay = await phoneRelay(call, { logger: logs.log as never, callerNumber: NUMBER });
@@ -51,8 +53,11 @@ describe('phone text consent on the composed server', () => {
     const proposed = await relay.toolCall('propose_order', JSON.stringify({ cart: CART, quoteId: quoted.quote.quoteId, fulfillment: { type: 'pickup', pickupAt: pickupAt() },
       contact: { name: 'Sam', messageConsent: true, messageRecipient: '+15555550999', consentAt: new Date().toISOString() } }), 'fc_p') as { ok: boolean; proposalId: string; approvalId: string };
     expect(proposed.ok, JSON.stringify(proposed)).toBe(true);
-    // Nothing external is written before the owner approves (AGENTS rule 1).
+    // The proposal is stored and the owner has not approved: no message send and no provider write
+    // of any kind (Square, message, Calendar, Sheets) has happened (AGENTS rule 1).
+    expect(w.messages.sent.length - sendsBefore).toBe(0);
     expect(delta(w, writesBefore)).toEqual(NONE);
+    expect(w.square.writes.length - squareBefore).toBe(0);
     await relay.hangUp();
     return { call, relay, model, ...proposed };
   }

@@ -99,20 +99,33 @@ export function spacedLast4(number: string): string {
 
 const DIGIT_WORDS: Record<string, string> = { zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9' };
 
-/** Lower-case letters and digits only, with spoken digits turned into digits. */
-function compact(text: string): string {
-  return normalizeAnswer(text).map((w) => DIGIT_WORDS[w] ?? w).join('');
+/**
+ * Words of a sentence with only harmless differences removed: case, punctuation and spacing are
+ * dropped, digit words become digits, and a run of digits ("3 7 1 6", "3716", "three seven one six")
+ * becomes one token. Nothing else is forgiven.
+ */
+function canonicalWords(text: string): string[] {
+  const out: string[] = [];
+  let digitRun = false;
+  for (const raw of normalizeAnswer(text)) {
+    const w = DIGIT_WORDS[raw] ?? raw;
+    const isDigits = /^[0-9]+$/.test(w);
+    if (isDigits && digitRun) out[out.length - 1] += w;
+    else out.push(w);
+    digitRun = isDigits;
+  }
+  return out;
 }
 
 /**
- * Whether the model's own output transcript for the offer response carries the fixed line: for the
- * offer, its key phrase and the last four digits; for the re-ask, "yes or a no". Model output, used
- * in memory only and never logged.
+ * Whether the model's own output transcript for the offer response is the exact sentence the server
+ * asked for, up to case, punctuation, spacing and how the digits are written. Any added, dropped or
+ * changed word fails: "marketing", "two messages", another number or another content are not the
+ * offer. Model output, used in memory only and never logged.
  */
-export function offerLineSpoken(line: 'offer' | 'reask', transcript: string | undefined, last4: string): boolean {
+export function offerLineSpoken(expected: string, transcript: string | undefined): boolean {
   if (transcript === undefined) return false;
-  const said = compact(transcript);
-  if (line === 'reask') return said.includes('yesorano');
-  const digits = last4.replace(/\D/g, '');
-  return digits.length === 4 && said.includes('wouldyoulike') && said.includes('numberyouarecallingfrom') && said.includes(digits);
+  const want = canonicalWords(expected);
+  const said = canonicalWords(transcript);
+  return want.length > 0 && said.length === want.length && said.every((w, k) => w === want[k]);
 }

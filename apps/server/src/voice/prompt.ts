@@ -64,15 +64,19 @@ function fill(text: string, last4: string | undefined): string {
 /** The fixed re-ask after an unclear answer (PROPOSED text step). */
 export const CONSENT_REASK = 'Sorry, was that a yes or a no? You can also press 1 for yes or 2 for no.';
 
+/** The exact sentence the agent is asked to say. The relay checks the model's own transcript against it. */
+export function consentOfferSentence(template: AgentSpec['template'], channel: MessageChannelSetting, last4: string, attempt: 1 | 2): string {
+  if (attempt === 2) return CONSENT_REASK;
+  const what = template === 'appointment_booker' ? 'with your booking confirmation' : 'with your payment link';
+  return `Would you like one ${channelWord(channel)} ${what}, sent to the number you are calling from, ending in ${spaced(last4)}?`;
+}
+
 /**
  * PROPOSED text step: the server's offer. Attempt 1 is the offer sentence, attempt 2 the fixed re-ask.
  * The model is told to say the one sentence and nothing else: the server reads the caller's answer.
  */
 export function consentOfferInstruction(template: AgentSpec['template'], channel: MessageChannelSetting, last4: string, attempt: 1 | 2): string {
-  const what = template === 'appointment_booker' ? 'with your booking confirmation' : 'with your payment link';
-  const line = attempt === 1
-    ? `Would you like one ${channelWord(channel)} ${what}, sent to the number you are calling from, ending in ${spaced(last4)}?`
-    : CONSENT_REASK;
+  const line = consentOfferSentence(template, channel, last4, attempt);
   return `Server status: say exactly this one sentence and nothing else: "${line}" Then stop and wait for the next server status. Do not call any tool and do not answer the caller until then.`;
 }
 

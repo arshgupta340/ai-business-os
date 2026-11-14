@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { barberSpecV1, pizzaSpecV2 } from '@abos/contracts/fixtures';
 import { callerNumberFrom, matchSpokenAnswer, offerLineSpoken, spacedLast4, textOfferAllowed } from '../../src/voice/consent';
+import { consentOfferSentence } from '../../src/voice/prompt';
 import { specWith } from './helpers';
 
 describe('matchSpokenAnswer', () => {
@@ -126,22 +127,53 @@ describe('textOfferAllowed', () => {
   });
 });
 
-describe('offerLineSpoken (Opus B2)', () => {
-  const OFFER = 'Would you like one text message with your payment link, sent to the number you are calling from, ending in 3 7 1 6?';
+describe('offerLineSpoken: the exact offer sentence (Opus B2, Codex second review)', () => {
+  const order = consentOfferSentence('restaurant_order_taker', 'surge', '3716', 1);
+  const booking = consentOfferSentence('appointment_booker', 'whatsapp_sandbox', '3716', 1);
+
   it.each([
-    [OFFER, true],
-    ['Would you like one text message with your payment link, sent to the number you are calling from, ending in 3716?', true],
-    ['Would you like one text message with your payment link, sent to the number you are calling from, ending in three seven one six?', true],
-    ['Would you like one text message with your payment link, sent to the number you are calling from, ending in 3 7 1 5?', false],
-    ['Shall I send this to the shop for approval?', false],
-    ['Would you like a text?', false],
-    ['', false],
-  ])('%j is %s', (said, expected) => {
-    expect(offerLineSpoken('offer', said, '3716')).toBe(expected);
+    ['order, text message', consentOfferSentence('restaurant_order_taker', 'surge', '3716', 1)],
+    ['order, android gateway', consentOfferSentence('restaurant_order_taker', 'android_gateway', '3716', 1)],
+    ['order, WhatsApp', consentOfferSentence('restaurant_order_taker', 'whatsapp_sandbox', '3716', 1)],
+    ['order, plain message', consentOfferSentence('restaurant_order_taker', 'agentphone', '3716', 1)],
+    ['booking, WhatsApp', booking],
+    ['booking, text message', consentOfferSentence('appointment_booker', 'surge', '3716', 1)],
+    ['the re-ask', consentOfferSentence('restaurant_order_taker', 'surge', '3716', 2)],
+  ])('the exact sentence passes: %s', (_label, sentence) => {
+    expect(offerLineSpoken(sentence, sentence)).toBe(true);
   });
-  it('the re-ask needs its question', () => {
-    expect(offerLineSpoken('reask', 'Sorry, was that a yes or a no? You can also press 1 for yes or 2 for no.', '3716')).toBe(true);
-    expect(offerLineSpoken('reask', 'Okay, great.', '3716')).toBe(false);
-    expect(offerLineSpoken('offer', undefined, '3716')).toBe(false);
+
+  it.each([
+    ['digits unspaced', 'Would you like one text message with your payment link, sent to the number you are calling from, ending in 3716?'],
+    ['digits as words', 'Would you like one text message with your payment link, sent to the number you are calling from, ending in three seven one six?'],
+    ['"one" as a digit', 'Would you like 1 text message with your payment link, sent to the number you are calling from, ending in 3 7 1 6?'],
+    ['case, punctuation and spacing', 'would  you like one TEXT message with your payment link sent to the number you are calling from ending in 3-7-1-6.'],
+  ])('a harmless variant passes: %s', (_label, said) => {
+    expect(offerLineSpoken(order, said)).toBe(true);
+  });
+
+  it.each([
+    ['marketing', 'Would you like a marketing message sent to the number you are calling from ending in 3 7 1 6?'],
+    ['a different last four', 'Would you like one text message with your payment link, sent to the number you are calling from, ending in 3 7 1 5?'],
+    ['"one" dropped', 'Would you like text message with your payment link, sent to the number you are calling from, ending in 3 7 1 6?'],
+    ['"a" for "one"', 'Would you like a text message with your payment link, sent to the number you are calling from, ending in 3 7 1 6?'],
+    ['two messages', 'Would you like two text messages with your payment link, sent to the number you are calling from, ending in 3 7 1 6?'],
+    ['a different content', 'Would you like one text message with your receipt, sent to the number you are calling from, ending in 3 7 1 6?'],
+    ['added offers', 'Would you like one text message with your payment link and our offers, sent to the number you are calling from, ending in 3 7 1 6?'],
+    ['another number', 'Would you like one text message with your payment link, sent to another number, ending in 3 7 1 6?'],
+    ['the booking content on an order', booking],
+    ['a different channel word', consentOfferSentence('restaurant_order_taker', 'whatsapp_sandbox', '3716', 1)],
+    ['the approval question', 'Shall I send this to the shop for approval?'],
+    ['clauses out of order', 'Sent to the number you are calling from, ending in 3 7 1 6, would you like one text message with your payment link?'],
+    ['empty', ''],
+  ])('fails: %s', (_label, said) => {
+    expect(offerLineSpoken(order, said)).toBe(false);
+  });
+
+  it('a missing transcript fails, and the re-ask needs its own sentence', () => {
+    expect(offerLineSpoken(order, undefined)).toBe(false);
+    const reask = consentOfferSentence('restaurant_order_taker', 'surge', '3716', 2);
+    expect(offerLineSpoken(reask, 'Okay, great.')).toBe(false);
+    expect(offerLineSpoken(reask, order)).toBe(false);
   });
 });

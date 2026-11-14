@@ -258,6 +258,16 @@ describe('text step: was the offer delivered (Codex 2, 3; Opus B1, B2)', () => {
     await s.hangUp();
   });
 
+  it('Codex second review: a marketing sentence with the right digits is not the offer, and a keypad 1 after it is not consent', async () => {
+    const s = await setup();
+    await s.quoteAndOpen();
+    s.playOffer({ said: 'Would you like a marketing message sent to the number you are calling from ending in 3 7 1 6?' });
+    s.press('1');
+    expect(agreed(s)).toBe(false);
+    expect(offers(s)).toBe(2);
+    await s.hangUp();
+  });
+
   it('an offer response that played no audio is replayed', async () => {
     const s = await setup();
     await s.quoteAndOpen();

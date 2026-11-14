@@ -36,7 +36,7 @@ import {
 import { AUDIO_FORMAT, OAI_CLIENT, OAI_ITEM, OAI_SERVER, OPENAI_REALTIME_URL, STREAM_TOKEN_PARAM, TRANSCRIBE_MODEL, TURN_DETECTION, TWILIO_EVENT, VOICE } from './constants';
 import { matchSpokenAnswer, offerLineSpoken, textOfferAllowed, type SpokenAnswer } from './consent';
 import { PlaybackTracker, StreamTokenStore, TimingTracker, errorInfo, safeLogger, spokenText, ulawBase64DurationMs } from './logic';
-import { buildInstructions, consentOfferInstruction, consentResultInstruction, decisionInstruction, pendingGoodbyeInstruction, proposalLimitInstruction, toolLimitGoodbyeInstruction } from './prompt';
+import { buildInstructions, consentOfferInstruction, consentOfferSentence, consentResultInstruction, decisionInstruction, pendingGoodbyeInstruction, proposalLimitInstruction, toolLimitGoodbyeInstruction } from './prompt';
 import type {
   CallDecision,
   CallDecisionsPort,
@@ -1021,7 +1021,7 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
       case OAI_SERVER.outputTranscriptDone: {
         // The model's own words for the offer response only: checked in memory against the fixed line, never logged.
         if (consent.kind !== 'offering' || consent.responseId === undefined || str(ev, 'response_id') !== consent.responseId || pinned === undefined) break;
-        if (offerLineSpoken(consent.line, str(ev, 'transcript'), last4Of(pinned))) { consent.spokenOk = true; checkOfferPlayed(); }
+        if (offerLineSpoken(consentOfferSentence(pinned.spec.template, deps.messageChannel, last4Of(pinned), consent.line === 'offer' ? 1 : 2), str(ev, 'transcript'))) { consent.spokenOk = true; checkOfferPlayed(); }
         else notDelivered('offer_wording');
         break;
       }
