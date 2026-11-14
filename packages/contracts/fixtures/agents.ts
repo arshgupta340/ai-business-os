@@ -250,7 +250,7 @@ export const builderReply = {
   createdAt: '2026-11-14T20:28:00Z',
 } satisfies BuilderMessage;
 
-export const builderMissingFields = ['greeting', 'policy.after_hours', 'escalation.callback_wording'];
+export const builderMissingFields = ['greeting', 'hours.mon', 'escalation.callback_wording'];
 
 export const builderSession = {
   id: SESSION_ID,
@@ -287,9 +287,9 @@ export const builderTurn = {
   // `conflictIds` and `path` are the additive fields of issue #108. The third entry has the shape the
   // builder sends for a missing fact: `path` is one of `missingFields`.
   stopConditions: [
-    { code: 'conflict_open', conflictIds: [menuPriceConflict.id] },
+    { code: 'open_conflict', conflictIds: [menuPriceConflict.id] },
     { code: 'missing_greeting' },
-    { code: 'missing_required_fact', path: 'policy.after_hours' },
+    { code: 'missing_required_fact', path: 'hours.mon' },
   ],
   progress: { answered: 3, required: 6 },
   unsupportedRequests: ['Take card numbers over the phone'],

@@ -5,6 +5,7 @@ import { CATALOG_PRICE_MAX } from '../../../src/adapters/square';
 import { executeCatalogSyncStep, pricesPlugin, executePriceEditStep, reconcilePriceEditStep } from '../../../src/api/prices';
 import { SquarePriceError } from '../../../src/adapters/square/price';
 import { AppError } from '../../../src/errors';
+import { PolicyError } from '../../../src/policy/types';
 import type { PricesDependencies } from '../../../src/api/prices/types';
 
 const now = new Date('2026-11-14T00:00:00Z');
@@ -178,6 +179,32 @@ describe('price proposals', () => {
       expect(response.body).not.toContain('private');
       expect(response.json()).toMatchObject({ code: 'INTERNAL', retryable: true, correlationId: expect.any(String) });
       expect(createPendingPriceEditApproval).not.toHaveBeenCalled();
+    } finally { await app.close(); }
+  });
+  it('answers a stale Square version as a plain INVALID_STATE refusal, not a retryable INTERNAL', async () => {
+    const { app, deps } = await setup();
+    // The checked routine refuses a payload whose Square version differs from the catalog row (SUBJECT -> INVALID_STATE).
+    vi.mocked(deps.approvals.createPendingPriceEditApproval).mockRejectedValue(new PolicyError('INVALID_STATE'));
+    const updateVariationPrice = vi.fn();
+    Object.assign(deps.square, { updateVariationPrice });
+    try {
+      const response = await app.inject({ method: 'POST', url, payload: body });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({
+        code: 'INVALID_STATE', retryable: false, correlationId: expect.any(String),
+        message: 'This item changed in Square since the last sync. Sync the catalog, then try the price change again.',
+      });
+      expect(updateVariationPrice).not.toHaveBeenCalled();
+    } finally { await app.close(); }
+  });
+  it('keeps any other policy failure from the routine as a sanitized INTERNAL', async () => {
+    const { app, deps } = await setup();
+    vi.mocked(deps.approvals.createPendingPriceEditApproval).mockRejectedValue(new PolicyError('PAYLOAD_HASH_MISMATCH', 'private detail'));
+    try {
+      const response = await app.inject({ method: 'POST', url, payload: body });
+      expect(response.statusCode).toBe(500);
+      expect(response.body).not.toContain('private');
+      expect(response.json()).toMatchObject({ code: 'INTERNAL', retryable: true });
     } finally { await app.close(); }
   });
 });
