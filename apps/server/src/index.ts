@@ -13,6 +13,15 @@ try {
 }
 
 const app = await buildApp(env, { logger: true });
+// 0006: refuse to start unless the database connection is the restricted abos_app role.
+try {
+  await app.composed.assertRuntimeRole();
+} catch (error) {
+  // The message names roles only, never a connection string.
+  console.error(error instanceof Error ? error.message : 'Runtime role check failed');
+  await app.close().catch(() => undefined);
+  process.exit(1);
+}
 await app.listen({ host: '0.0.0.0', port: env.PORT });
 app.composed.startJobs();
 

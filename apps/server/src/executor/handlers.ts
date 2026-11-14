@@ -159,8 +159,10 @@ export async function createCalendarEvent(c: HandlerContext): Promise<StepOutcom
       apply: (subjects) => subjects.saveEvent(booking.businessId, booking.id, eventId) };
   }
   if (result.reason === 'SLOT_CONFLICT') return conflict(Array.isArray(result.alternatives) ? result.alternatives : []);
-  // The adapter looks the event up by this step's key before every insert, so a retry cannot create a second event.
   const code = ErrorCodeSchema.safeParse(result.reason);
+  // Review finding 6 / SPEC 2.9: an insert whose outcome is unknown goes to NEEDS_REVIEW, never an automatic retry.
+  if (result.outcome === 'unknown') throw { code: code.success ? code.data : 'INTERNAL', ambiguous: true };
+  // A definite failure before the insert: the adapter looks the event up by this step's key first, so a retry cannot create a second event.
   throw { code: code.success ? code.data : 'INTERNAL', retryable: result.retryable === true, ambiguous: false };
 }
 

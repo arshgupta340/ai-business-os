@@ -122,10 +122,10 @@ describe('calendar adapter: createEvent', () => {
     expect(s.events.size).toBe(1);
   });
 
-  it('returns a retryable failure when the insert outcome is unknown and nothing was written, then a retry inserts once', async () => {
+  it('marks an insert whose outcome the follow-up lookup cannot establish as unknown (SPEC 2.9: review, not a blind retry); a later resume inserts once', async () => {
     const s = setup();
     s.insert.mockRejectedValueOnce(new Error('socket hang up'));
-    expect(await s.adapter.createEvent(input)).toEqual({ ok: false, reason: 'INTEGRATION_UNAVAILABLE', retryable: true });
+    expect(await s.adapter.createEvent(input)).toEqual({ ok: false, reason: 'INTEGRATION_UNAVAILABLE', retryable: true, outcome: 'unknown' });
     expect((await s.adapter.createEvent(input)).ok).toBe(true);
     expect(s.events.size).toBe(1);
   });

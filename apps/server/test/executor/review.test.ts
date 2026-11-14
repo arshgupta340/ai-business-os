@@ -127,6 +127,18 @@ describe('calendar results', () => {
     expect(h.deps.messages.sendOnce).not.toHaveBeenCalled();
   });
 
+  it('an insert with an unknown outcome goes to NEEDS_REVIEW with the booking RETRY_REQUIRED, never an automatic retry (review finding 6)', async () => {
+    const h = harness('booking_bundle');
+    vi.mocked(h.deps.calendar.createEvent).mockResolvedValueOnce({ ok: false, reason: 'INTEGRATION_UNAVAILABLE', retryable: true, outcome: 'unknown' });
+    const e = createExecutor(h.deps);
+    await e.tick();
+    h.advance(60_000); await ticks(e, 5);
+    expect(h.rows[0]?.status).toBe('NEEDS_REVIEW');
+    expect(h.booking.status).toBe('RETRY_REQUIRED');
+    expect(h.deps.calendar.createEvent).toHaveBeenCalledTimes(1);
+    expect(h.deps.messages.sendOnce).not.toHaveBeenCalled();
+  });
+
   it('a retryable calendar failure requeues with the same key and then books once', async () => {
     const h = harness('booking_bundle');
     vi.mocked(h.deps.calendar.createEvent).mockResolvedValueOnce({ ok: false, reason: 'INTEGRATION_UNAVAILABLE', retryable: true });

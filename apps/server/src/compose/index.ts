@@ -11,6 +11,7 @@
 // Tests pass overrides for the database, the token verifier, the providers and the model.
 import { randomUUID } from 'node:crypto';
 import { ActivityEventSchema, type MessageChannelSetting } from '@abos/contracts';
+import { assertRestrictedRuntimeRole } from '@abos/db';
 import type { FastifyPluginAsync } from 'fastify';
 // The in-memory engine in api/ports.ts is a test fake and is never wired here.
 import type { CatalogPort as RouteCatalogPort, EnginePorts } from '../api/ports';
@@ -40,7 +41,7 @@ import type { PricesDependencies } from '../api/prices/index';
 import type { RecoveryPorts } from '../api/recovery/index';
 import { createDbRecoveryPorts } from './recovery';
 import { createDbFallback, type FallbackDeps } from './fallback';
-import { dbAgentVersionStore, dbLiveAgentStore, dbPublishEventSink, squareCatalogSync } from './builder-publish';
+import { catalogOwnedElsewhere, dbAgentVersionStore, dbLiveAgentStore, dbPublishEventSink, squareCatalogSync } from './builder-publish';
 import { createCallDecisions, type CallDecisionsBus } from './decisions';
 import { createProposeFactFromChat, dbAgentDraftStore, dbBuilderSessionStore, dbBusinessKnowledge, dbDraftFactStore, dbLiveAgentReader, type ProposeFactFromChat } from './builder';
 import { notWiredExecutor, notWiredWebhooks, type Executor, type ExecutorFactory, type SeamDeps, type WebhooksFactory } from './seams';
@@ -107,6 +108,11 @@ export interface ComposedServer {
   health: HealthMonitor;
   /** GET /api/telemetry (B-30) and the recorder modules may record into. */
   telemetry: TelemetryPluginOptions;
+  /**
+   * Startup check (0006): throws unless the database connection is the restricted abos_app role.
+   * index.ts refuses to start when it throws. Without a database there is nothing to check.
+   */
+  assertRuntimeRole(): Promise<void>;
   /** Background jobs: the approval expiry sweep (API 3.7) and the executor loop. */
   startJobs(): void;
   stopJobs(): Promise<void>;
@@ -192,6 +198,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     async sync({ businessId }) {
       const square = providers.square;
       if (!square) throw new AppError('INTEGRATION_UNAVAILABLE', 'Square is not configured.', undefined, undefined, { provider: 'square' });
+      if (await catalogOwnedElsewhere(db, businessId)) throw new AppError('CAPABILITY_NOT_ALLOWED', 'The Square catalog on this server belongs to another business.');
       const jobId = newId('job_');
       const event = async (type: 'sync.queued' | 'sync.succeeded', extra = {}) => emitActivity(db, { id: newId('evt_'), businessId, correlationId: jobId, type, actorType: 'system', occurredAt: now().toISOString(), payload: { target: 'catalog', jobId, ...extra } });
       await event('sync.queued');
@@ -233,12 +240,23 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   // The builder's own seams (issue #65). Without a database it keeps its in-memory defaults, and
   // without a way to verify tokens it keeps its fail-closed auth default.
   const proposeFactFromChat = createProposeFactFromChat(engine);
-  // Publish stops on a disconnected integration, read from the last stored health results.
-  const integrations = { read: () => health.read({ refresh: false }) };
+  // Publish stops on a disconnected integration (Twilio, OpenAI, Square, Calendar as the spec needs).
+  // A publish runs the bounded read-only probes now, so a provider never checked is not taken as down
+  // and a provider that went down since the last check is caught.
+  const integrations = { read: () => health.read({ refresh: true }) };
   // Extraction keeps its in-memory stores: uploaded bytes have no database column or storage bucket
   // wired, and upload facts reference their files row, so the set moves together (see the report).
+  // With a database but no way to verify tokens, the builder answers INTEGRATION_UNAVAILABLE (a server
+  // setting is missing), not UNAUTHENTICATED, so the web app does not sign a valid owner out. The
+  // explicit local opt-in BUILDER_DEV_AUTH=1 keeps the builder's own loopback-only stand-in.
+  const unconfiguredAuth: NonNullable<BuilderPluginOptions['auth']> = {
+    verified: true,
+    async authenticate() { throw new AppError('INTEGRATION_UNAVAILABLE', 'Sign-in is not configured on this server.'); },
+    async ownsBusiness() { return false; },
+  };
+  const devAuth = process.env.BUILDER_DEV_AUTH === '1';
   const builder: BuilderPluginOptions = hasDb ? {
-    ...(authConfigured ? { auth: createBuilderAuth(db, verifier) } : {}),
+    ...(authConfigured ? { auth: createBuilderAuth(db, verifier) } : devAuth ? {} : { auth: unconfiguredAuth }),
     liveAgent: dbLiveAgentReader(db), sessions: dbBuilderSessionStore(db), agents: dbAgentDraftStore(db),
     draftFacts: dbDraftFactStore(db), knowledge: dbBusinessKnowledge(db), proposeFactFromChat,
     publish: {
@@ -296,6 +314,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, prices, recovery, fallback, decisions,
     databaseProbe: hasDb ? async () => (await db.query('select 1 as ok', [])).rows.length === 1 : undefined, telemetry: telemetryOptions, health, now, newId,
     async close() { if (pool) await pool.end(); },
+    async assertRuntimeRole() { if (hasDb) await assertRestrictedRuntimeRole(db); },
     startJobs() {
       if (!hasDb || sweep) return;
       // API 3.7: a background job moves past-due approvals to EXPIRED. The routine writes the events.
@@ -305,6 +324,9 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       sweep.unref();
       executor.start();
       webhooks?.start();
+      // Review finding 4: one bounded, read-only health refresh in the background at startup, so the
+      // health screens show checked results on a fresh deploy. It never blocks listen; publish refreshes too.
+      void health.read({ refresh: true }).catch(() => log.warn({ job: 'health' }, 'startup integration check failed'));
     },
     async stopJobs() {
       if (sweep) clearInterval(sweep);

@@ -78,8 +78,9 @@ describe('a payment that arrives before the order waits for it', () => {
     // mark_order_paid would refuse the jump; nothing changed and no receipt was stored.
     expect(await order(w, orderId)).toMatchObject({ status: 'PAYMENT_LINK_READY', square_payment_id: null });
     expect(await n(w, 'select count(*)::int as n from payment_receipts where order_id = $1', [orderId])).toBe(0);
-    // The stored webhook row stays unprocessed in the database (no routine marks it processed).
-    expect(await n(w, "select count(*)::int as n from webhook_events where provider_event_id = 'evt_sq_early' and processed_at is null", [])).toBe(1);
+    // The job finished (it changed nothing), so mark_webhook_processed (0006) recorded the row as processed;
+    // the payment is picked up by the reconcile poll below, which reads Square again.
+    expect(await n(w, "select count(*)::int as n from webhook_events where provider_event_id = 'evt_sq_early' and processed_at is not null", [])).toBe(1);
     await executor.drain();
     expect((await order(w, orderId)).status).toBe('PAYMENT_PENDING');
     await c.webhooks!.reconcileNow();
@@ -270,7 +271,13 @@ describe('a new-key fact', () => {
 
   it('an owner chat answer for a new key becomes a pending fact_edit, and confirming it verifies the fact', async () => {
     const propose = w.app.composed.builder.proposeFactFromChat!;
-    const r = await propose({ businessId: PIZZA, ownerUserId: 'usr_owner_01', kind: 'policy', key: 'wifi_e2e', value: 'Free wifi', fromVersion: 0, before: null });
+    const draftId = 'fact_wifi_e2e_draft';
+    await w.t.db.query(`insert into public.business_facts (id, business_id, kind, key, value, source_type, status, version) values ($1,$2,'policy','wifi_e2e','"Free wifi"'::jsonb,'owner_ui','draft',1)`, [draftId, PIZZA]);
+    const r = await propose({ businessId: PIZZA, ownerUserId: 'usr_owner_01', kind: 'policy', key: 'wifi_e2e', value: 'Free wifi', subjectId: draftId, fromVersion: 0, before: null });
+    // The same answer again returns the same pending approval; a stale view is refused.
+    expect((await propose({ businessId: PIZZA, ownerUserId: 'usr_owner_01', kind: 'policy', key: 'wifi_e2e', value: 'Free wifi', subjectId: draftId, fromVersion: 0, before: null })).approvalId).toBe(r.approvalId);
+    await expect(propose({ businessId: PIZZA, ownerUserId: 'usr_owner_01', kind: 'policy', key: 'wifi_e2e', value: 'Free wifi', subjectId: draftId, fromVersion: 3, before: null })).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+    await expect(propose({ businessId: PIZZA, ownerUserId: 'usr_owner_01', kind: 'policy', key: 'wifi_e2e', value: 'Paid wifi', subjectId: draftId, fromVersion: 0, before: null })).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
     expect(r.bundleType).toBe('fact_edit');
     const list = ENDPOINTS.listApprovals.response.parse((await w.app.inject({ url: `/api/approvals?businessId=${PIZZA}`, headers: OWNER })).json());
     expect(list.items.find((a) => a.id === r.approvalId)).toMatchObject({ state: 'PENDING', bundleType: 'fact_edit' });
@@ -283,5 +290,69 @@ describe('a new-key fact', () => {
     expect(missing.json()).toMatchObject({ code: 'NOT_FOUND' });
     const malformed = await w.app.inject({ method: 'POST', url: `/api/businesses/${PIZZA}/facts/propose`, headers: OWNER, payload: { kind: 'policy' } });
     expect(malformed.json()).toMatchObject({ code: 'VALIDATION_FAILED' });
+  });
+});
+
+describe('review finding 2: a created checkout survives a failed local completion', () => {
+  let w: World;
+  beforeAll(async () => { w = await createWorld({ executor: notWiredExecutor }); }, 120_000);
+  afterAll(async () => { await w?.close(); });
+
+  it('keeps the Square order ID, moves the order to RECOVERY_REQUIRED, never creates again, and recovery resolves it from Square', async () => {
+    const { orderId, approvalId } = await pizzaOrder(w);
+    await approve(w, PIZZA, approvalId);
+    const c = w.app.composed;
+    // One transaction failure at save_checkout, after Square created and the adapter verified the link.
+    const db = c.db as { transaction: typeof c.db.transaction };
+    const original = db.transaction.bind(c.db);
+    let failures = 1;
+    db.transaction = (fn) => original((tx) => fn({ query: (text, params) => {
+      if (failures > 0 && text.includes('save_checkout')) { failures--; return Promise.reject(new Error('connection reset')); }
+      return tx.query(text, params);
+    } }));
+    const executor = createDbExecutor({ env: c.env, db: c.db, engine: c.engine, providers: c.providers, now: c.now, newId: c.newId, log: silentLog }, { workerId: 'worker-f2' });
+    try {
+      expect(await executor.tick()).toBe(true);
+      await executor.drain();
+    } finally { db.transaction = original; await executor.stop(); }
+    expect(w.squareWrites).toHaveLength(1);
+    const checkout = (await steps(w, approvalId)).find((s) => s.action_type === 'square.checkout.create')!;
+    const linked = w.square.orders.size > 0 ? [...w.square.orders.keys()][0] : undefined;
+    expect(checkout).toMatchObject({ status: 'NEEDS_REVIEW', external_ref: linked });
+    expect((await order(w, orderId)).status).toBe('RECOVERY_REQUIRED');
+    // Owner recovery reads the link back from Square by the kept order ID and completes the step.
+    const res = await w.app.inject({ method: 'POST', url: `/api/executions/${checkout.id}/resolve?businessId=${PIZZA}`, headers: OWNER, payload: { action: 'retry' } });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await order(w, orderId)).toMatchObject({ status: 'PAYMENT_LINK_READY', square_order_id: linked });
+    expect(w.squareWrites).toHaveLength(1);
+  });
+});
+
+describe('review finding 3: a failed payment check never cancels a linked order', () => {
+  let w: World;
+  beforeAll(async () => { w = await createWorld(); }, 120_000);
+  afterAll(async () => { await w?.close(); });
+
+  it('a paid order whose Square read fails stays as it is; a linked order is not cancelled even when the read succeeds', async () => {
+    const { orderId, approvalId } = await pizzaOrder(w);
+    await approve(w, PIZZA, approvalId);
+    await w.settle();
+    const linked = await order(w, orderId);
+    expect(linked.status).toBe('PAYMENT_PENDING');
+    const total = ((await w.t.db.query('select total_minor from orders where id = $1', [orderId])).rows[0] as { total_minor: number }).total_minor;
+    w.square.addPayment({ id: 'PAY_F3', orderId: linked.square_order_id!, amountMinor: total, status: 'COMPLETED' });
+    const square = w.app.composed.providers.square!;
+    const real = square.findPaymentForOrder;
+    square.findPaymentForOrder = async () => { throw new Error('timeout'); };
+    const cancel = () => w.app.inject({ method: 'POST', url: `/api/orders/${orderId}/cancel?businessId=${PIZZA}`, headers: OWNER, payload: {} });
+    try {
+      const refused = await cancel();
+      expect(refused.json()).toMatchObject({ code: 'INTEGRATION_UNAVAILABLE' });
+      expect((await order(w, orderId)).status).toBe('PAYMENT_PENDING');
+    } finally { square.findPaymentForOrder = real; }
+    // With a working read, the payment found is reconciled and the cancel is still refused.
+    const again = await cancel();
+    expect(again.json()).toMatchObject({ code: 'INVALID_STATE' });
+    expect((await order(w, orderId)).status).toBe('FULFILLMENT_READY');
   });
 });

@@ -62,6 +62,28 @@ function googleAuth(json: string | undefined, scopes: string[]): JWT | undefined
   }
 }
 
+/** The Calendar scopes the service account is given: events and free/busy, nothing more. */
+export const CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/calendar.freebusy'] as const;
+
+type FreeBusyClient = { freebusy: { query(input: { requestBody: { timeMin: string; timeMax: string; items: { id: string }[] } }): Promise<{ data: unknown }> } };
+
+/**
+ * Review finding 5: the health probe is a free/busy read of the configured calendar for the next hour,
+ * an operation the scopes above allow (calendars.get needs a metadata scope the account is not given).
+ * Connected only when the answer has an entry for the calendar with no errors.
+ */
+export function calendarProbe(client: FreeBusyClient, calendarId: string, now: () => Date): HealthProbe {
+  return async () => {
+    try {
+      const start = now();
+      const res = await client.freebusy.query({ requestBody: { timeMin: start.toISOString(), timeMax: new Date(start.getTime() + 3_600_000).toISOString(), items: [{ id: calendarId }] } });
+      const entry = (res.data as { calendars?: Record<string, { errors?: unknown[] } | undefined> } | undefined)?.calendars?.[calendarId];
+      if (!entry || (Array.isArray(entry.errors) && entry.errors.length > 0)) return { ok: false, detail: 'calendar not readable by the service account' };
+      return { ok: true, detail: 'calendar free/busy readable' };
+    } catch { return { ok: false, detail: 'calendar not readable by the service account' }; }
+  };
+}
+
 export function buildProviders(env: Env, now: () => Date, overrides: Partial<Providers> = {}): Providers {
   const status = {} as Record<ProviderKey, ProviderStatus>;
   // Every probe is a read: list one payment, read calendar or sheet metadata, read the account or models.
@@ -91,17 +113,14 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   } else status.square = missing('SQUARE_ACCESS_TOKEN', 'SQUARE_LOCATION_ID');
 
   let calendarAdapter: CalendarAdapter | undefined;
-  const calendarAuth = googleAuth(env.GOOGLE_SERVICE_ACCOUNT_JSON, ['https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/calendar.freebusy']);
+  const calendarAuth = googleAuth(env.GOOGLE_SERVICE_ACCOUNT_JSON, [...CALENDAR_SCOPES]);
   if (!env.GOOGLE_SERVICE_ACCOUNT_JSON || !env.GOOGLE_CALENDAR_ID) status.google_calendar = missing('GOOGLE_SERVICE_ACCOUNT_JSON', 'GOOGLE_CALENDAR_ID');
   else if (!calendarAuth) status.google_calendar = invalid('GOOGLE_SERVICE_ACCOUNT_JSON');
   else {
     const client = calendar({ version: 'v3', auth: calendarAuth });
     calendarAdapter = createCalendarAdapter({ client, now });
     const calendarId = env.GOOGLE_CALENDAR_ID;
-    probes.google_calendar = async () => {
-      try { await client.calendars.get({ calendarId }); return fixed(true, 'calendar shared'); }
-      catch { return fixed(false, 'calendar not readable by the service account'); }
-    };
+    probes.google_calendar = calendarProbe(client as unknown as FreeBusyClient, calendarId, now);
     status.google_calendar = ok();
   }
 
@@ -127,7 +146,10 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   const channelKeys: Record<MessageChannelSetting, [string, string | undefined][]> = {
     qr_only: [],
     surge: [['SURGE_API_KEY', env.SURGE_API_KEY], ['SURGE_ACCOUNT_ID', env.SURGE_ACCOUNT_ID]],
-    android_gateway: [['ANDROID_GATEWAY_URL', env.ANDROID_GATEWAY_URL], ['ANDROID_GATEWAY_API_KEY', env.ANDROID_GATEWAY_API_KEY]],
+    android_gateway: [['ANDROID_GATEWAY_KIND', env.ANDROID_GATEWAY_KIND],
+      ...(env.ANDROID_GATEWAY_KIND === 'smsgate'
+        ? [['ANDROID_GATEWAY_URL', env.ANDROID_GATEWAY_URL], ['ANDROID_GATEWAY_USERNAME', env.ANDROID_GATEWAY_USERNAME], ['ANDROID_GATEWAY_PASSWORD', env.ANDROID_GATEWAY_PASSWORD]] as [string, string | undefined][]
+        : [['ANDROID_GATEWAY_API_KEY', env.ANDROID_GATEWAY_API_KEY]] as [string, string | undefined][])],
     whatsapp_sandbox: [['TWILIO_ACCOUNT_SID', env.TWILIO_ACCOUNT_SID], ['TWILIO_AUTH_TOKEN', env.TWILIO_AUTH_TOKEN]],
   };
   const absent = channelKeys[messageChannel].filter(([, v]) => !v).map(([k]) => k);
@@ -135,13 +157,21 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   else if (absent.length > 0) status.message_channel = missing(...absent);
   else if (messageChannel === 'qr_only') status.message_channel = { configured: true, detail: 'qr_only sends nothing', noProviderNeeded: true };
   else {
-    message = createMessageAdapter({
-      channel: messageChannel, fetch: (url, init) => fetch(url, init),
-      surge: { apiKey: env.SURGE_API_KEY, accountId: env.SURGE_ACCOUNT_ID },
-      androidGateway: { baseUrl: env.ANDROID_GATEWAY_URL, apiKey: env.ANDROID_GATEWAY_API_KEY },
-      whatsappSandbox: { accountSid: env.TWILIO_ACCOUNT_SID, authToken: env.TWILIO_AUTH_TOKEN },
-    });
-    status.message_channel = ok(messageChannel);
+    try {
+      message = createMessageAdapter({
+        channel: messageChannel, fetch: (url, init) => fetch(url, init),
+        surge: { apiKey: env.SURGE_API_KEY, accountId: env.SURGE_ACCOUNT_ID },
+        androidGateway: { ...(env.ANDROID_GATEWAY_KIND ? { kind: env.ANDROID_GATEWAY_KIND } : {}), baseUrl: env.ANDROID_GATEWAY_URL, apiKey: env.ANDROID_GATEWAY_API_KEY,
+          username: env.ANDROID_GATEWAY_USERNAME, password: env.ANDROID_GATEWAY_PASSWORD, deviceId: env.ANDROID_GATEWAY_DEVICE_ID },
+        whatsappSandbox: { accountSid: env.TWILIO_ACCOUNT_SID, authToken: env.TWILIO_AUTH_TOKEN, ...(env.TWILIO_WHATSAPP_FROM ? { from: env.TWILIO_WHATSAPP_FROM } : {}) },
+      });
+      status.message_channel = ok(messageChannel);
+    } catch (error) {
+      // Issue #94 item 2: a bad channel setting never stops the server. The adapter's message names
+      // the setting only, never its value; nothing is sent and health says why.
+      const named = error instanceof Error ? /setting: ([A-Z_]+)/.exec(error.message)?.[1] : undefined;
+      status.message_channel = invalid(named ?? 'MESSAGE_CHANNEL settings');
+    }
   }
 
   let twilioCalls: Providers['twilioCalls'];

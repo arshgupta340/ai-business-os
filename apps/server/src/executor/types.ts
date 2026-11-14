@@ -12,7 +12,7 @@ export type CheckoutResult = { squareOrderId: string; paymentLinkId: string; url
 /** The calendar adapter's own result shape (adapters/calendar): it reports failures, it does not throw them. */
 export type CalendarResult =
   | { ok: true; googleEventId: string }
-  | { ok: false; reason: ErrorCode; retryable: boolean; alternatives?: AvailabilitySlot[] };
+  | { ok: false; reason: ErrorCode; retryable: boolean; alternatives?: AvailabilitySlot[]; outcome?: 'unknown' };
 /** The message layer's sendOnce result (adapters/message). A replay of an existing dispatch reports its stored state. */
 export type MessageResult = {
   status: MessageDispatchStatus | 'SKIPPED';

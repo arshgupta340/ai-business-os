@@ -189,10 +189,24 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
           const existing = await one(tx, `select o.*, a.id as pending_approval_id from public.orders o
             join public.approval_requests a on a.subject_id = o.id and a.business_id = o.business_id and a.bundle_type = 'order_bundle' and a.state = 'PENDING'
             where o.business_id=$1 and o.call_id=$2 and o.cart_hash=$3 and o.status='AWAITING_OWNER_APPROVAL' order by a.created_at desc limit 1`, [input.businessId, input.callId, hash]);
+          // Issue #93 item 3: only a repeat with the same contact, pickup and channel is the same proposal.
+          // The stored order is frozen from insert (0006) and orders are unique per call and cart, so a
+          // changed recipient or pickup time for the same cart on the same call is refused, never merged
+          // into the pending one: the owner only ever approves the details the caller confirmed.
+          const pickupIso = new Date(input.fulfillment.pickupAt).toISOString();
           if (existing) {
             const approval = await approvalById(tx, String(existing.pending_approval_id), input.businessId);
             const { pending_approval_id: _p, ...orderRow } = existing;
-            if (approval?.state === 'PENDING') return { order: { ...OrderSchema.parse(mapRow(orderRow)), approvalId: approval.id }, approval };
+            const stored = OrderSchema.parse(mapRow(orderRow));
+            // consentAt is the time of each propose, so it is not a detail the owner approves.
+            const material = (c: typeof contact) => ({ name: c.name, messageRecipient: c.messageRecipient ?? null, messageConsent: c.messageConsent });
+            const same = canonicalJson(material(stored.contact)) === canonicalJson(material(contact))
+              && stored.fulfillment.type === input.fulfillment.type && new Date(stored.fulfillment.pickupAt).toISOString() === pickupIso
+              && (approval?.payload as { messageChannel?: string } | undefined)?.messageChannel === channel;
+            if (approval?.state === 'PENDING') {
+              if (same) return { order: { ...stored, approvalId: approval.id }, approval };
+              throw new PolicyError('INVALID_STATE', 'A proposal for this cart is already waiting for the owner with different details.');
+            }
           }
           const at = await dbNow(tx);
           const createdAt = at.toISOString();
@@ -280,7 +294,24 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
           const expiresAt = new Date(at.getTime() + APPROVAL_EXPIRY_MS).toISOString();
           // A brand-new key (0005): the subject is a draft row whose value is exactly `after`, with
           // fromVersion 0 and before null. Confirming promotes that draft to verified version 1.
-          const subjectId = current ? String(current.id) : await newKeyDraft(tx, input.businessId, kind, input.key, input.value);
+          if (input.fromVersion !== undefined && input.fromVersion !== (current ? Number(current.version) : 0)) throw new PolicyError('VALIDATION_FAILED', 'The fact changed since it was read.');
+          if (input.before !== undefined && canonicalJson(input.before ?? null) !== canonicalJson(current ? current.value : null)) throw new PolicyError('VALIDATION_FAILED', 'The fact changed since it was read.');
+          if (current && input.subjectId !== undefined && input.subjectId !== String(current.id)) throw new PolicyError('VALIDATION_FAILED', 'The subject is not the verified fact.');
+          let subjectId: string;
+          if (current) subjectId = String(current.id);
+          else if (input.subjectId !== undefined) {
+            const draft = await one(tx, `select id, value from public.business_facts where id=$1 and business_id=$2 and kind=$3 and key=$4 and status='draft' for update`,
+              [input.subjectId, input.businessId, kind, input.key]);
+            if (!draft || canonicalJson(draft.value) !== canonicalJson(input.value)) throw new PolicyError('VALIDATION_FAILED', 'The subject is not a draft with this value.');
+            subjectId = String(draft.id);
+          } else subjectId = await newKeyDraft(tx, input.businessId, kind, input.key, input.value);
+          // The same answer for the same subject returns the approval already pending for it.
+          const pending = await one(tx, `select * from public.approval_requests where business_id=$1 and subject_id=$2 and bundle_type='fact_edit' and state='PENDING'
+            and expires_at > $3 order by created_at desc limit 1`, [input.businessId, subjectId, at.toISOString()]);
+          if (pending) {
+            const existing = approvalFromRow(pending);
+            if (existing.bundleType === 'fact_edit' && canonicalJson((existing.payload as { after: unknown }).after) === canonicalJson(input.value)) return { approval: existing };
+          }
           const approval = await storeApproval(tx, 'fact_edit', {
             businessId: input.businessId, subjectId, kind, key: input.key, fromVersion: current ? Number(current.version) : 0,
             before: current ? current.value as JsonValue : null, after: input.value, actionBundle: BUNDLE_ACTIONS.fact_edit, expiresAt,
@@ -336,6 +367,8 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
           payloadHash: input.payloadHash, decision: target, reason: input.reason ?? null,
         }));
       } catch (error) {
+        // Issue #93 item 4: approving a booking whose slot overlaps an approved one trips bookings_no_overlap.
+        if (error && typeof error === 'object' && 'code' in error && (error as { code: unknown }).code === '23P01') throw new PolicyError('SLOT_CONFLICT');
         const code = routineErrorCode(error);
         if (code !== 'APPROVAL_ALREADY_DECIDED') return rethrow(error);
         // A repeat that differs only in its reason is still the same decision (AC-10).

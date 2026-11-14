@@ -43,6 +43,13 @@ const EnvSchema = z.object({
   SURGE_ACCOUNT_ID: z.string().min(1).optional(),
   ANDROID_GATEWAY_URL: z.url().optional(),
   ANDROID_GATEWAY_API_KEY: z.string().min(1).optional(),
+  // Issue #94 item 2: which gateway app, and the SMSGate login. TextBee uses the API key.
+  ANDROID_GATEWAY_KIND: z.enum(['textbee', 'smsgate']).optional(),
+  ANDROID_GATEWAY_USERNAME: z.string().min(1).optional(),
+  ANDROID_GATEWAY_PASSWORD: z.string().min(1).optional(),
+  ANDROID_GATEWAY_DEVICE_ID: z.string().min(1).optional(),
+  // The WhatsApp sandbox sender (E.164, with or without the whatsapp: prefix). Defaults to Twilio's sandbox number.
+  TWILIO_WHATSAPP_FROM: z.string().min(1).optional(),
   GOOGLE_SERVICE_ACCOUNT_JSON: z.string().min(1).optional(),
   GOOGLE_CALENDAR_ID: z.string().min(1).optional(),
   GOOGLE_SHEET_ID: z.string().min(1).optional(),

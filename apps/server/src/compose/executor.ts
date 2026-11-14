@@ -288,7 +288,7 @@ export function createDbExecutor(deps: SeamDeps, options: DbExecutorOptions = {}
         if (!providers.calendar) throw { code: 'INTEGRATION_UNAVAILABLE', requestSent: false, retryable: true };
         const r = await providers.calendar.createEvent(input);
         if (r.ok) return { ok: true, googleEventId: r.googleEventId };
-        return { ok: false, reason: r.reason, retryable: r.retryable, ...(r.alternatives ? { alternatives: r.alternatives } : {}) };
+        return { ok: false, reason: r.reason, retryable: r.retryable, ...(r.alternatives ? { alternatives: r.alternatives } : {}), ...(r.outcome ? { outcome: r.outcome } : {}) };
       },
     },
     prices: {

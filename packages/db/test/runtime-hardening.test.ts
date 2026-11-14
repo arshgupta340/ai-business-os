@@ -50,7 +50,7 @@ describe('Supabase-like deployment (non-superuser migration owner)', () => {
       const { migrationDb } = await import('./helpers');
       const again = await applyMigrations(migrationDb(db));
       expect(again.applied).toEqual([]);
-      expect(again.skipped).toHaveLength(5);
+      expect(again.skipped).toHaveLength(6);
     } finally { await db.exec('reset role'); }
   });
 
@@ -139,7 +139,9 @@ describe('legitimate flows that 0004 blocked', () => {
     await app(async () => {
       await expect(runtime.recordDispatch(db, { businessId: biz, executionId: r.executions[1]!.id, workerId: 'w', attempt: 0, bodyHash: hash('b') })).rejects.toThrow(/LEASE/);
       await runtime.runtimeClaimExecution(db, { businessId: biz, executionId: r.executions[0]!.id, workerId: 'w' });
-      await runtime.finishExecution(db, { businessId: biz, executionId: r.executions[0]!.id, workerId: 'w', attempt: 1, status: 'SUCCEEDED', externalRef: 'sq' });
+      // 0006: a checkout step succeeds only with its saved references.
+      await runtime.saveCheckout(db, { businessId: biz, executionId: r.executions[0]!.id, workerId: 'w', attempt: 1, squareOrderId: 'sq-' + r.executions[0]!.id, paymentLinkId: 'link-' + r.executions[0]!.id, url: 'https://example.test/c' });
+      await runtime.finishExecution(db, { businessId: biz, executionId: r.executions[0]!.id, workerId: 'w', attempt: 1, status: 'SUCCEEDED', externalRef: 'sq-' + r.executions[0]!.id });
       expect((await runtime.runtimeClaimNextExecution(db, { businessId: biz, workerId: 'w' }))?.action_type).toBe('local.order.record');
     });
   });
@@ -200,7 +202,9 @@ describe('guards 0004 was missing', () => {
     const r = await approve(p); const biz = p.owner.businessId; const [sq, msg] = r.executions;
     await app(async () => {
       await runtime.runtimeClaimExecution(db, { businessId: biz, executionId: sq!.id, workerId: 'w' });
-      await runtime.finishExecution(db, { businessId: biz, executionId: sq!.id, workerId: 'w', attempt: 1, status: 'SUCCEEDED', externalRef: 'sq' });
+      // 0006: a checkout step succeeds only with its saved references.
+      await runtime.saveCheckout(db, { businessId: biz, executionId: sq!.id, workerId: 'w', attempt: 1, squareOrderId: 'sq-' + sq!.id, paymentLinkId: 'link-' + sq!.id, url: 'https://example.test/c' });
+      await runtime.finishExecution(db, { businessId: biz, executionId: sq!.id, workerId: 'w', attempt: 1, status: 'SUCCEEDED', externalRef: 'sq-' + sq!.id });
       await runtime.runtimeClaimExecution(db, { businessId: biz, executionId: msg!.id, workerId: 'w' });
       const ok = (status: 'SUCCEEDED', externalRef: string) => runtime.finishExecution(db, { businessId: biz, executionId: msg!.id, workerId: 'w', attempt: 1, status, externalRef });
       await expect(ok('SUCCEEDED', 'invented')).rejects.toThrow(/RESULT/);

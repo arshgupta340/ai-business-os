@@ -155,6 +155,20 @@ describe('voice relay: tool calls', () => {
     await s.relay.done;
   });
 
+  it('issue #95 item 7: a function call on a response that did not complete is not run', async () => {
+    const s = setup({ result: { ok: true, items: [] } });
+    await s.connect();
+    for (const status of ['cancelled', 'incomplete', 'failed']) {
+      s.openai().emit({ type: 'response.done', response: { status, output: [{ type: 'function_call', name: 'read_catalog', arguments: '{}', call_id: `fc_${status}` }] } });
+    }
+    s.openai().emit(s.fnCall('read_catalog', '{"query":"pepperoni"}', 'fc_ok'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(1));
+    expect(s.outputs()[0]).toMatchObject({ call_id: 'fc_ok' });
+    expect(s.call).toHaveBeenCalledTimes(1);
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
+  });
+
   it('an unknown or disallowed tool returns a failure and the call goes on', async () => {
     const s = setup({ spec: barberSpecV1 });
     await s.connect();

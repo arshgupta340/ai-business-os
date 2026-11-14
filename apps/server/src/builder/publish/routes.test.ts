@@ -7,6 +7,7 @@ import { AppError } from '../../errors';
 import { InMemoryConflictStore } from '../extraction/stores';
 import { multipartBody, pdf, PIZZA_MENU_TEXT } from '../extraction/test-samples';
 import type { BuilderPluginOptions } from '../index';
+import { TEMPLATE_CAPABILITIES } from '../registry';
 import { FixtureBusinessKnowledge, type BusinessContext, type BusinessKnowledge } from '../session/knowledge';
 import { InMemoryAgentDraftStore, InMemoryDraftFactStore } from '../session/stores';
 import type { IntegrationHealthReader } from './integrations';
@@ -63,6 +64,17 @@ class SlowVersionStore extends InMemoryAgentVersionStore {
     return max;
   }
 }
+
+// Every provider of SPEC 2.9 connected.
+const ALL_UP: Awaited<ReturnType<IntegrationHealthReader['read']>> = {
+  square: { state: 'connected' }, twilio: { state: 'connected' }, openai: { state: 'connected' },
+  google_calendar: { state: 'connected' }, google_sheets: { state: 'connected' }, message_channel: { state: 'connected' },
+};
+
+const BOOKING_SPEC = {
+  ...PIZZA_SPEC, template: 'appointment_booker', name: 'Booking Assistant', goal: 'Book appointments for the owner to approve.',
+  knowledgeScopes: ['business_profile', 'hours', 'services'], capabilities: [...TEMPLATE_CAPABILITIES.appointment_booker],
+};
 
 // The fixture knowledge with one change made to the pizza business.
 function pizzaKnowledge(change: (ctx: BusinessContext) => BusinessContext): BusinessKnowledge {
@@ -583,7 +595,7 @@ describe('rollback', () => {
   });
 });
 
-describe('calls keep their pinned version', () => {
+describe('a published version is immutable (no call is run here)', () => {
   it('a version read before a publish and a rollback is unchanged after them', async () => {
     const h = await harness();
     const id = await createAgent(h);
@@ -604,7 +616,7 @@ describe('calls keep their pinned version', () => {
 });
 
 describe('publish: stop conditions (FLOWS.md, Builder stop conditions)', () => {
-  it('a missing time zone, consent policy and price are VALIDATION_FAILED with one issue per stop condition code', async () => {
+  it('a missing time zone, a missing consent policy and an empty catalog are VALIDATION_FAILED with one issue per stop condition code', async () => {
     const knowledge = pizzaKnowledge((ctx) => ({
       ...ctx,
       profile: { id: ctx.profile.id, name: ctx.profile.name, category: ctx.profile.category },
@@ -617,18 +629,18 @@ describe('publish: stop conditions (FLOWS.md, Builder stop conditions)', () => {
     expect(res.statusCode).toBe(400);
     const body = res.json();
     expect(body.code).toBe('VALIDATION_FAILED');
-    expect(body.details.issues.map((i: { code: string }) => i.code).sort()).toEqual(['missing_message_consent_policy', 'missing_price', 'missing_timezone']);
+    expect(body.details.issues.map((i: { code: string }) => i.code).sort()).toEqual(['empty_catalog', 'missing_message_consent_policy', 'missing_timezone']);
     for (const issue of body.details.issues) expect(issue).toMatchObject({ path: issue.code, message: expect.any(String) });
     expect(await h.versions.listByAgent('biz_pizza_01', id)).toHaveLength(0);
     expect((await get(h.app, `/api/agents/${id}?${PIZZA}`)).json().state).toBe('draft');
     expect(h.events.events).toHaveLength(0);
   });
 
-  it('each missing fact alone is reported with its own code', async () => {
+  it('each of the three alone is reported with its own code', async () => {
     const cases: [string, (ctx: BusinessContext) => BusinessContext][] = [
       ['missing_timezone', (ctx) => ({ ...ctx, profile: { id: ctx.profile.id, name: ctx.profile.name, category: ctx.profile.category } })],
       ['missing_message_consent_policy', (ctx) => ({ ...ctx, verifiedFacts: ctx.verifiedFacts.filter((f) => f.key !== 'message_consent') })],
-      ['missing_price', (ctx) => ({ ...ctx, catalogItemCount: 0 })],
+      ['empty_catalog', (ctx) => ({ ...ctx, catalogItemCount: 0 })],
     ];
     for (const [code, change] of cases) {
       const h = await harness({ knowledge: pizzaKnowledge(change) });
@@ -646,7 +658,7 @@ describe('publish: stop conditions (FLOWS.md, Builder stop conditions)', () => {
   });
 
   it('a required integration that is down is INTEGRATION_UNAVAILABLE; degraded or unrelated providers do not stop it', async () => {
-    let health: Awaited<ReturnType<IntegrationHealthReader['read']>> = { square: { state: 'disconnected' } };
+    let health: Awaited<ReturnType<IntegrationHealthReader['read']>> = { ...ALL_UP, square: { state: 'disconnected' } };
     const integrations: IntegrationHealthReader = { read: async () => health };
     const h = await harness({ integrations });
     const id = await createAgent(h);
@@ -659,7 +671,7 @@ describe('publish: stop conditions (FLOWS.md, Builder stop conditions)', () => {
     const faq = await createAgent(h, FAQ_SPEC);
     expect((await publish(h, faq, { confirm: true, makeLive: false })).statusCode).toBe(200);
 
-    health = { square: { state: 'degraded' }, message_channel: { state: 'connected' }, google_calendar: { state: 'disconnected' } };
+    health = { ...ALL_UP, square: { state: 'degraded' }, google_calendar: { state: 'disconnected' } };
     expect((await publish(h, id)).statusCode).toBe(200);
   });
 
@@ -677,7 +689,7 @@ describe('publish: stop conditions (FLOWS.md, Builder stop conditions)', () => {
     expect(res.json()).toMatchObject({ code: 'CONFLICT_UNRESOLVED', details: { conflictIds: ['cfl_db_01'] } });
   });
 
-  it('unconfirmed chat drafts do not stop a publish', async () => {
+  it('an unrelated unconfirmed chat draft (pickup window, already verified) does not stop a publish', async () => {
     const draftFacts = new InMemoryDraftFactStore();
     await draftFacts.insertDraft({
       id: 'fact_chat_draft_01', businessId: 'biz_pizza_01', kind: 'policy', key: 'pickup_window', value: { text: '30 minutes' },
@@ -688,5 +700,72 @@ describe('publish: stop conditions (FLOWS.md, Builder stop conditions)', () => {
     const id = await createAgent(h);
     expect((await publish(h, id)).statusCode).toBe(200);
     expect(await draftFacts.listBySession('biz_pizza_01', 'bld_test_01')).toHaveLength(1);
+  });
+});
+
+describe('review of 07389a0: publish stop conditions', () => {
+  it('finding 5: a phone agent needs the voice provider and the model, even with no capability that names them', async () => {
+    const h = await harness({ integrations: { read: async () => ({ ...ALL_UP, twilio: { state: 'disconnected' }, openai: { state: 'disconnected' } }) } });
+    const id = await createAgent(h, FAQ_SPEC);
+    const res = await publish(h, id);
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toMatchObject({ code: 'INTEGRATION_UNAVAILABLE', details: { providers: ['twilio', 'openai'] } });
+    expect(await h.versions.listByAgent('biz_pizza_01', id)).toHaveLength(0);
+  });
+
+  it('finding 5: an ordering agent needs Square and a booking agent needs Calendar', async () => {
+    const h = await harness({ integrations: { read: async () => ({ ...ALL_UP, square: { state: 'disconnected' }, google_calendar: { state: 'disconnected' } }) } });
+    const pizza = await createAgent(h);
+    expect((await publish(h, pizza)).json()).toMatchObject({ code: 'INTEGRATION_UNAVAILABLE', details: { providers: ['square'] } });
+    const booking = await createAgent(h, BOOKING_SPEC, BARBER);
+    expect((await publish(h, booking, { confirm: true, makeLive: false }, BARBER)).json()).toMatchObject({ code: 'INTEGRATION_UNAVAILABLE', details: { providers: ['google_calendar'] } });
+  });
+
+  it('finding 5: a health result that leaves out a required provider is INTEGRATION_UNAVAILABLE', async () => {
+    const { square: _square, ...withoutSquare } = ALL_UP;
+    const h = await harness({ integrations: { read: async () => withoutSquare } });
+    const id = await createAgent(h);
+    expect((await publish(h, id)).json()).toMatchObject({ code: 'INTEGRATION_UNAVAILABLE', details: { providers: ['square'] } });
+  });
+
+  it('finding 6: a non-empty catalog passes; the builder does not claim a mandatory-price check', async () => {
+    const h = await harness({ knowledge: pizzaKnowledge((ctx) => ({ ...ctx, catalogItemCount: 1 })) });
+    const id = await createAgent(h);
+    expect((await publish(h, id)).statusCode).toBe(200);
+  });
+
+  it('finding 7: a malformed stored draft is the contract error, with no version, state change or event', async () => {
+    const bad: [string, (spec: Record<string, unknown>) => Record<string, unknown>][] = [
+      ['object capabilities', (spec) => ({ ...spec, capabilities: {} })],
+      ['string capabilities', (spec) => ({ ...spec, capabilities: 'catalog.read' })],
+      ['null capabilities', (spec) => ({ ...spec, capabilities: null })],
+      ['no template', ({ template: _t, ...spec }) => spec],
+    ];
+    for (const [label, change] of bad) {
+      const h = await harness();
+      const id = await createAgent(h);
+      const agent = (await h.agents.get('biz_pizza_01', id))!;
+      await h.agents.update({ ...agent, draftSpec: change(agent.draftSpec as unknown as Record<string, unknown>) as unknown as typeof agent.draftSpec });
+      const res = await publish(h, id);
+      expect(res.statusCode, label).toBeLessThan(500);
+      expect(['VALIDATION_FAILED', 'CAPABILITY_NOT_ALLOWED'], label).toContain(res.json().code);
+      expect(await h.versions.listByAgent('biz_pizza_01', id), label).toHaveLength(0);
+      expect((await h.agents.get('biz_pizza_01', id))!.state, label).toBe('draft');
+      expect(h.events.events, label).toHaveLength(0);
+    }
+  });
+
+  it('finding 8: a consent draft from the chat does not count as the verified consent policy', async () => {
+    const draftFacts = new InMemoryDraftFactStore();
+    await draftFacts.insertDraft({
+      id: 'fact_chat_draft_02', businessId: 'biz_pizza_01', kind: 'policy', key: 'message_consent', value: { required: true, wording: 'May we text you?' },
+      sourceType: 'owner_chat', sourceRef: 'bld_test_02', status: 'draft', confidence: 0.8, version: 1,
+      createdAt: '2026-11-13T19:00:00Z', updatedAt: '2026-11-13T19:00:00Z',
+    });
+    const knowledge = pizzaKnowledge((ctx) => ({ ...ctx, verifiedFacts: ctx.verifiedFacts.filter((f) => f.key !== 'message_consent') }));
+    const h = await harness({ knowledge, draftFacts });
+    const id = await createAgent(h);
+    const res = await publish(h, id);
+    expect(res.json()).toMatchObject({ code: 'VALIDATION_FAILED', details: { issues: [{ code: 'missing_message_consent_policy' }] } });
   });
 });

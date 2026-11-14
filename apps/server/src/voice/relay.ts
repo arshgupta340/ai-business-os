@@ -555,7 +555,11 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     const output = Array.isArray(response?.output) ? response.output : [];
     const status = code(response?.status);
     if (status !== undefined && status !== 'completed') logger.info({ ...tag(), status }, 'voice: response.done not completed');
-    const calls = output.map(asObject).filter((o): o is JsonObject => o !== undefined && o.type === OAI_ITEM.functionCall);
+    // Issue #95 item 7: a function call on a response that was cancelled, cut off or failed is not run.
+    // The raw status, not the logged code: a response with no status field is treated as complete.
+    const raw = typeof response?.status === 'string' ? response.status : undefined;
+    const incomplete = raw !== undefined && raw !== 'completed';
+    const calls = incomplete ? [] : output.map(asObject).filter((o): o is JsonObject => o !== undefined && o.type === OAI_ITEM.functionCall);
     if (calls.length === 0) {
       if (finishing?.responseId !== undefined && finishing.responseId === str(response, 'id') && response?.status === 'completed') {
         finishing.complete = true;
