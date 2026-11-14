@@ -17,6 +17,9 @@ const Envelope = z.object({
   data: z.record(z.string(), z.unknown()).nullish(),
 });
 
+// UNTESTED GUESS: the character set of call and message IDs is not documented (examples: `call_abc123`,
+// `msg_abc123`). If real IDs differ, the delivery answers 400 with cause `routing_fields` in the server log,
+// a voice turn is silent and a call's end event is not stored; widen this pattern then.
 const ProviderId = z.string().regex(/^[A-Za-z0-9._:-]{1,200}$/);
 const VoiceData = z.object({ callId: ProviderId, to: E164Schema });
 const TextData = z.object({ messageId: ProviderId, to: E164Schema });
@@ -56,6 +59,8 @@ export function parseAgentPhoneEvent(rawBody: Buffer): ParsedAgentPhone {
   if (eventType === 'agent.call_ended') {
     const d = CallEndedData.safeParse(data);
     if (!d.success) return undefined;
+    // UNTESTED GUESS: the documentation shows `status: "completed"` only. `failed` is assumed; any other value,
+    // including a spelling this build does not know, records the call as dropped.
     const reason = data?.status === 'completed' ? 'completed' : data?.status === 'failed' ? 'failed' : 'dropped';
     return { eventType, test, event: { kind: 'call_status', providerCallId: d.data.callId, reason } };
   }

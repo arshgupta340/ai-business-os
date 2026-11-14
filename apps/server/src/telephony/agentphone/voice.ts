@@ -146,7 +146,8 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
     /** The tools the agent of a call holds (tests prove no write or external_message tool). */
     toolsOf(providerCallId: string) { const s = sessions.get(providerCallId); const c = s ? checkSessionCapabilities(s.spec) : undefined; return c?.ok ? c.tools : undefined; },
 
-    async turn(input: { providerCallId: string; to: string; callerLast4?: string | undefined; text: string }): Promise<TurnOutcome> {
+    /** `signal`: the provider's request was dropped, so nobody will hear this turn; it is abandoned. */
+    async turn(input: { providerCallId: string; to: string; callerLast4?: string | undefined; text: string; signal?: AbortSignal | undefined }): Promise<TurnOutcome> {
       const id = input.providerCallId;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const deadline = new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), deps.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS); });
@@ -177,11 +178,13 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
         let abandoned = false;
         let finished = false;
         let toolsRunning = 0;
-        const quiet = () => { if (finished || ((abandoned || s.closed) && toolsRunning === 0)) release(); };
+        const dropped = () => input.signal?.aborted === true;
+        const quiet = () => { if (finished || ((abandoned || s.closed || dropped()) && toolsRunning === 0)) release(); };
         const run = runAgentTurn(deps, { spec: s.spec, businessName: s.businessName, businessId: s.businessId, agentVersionId: s.agentVersionId, callId: s.callId, message: text, session: s,
-          abandoned: () => abandoned || s.closed,
+          abandoned: () => abandoned || s.closed || dropped(),
           onToolCall: (settled) => { toolsRunning += 1; void settled.then(() => { toolsRunning -= 1; quiet(); }); } });
         running = true;
+        input.signal?.addEventListener('abort', quiet, { once: true });
         void run.then(() => undefined, () => undefined).then(() => { finished = true; quiet(); });
         try {
           const result = await Promise.race([run, deadline]);

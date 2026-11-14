@@ -2,7 +2,7 @@
 // poll. With TELEPHONY_PROVIDER=twilio (the default) the route answers 503 without reading the body, so the
 // composed app behaves as before. With agentphone selected but settings missing, the route also answers 503
 // and health names what is missing; nothing falls back to Twilio.
-import { WEBHOOK_ENDPOINTS, type CapabilityId, type MessageChannelSetting } from '@abos/contracts';
+import { WEBHOOK_ENDPOINTS, type CallEndReason, type CapabilityId, type MessageChannelSetting } from '@abos/contracts';
 import { markWebhookProcessed } from '@abos/db';
 import type { FastifyPluginAsync } from 'fastify';
 import type { AgentModel } from '../builder/runner/agent-model';
@@ -19,6 +19,8 @@ import type { SeamDeps } from './seams';
 
 /** How often agentphone dispatches are checked for a delivery status (a read of the number's history). */
 export const AGENTPHONE_RECEIPT_POLL_MS = 60_000;
+/** A stored agent.call_ended row is recovered only once it is this old (the inline handler finishes in well under this). */
+export const CALL_END_RECOVERY_GRACE_SECONDS = 30;
 
 export type AgentPhoneWiring = {
   /** True when this server answers AgentPhone calls. */
@@ -95,15 +97,20 @@ export function createAgentPhoneWiring(deps: {
 
   async function recoverNow() {
     if (!voice) return 0;
+    // Only rows the inline handler has had time to finish: a row younger than the grace may be in its
+    // hands right now, and the first end wins, so recovering it here could record another reason.
     const rows = (await deps.db.query(`select id, payload from public.webhook_events where source = 'agentphone' and event_type = 'agent.call_ended'
-      and processed_at is null order by id limit 100`, [])).rows as { id: string; payload: { providerId?: unknown } }[];
+      and processed_at is null and received_at < now() - make_interval(secs => $1) order by id limit 100`, [CALL_END_RECOVERY_GRACE_SECONDS])).rows as { id: string; payload: { providerId?: unknown; reason?: unknown } }[];
     let n = 0;
     for (const r of rows) {
       const providerId = typeof r.payload?.providerId === 'string' ? r.payload.providerId : undefined;
       if (!providerId) continue;
+      // The end reason the provider reported, stored with the row. A row stored before the reason was kept
+      // has none and is closed as completed.
+      const stored = r.payload?.reason;
+      const reason: CallEndReason = stored === 'completed' || stored === 'dropped' || stored === 'failed' ? stored : 'completed';
       try {
-        // A recovered end has no status; the call is closed as completed (the caller hung up or the call ended).
-        await voice.ended({ providerCallId: providerId, reason: 'completed' });
+        await voice.ended({ providerCallId: providerId, reason });
         await markWebhookProcessed(deps.db, { businessId: null, webhookEventId: r.id });
         n += 1;
       } catch { deps.log.warn({ job: 'agentphone-recovery', webhookId: r.id }, 'call end still not applied'); }

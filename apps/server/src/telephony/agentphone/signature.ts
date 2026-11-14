@@ -15,7 +15,12 @@ export const AGENTPHONE_HEADERS = {
 
 /** The documented replay window. */
 export const AGENTPHONE_MAX_SKEW_SECONDS = 300;
-/** X-Webhook-ID is stored as webhook_events.provider_event_id; anything else is refused. */
+/**
+ * X-Webhook-ID is stored as webhook_events.provider_event_id; anything else is refused.
+ * UNTESTED GUESS: the vendor's documentation does not state the ID's character set (its examples look like
+ * `del_pqr901`). If real IDs use other characters, every delivery answers 401 with cause `id_format` in the
+ * server log; widen this pattern then. It must keep excluding `/` (signature.ts replayKey).
+ */
 const DELIVERY_ID = /^[A-Za-z0-9._:-]{1,200}$/;
 
 /**
@@ -26,7 +31,7 @@ const DELIVERY_ID = /^[A-Za-z0-9._:-]{1,200}$/;
  */
 export type SignatureCheck =
   | { ok: true; deliveryId: string; replayKey: string }
-  | { ok: false; reason: 'missing' | 'stale' | 'mismatch' };
+  | { ok: false; reason: 'missing' | 'id_format' | 'timestamp_format' | 'stale' | 'mismatch' };
 
 export function agentPhoneSignature(secret: string, timestamp: string, rawBody: Buffer): string {
   return `sha256=${createHmac('sha256', secret).update(`${timestamp}.`).update(rawBody).digest('hex')}`;
@@ -43,8 +48,10 @@ export function verifyAgentPhoneSignature(input: {
   const signature = header(AGENTPHONE_HEADERS.signature);
   const timestamp = header(AGENTPHONE_HEADERS.timestamp);
   const deliveryId = header(AGENTPHONE_HEADERS.id);
-  if (!input.secret || !signature || !timestamp || !deliveryId || !DELIVERY_ID.test(deliveryId)) return { ok: false, reason: 'missing' };
-  if (!/^\d{1,12}$/.test(timestamp)) return { ok: false, reason: 'missing' };
+  if (!input.secret || !signature || !timestamp || !deliveryId) return { ok: false, reason: 'missing' };
+  if (!DELIVERY_ID.test(deliveryId)) return { ok: false, reason: 'id_format' };
+  // Unix seconds, as in the vendor's own sample verifier (1 to 12 digits).
+  if (!/^\d{1,12}$/.test(timestamp)) return { ok: false, reason: 'timestamp_format' };
   if (Math.abs(input.nowMs / 1000 - Number(timestamp)) > AGENTPHONE_MAX_SKEW_SECONDS) return { ok: false, reason: 'stale' };
   const expected = Buffer.from(agentPhoneSignature(input.secret, timestamp, input.rawBody), 'utf8');
   const given = Buffer.from(signature.trim(), 'utf8');

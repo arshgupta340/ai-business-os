@@ -181,6 +181,51 @@ describe('AgentPhone webhook: replay, rule 6 and the processed mark', () => {
     expect([...simulated.tools].sort()).toEqual([...phone.tools].sort());
   });
 
+  it('a call end that could not be applied is recovered later with the reason the provider gave, not as completed', async () => {
+    w.model.push(async () => 'Hello.');
+    await signed(w, voiceTurn('call_rec_1', 'Hi'));
+    const voice = w.app.composed.agentphone.voice!;
+    const ended = voice.ended.bind(voice);
+    let failures = 1;
+    voice.ended = async (input) => { if (failures > 0) { failures -= 1; throw new Error('database unavailable'); } return ended(input); };
+    try {
+      const failed = { ...callEnded('call_rec_1'), data: { ...callEnded('call_rec_1').data, status: 'failed' } };
+      expect((await signed(w, failed, { id: 'whd_end_recover' })).statusCode).toBe(200);
+      const row = async () => (await w.t.db.query("select processed_at, payload from webhook_events where provider_event_id = 'whd_end_recover'", [])).rows[0] as { processed_at: Date | null; payload: unknown };
+      expect(await row()).toEqual({ processed_at: null, payload: { providerId: 'call_rec_1', reason: 'failed' } });
+      expect((await w.t.db.query("select status from calls where provider_call_id = 'call_rec_1'", [])).rows[0]).toEqual({ status: 'IN_PROGRESS' });
+      // Too fresh: the inline handler may still be working on it, so the recovery pass leaves it alone.
+      expect(await w.app.composed.agentphone.recoverNow()).toBe(0);
+      expect((await row()).processed_at).toBeNull();
+      await w.t.admin((q) => q.query("update public.webhook_events set received_at = now() - interval '2 minutes' where provider_event_id = 'whd_end_recover'"));
+      expect(await w.app.composed.agentphone.recoverNow()).toBe(1);
+      expect((await row()).processed_at).not.toBeNull();
+      expect((await w.t.db.query("select status, end_reason from calls where provider_call_id = 'call_rec_1'", [])).rows[0]).toEqual({ status: 'FAILED', end_reason: 'failed' });
+      expect(await w.app.composed.agentphone.recoverNow()).toBe(0);
+    } finally { voice.ended = ended; }
+  });
+
+  it('a turn whose request the provider dropped is abandoned: no further tool, and its unheard reply is not kept', async () => {
+    const voice = w.app.composed.agentphone.voice!;
+    const gone = new AbortController();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let late: unknown;
+    w.model.push(async ({ executeTool }) => { await gate; late = await executeTool('quote_order', { cart: CART }); return 'A reply the caller never heard.'; });
+    const squareBefore = w.square.calls.length;
+    const turn = voice.turn({ providerCallId: 'call_drop_1', to: PHONE, callerLast4: '6543', text: 'How much is a large pepperoni?', signal: gone.signal });
+    await sleep(30);
+    gone.abort();
+    release();
+    await turn;
+    expect(late).toMatchObject({ ok: false });
+    expect(w.square.calls.length).toBe(squareBefore);
+    let history: { text: string }[] = [];
+    w.model.push(async (input) => { history = input.history; return 'Yes?'; });
+    expect((await voice.turn({ providerCallId: 'call_drop_1', to: PHONE, text: 'Hello?' })).reply).toEqual({ text: 'Yes?' });
+    expect(history.map((x) => x.text)).not.toContain('A reply the caller never heard.');
+  });
+
   it('a turn on a call whose agent was unpublished is still marked processed (review F7)', async () => {
     w.model.push(async () => 'Hello.', async () => 'Still here.');
     await signed(w, voiceTurn('call_mk_1', 'Hi'));

@@ -33,7 +33,8 @@ export function createTwilioProvider(input: {
       const header = headers[WEBHOOK_ENDPOINTS.twilioStatus.signatureHeader];
       if (!input.validator || typeof header !== 'string' || !input.publicServerUrl || !input.validator.validate(header, statusUrl, params)) return { ok: false, reason: 'signature_invalid' };
       const parsed = parseTwilioStatus(params);
-      if (!parsed) return { ok: true, deliveryId: 'unparsed', eventType: 'unknown', test: false, event: { kind: 'ignored', eventType: 'unknown' } };
+      // No stable event ID can be derived, so it is refused rather than given a constant dedupe key.
+      if (!parsed) return { ok: false, reason: 'malformed' };
       const providerId = parsed.payload.providerId ?? '';
       const status = parsed.payload.status ?? '';
       let event: TelephonyEvent = { kind: 'ignored', eventType: parsed.eventType };

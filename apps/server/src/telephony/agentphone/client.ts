@@ -48,6 +48,9 @@ export function createAgentPhoneClient(config: { apiKey: string; numberId: strin
       const s = json.outboundSms;
       return { outboundSms: s === 'enabled' || s === 'activating' || s === 'registration_required' ? s : 'unknown' };
     },
+    // UNTESTED GUESS: the list envelope (`data`, `hasMore`, `nextCursor`) and the `limit` and `cursor` query
+    // names are taken from the OpenAPI file, not from a real answer. If they differ, every delivery-status
+    // poll fails with AgentPhoneReadError('shape') and dispatches stay SENT; nothing is written wrongly.
     async listMessages({ limit, cursor }) {
       const q = new URLSearchParams({ limit: String(limit), ...(cursor ? { cursor } : {}) });
       const json = await get(`${numberPath}/messages?${q.toString()}`);

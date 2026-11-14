@@ -29,7 +29,9 @@ export function missingAgentPhoneSettings(s: AgentPhoneSettings, publicServerUrl
   ];
 }
 
-export type AgentPhoneProvider = TelephonyProvider & { name: 'agentphone'; client: AgentPhoneClient | undefined };
+export type AgentPhoneProvider = TelephonyProvider & { name: 'agentphone'; client: AgentPhoneClient | undefined;
+  /** Read-only check for the agentphone message channel: passes only when outbound texting is enabled on the number. */
+  messageProbe: HealthProbe | undefined };
 
 export function createAgentPhoneProvider(settings: AgentPhoneSettings, ports: { http: HttpPort; nowMs(): number; publicServerUrl: string | undefined }): AgentPhoneProvider {
   const missing = missingAgentPhoneSettings(settings, ports.publicServerUrl);
@@ -47,6 +49,16 @@ export function createAgentPhoneProvider(settings: AgentPhoneSettings, ports: { 
     } catch { return { ok: false, detail: 'AgentPhone refused the number read' }; }
   } : undefined;
 
+  // The same read, judged for texting: `outboundSms` must be `enabled` (docs/notes-agentphone.md, "Numbers").
+  // `activating`, `registration_required` or a value this build does not know all mean a text would be refused.
+  const messageProbe: HealthProbe | undefined = client ? async () => {
+    try {
+      const n = await client.getNumber();
+      if (n.outboundSms === 'enabled') return { ok: true, detail: 'agentphone outbound SMS enabled' };
+      return { ok: false, detail: `agentphone outbound SMS ${n.outboundSms}: texts are refused until AgentPhone enables it (A2P 10DLC registration)` };
+    } catch { return { ok: false, detail: 'AgentPhone refused the number read' }; }
+  } : undefined;
+
   return {
     name: 'agentphone',
     missing,
@@ -54,11 +66,12 @@ export function createAgentPhoneProvider(settings: AgentPhoneSettings, ports: { 
     answering: { kind: 'turn_webhook', webhookPath: WEBHOOK_ENDPOINTS.agentphone.path, contentType: AGENTPHONE_NDJSON, format: formatTurnChunks },
     client,
     probe,
+    messageProbe,
     verifyWebhook({ rawBody, headers }): VerifiedWebhook {
       const sig = verifyAgentPhoneSignature({ rawBody, headers, secret: settings.webhookSecret, nowMs: ports.nowMs() });
-      if (!sig.ok) return { ok: false, reason: 'signature_invalid' };
+      if (!sig.ok) return { ok: false, reason: 'signature_invalid', cause: sig.reason };
       const parsed = parseAgentPhoneEvent(rawBody);
-      if (!parsed) return { ok: false, reason: 'malformed' };
+      if (!parsed) return { ok: false, reason: 'malformed', cause: 'routing_fields' };
       return { ok: true, deliveryId: sig.deliveryId, replayKey: sig.replayKey, eventType: parsed.eventType, test: parsed.test, event: parsed.event };
     },
   };

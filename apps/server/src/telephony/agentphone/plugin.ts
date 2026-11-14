@@ -46,9 +46,12 @@ export interface AgentPhoneWebhookDeps {
 
 type Row = { id: string };
 
-async function recordOnce(db: QueryDb, input: { deliveryId: string; replayKey: string | undefined; eventType: string; businessId: string | undefined; providerId: string | undefined }): Promise<Row | undefined> {
-  // Sanitized: the provider's object ID only. No phone number, transcript or message body is stored.
-  const params = [input.deliveryId, input.eventType.slice(0, 100), input.businessId ?? null, JSON.stringify(input.providerId ? { providerId: input.providerId } : {})];
+async function recordOnce(db: QueryDb, input: { deliveryId: string; replayKey: string | undefined; eventType: string; businessId: string | undefined; providerId: string | undefined;
+  reason?: string | undefined }): Promise<Row | undefined> {
+  // Sanitized: the provider's object ID and, for a call end, its end reason (a fixed code), so a recovered
+  // end closes the call the way the provider reported it. No phone number, transcript or message body is stored.
+  const payload = { ...(input.providerId ? { providerId: input.providerId } : {}), ...(input.reason ? { reason: input.reason } : {}) };
+  const params = [input.deliveryId, input.eventType.slice(0, 100), input.businessId ?? null, JSON.stringify(payload)];
   if (!input.replayKey) {
     const r = await db.query(`insert into public.webhook_events (source, provider_event_id, event_type, business_id, payload)
       values ('agentphone', $1, $2, $3, $4::jsonb) on conflict (source, provider_event_id) do nothing returning id`, params);
@@ -110,13 +113,17 @@ export const agentPhoneWebhookPlugin: FastifyPluginAsync<AgentPhoneWebhookDeps> 
     const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
     const verified = await deps.provider.verifyWebhook({ rawBody, headers: req.headers });
     if (!verified.ok) {
-      if (mayRecordRejection()) await deps.rejected(await deps.ownerOf(deps.provider.phoneNumber).catch(() => undefined), verified.reason).catch(() => undefined);
+      const record = mayRecordRejection();
+      // A fixed cause code only: it tells a wrong secret from a header or ID format this build does not expect.
+      if (record) deps.log.warn({ job: 'agentphone-webhook', reason: verified.reason, cause: verified.cause ?? 'unknown' }, 'webhook delivery refused');
+      if (record) await deps.rejected(await deps.ownerOf(deps.provider.phoneNumber).catch(() => undefined), verified.reason).catch(() => undefined);
       if (verified.reason === 'malformed') return reply.code(ERROR_CODE_INFO.VALIDATION_FAILED.httpStatus).send(makeApiError('VALIDATION_FAILED', 'Invalid webhook envelope', req.id));
       return reply.code(ERROR_CODE_INFO.SIGNATURE_INVALID.httpStatus).send(makeApiError('SIGNATURE_INVALID', 'Invalid webhook signature', req.id));
     }
     const { event } = verified;
     const routed = event.kind === 'incoming_call' || event.kind === 'incoming_text' ? await deps.ownerOf(event.to) : undefined;
-    const stored = await recordOnce(deps.db, { deliveryId: verified.deliveryId, replayKey: verified.replayKey, eventType: verified.eventType, businessId: routed, providerId: providerIdOf(event) });
+    const stored = await recordOnce(deps.db, { deliveryId: verified.deliveryId, replayKey: verified.replayKey, eventType: verified.eventType, businessId: routed, providerId: providerIdOf(event),
+      ...(event.kind === 'call_status' ? { reason: event.reason } : {}) });
     // A repeated delivery changes nothing. For a voice turn the caller hears nothing new.
     if (!stored) return reply.code(200).send({});
     if (verified.test) { await mark(stored.id, routed); return reply.code(200).send({}); }
@@ -127,8 +134,12 @@ export const agentPhoneWebhookPlugin: FastifyPluginAsync<AgentPhoneWebhookDeps> 
       let finished = false;
       const interim = setTimeout(() => { if (!finished) stream.write(formatTurnChunks([{ text: SPEECH.oneMoment, interim: true }])); }, deps.interimAfterMs ?? DEFAULT_INTERIM_AFTER_MS);
       let final: TurnReply = { text: SPEECH.trouble };
+      // If the provider drops the request before the reply (a barge-in or its own timeout; whether it does is
+      // not documented), nobody hears this turn: it is abandoned like a turn past its bound.
+      const gone = new AbortController();
+      reply.raw.once('close', () => { if (!finished) gone.abort(); });
       try {
-        final = (await deps.voice.turn({ providerCallId: event.providerCallId, to: event.to, callerLast4: event.callerLast4, text: event.text })).reply;
+        final = (await deps.voice.turn({ providerCallId: event.providerCallId, to: event.to, callerLast4: event.callerLast4, text: event.text, signal: gone.signal })).reply;
       } catch {
         deps.log.warn({ job: 'agentphone-webhook', webhookId: stored.id }, 'voice turn failed');
       } finally {

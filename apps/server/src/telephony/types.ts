@@ -28,7 +28,8 @@ export type TelephonyEvent =
 export type VerifiedWebhook =
   /** `replayKey`, when the provider's signature does not cover the delivery ID, is a second dedupe key for the signed content. */
   | { ok: true; deliveryId: string; replayKey?: string | undefined; eventType: string; test: boolean; event: TelephonyEvent }
-  | { ok: false; reason: 'signature_invalid' | 'malformed' };
+  /** `cause` is a fixed code for the server log only (never the body or a header value): it tells a wrong secret from a header or ID format this build does not expect. */
+  | { ok: false; reason: 'signature_invalid' | 'malformed'; cause?: string | undefined };
 
 export interface WebhookRequest {
   rawBody: Buffer;

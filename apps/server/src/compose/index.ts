@@ -249,8 +249,15 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     now,
   };
 
+  // What keeps the Twilio phone path off, by name. Also the Twilio telephony provider's `missing`.
+  const voiceMissing = [
+    ...(env.PUBLIC_SERVER_URL ? [] : ['PUBLIC_SERVER_URL']),
+    ...(providers.twilioValidator ? [] : ['TWILIO_AUTH_TOKEN']),
+    ...(providers.openaiSocketFactory ? [] : ['OPENAI_API_KEY']),
+    ...(hasDb ? [] : ['DATABASE_URL']),
+  ];
   const telephony = buildTelephony(env, { now,
-    twilio: { validator: providers.twilioValidator, probe: providers.probes?.twilio, missing: [] },
+    twilio: { validator: providers.twilioValidator, probe: providers.probes?.twilio, missing: voiceMissing },
     ...(options.telephony?.http ? { http: options.telephony.http } : {}) });
   const phoneLine = telephony.active.phoneNumber;
   // The AgentPhone path answers with the text agent model; without one it stays off (never the recorded stand-in).
@@ -291,12 +298,6 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   const fallback = createDbFallback({ db, providers, ownedNumber: env.TWILIO_PHONE_NUMBER, newId,
     ...(options.versionEnablesFallback ? { versionEnablesFallback: options.versionEnablesFallback } : {}) });
 
-  const voiceMissing = [
-    ...(env.PUBLIC_SERVER_URL ? [] : ['PUBLIC_SERVER_URL']),
-    ...(providers.twilioValidator ? [] : ['TWILIO_AUTH_TOKEN']),
-    ...(providers.openaiSocketFactory ? [] : ['OPENAI_API_KEY']),
-    ...(hasDb ? [] : ['DATABASE_URL']),
-  ];
   const voice: ComposedServer['voice'] = voiceMissing.length === 0 && env.PUBLIC_SERVER_URL && providers.twilioValidator && providers.openaiSocketFactory
     ? { ok: true, options: {
       publicServerUrl: env.PUBLIC_SERVER_URL, liveAgent: dbLiveAgentPort(db), calls,
@@ -321,6 +322,13 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     const off = [...ap.missing, ...(hasDb ? [] : ['DATABASE_URL']), ...modelMissing];
     providers.status.twilio = off.length ? { configured: false, detail: `telephony provider agentphone: missing ${off.join(', ')}` } : { configured: true, detail: 'telephony provider agentphone' };
     if (ap.probe) probes.twilio = ap.probe; else delete probes.twilio;
+  }
+  // D-12: MESSAGE_CHANNEL=agentphone has a read-only check, with either telephony provider: the number's
+  // outbound SMS state. The channel is connected only when AgentPhone reports outbound texting enabled, so
+  // publish refuses an agent with a message capability while the 10DLC registration is still pending.
+  // (The other message channels have no read-only check and stay "not confirmed", as on main.)
+  if (messageChannel === 'agentphone' && providers.status.message_channel.configured && telephony.agentphone?.messageProbe) {
+    probes.message_channel ??= telephony.agentphone.messageProbe;
   }
 
   const health = createHealthMonitor({ status: providers.status, probes, now, ...(options.healthProbeTimeoutMs ? { timeoutMs: options.healthProbeTimeoutMs } : {}) });

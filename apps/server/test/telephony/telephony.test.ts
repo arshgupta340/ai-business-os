@@ -62,7 +62,10 @@ describe('AgentPhone signature (docs: HMAC-SHA256 over "{timestamp}." + raw body
     expect(v(headers(body, { 'x-webhook-signature': 'sha256=abc' }))).toEqual({ ok: false, reason: 'mismatch' });
     expect(v(headers(body, { 'x-webhook-signature': undefined }))).toEqual({ ok: false, reason: 'missing' });
     expect(v(headers(body, { 'x-webhook-id': undefined }))).toEqual({ ok: false, reason: 'missing' });
-    expect(v(headers(body, { 'x-webhook-timestamp': 'yesterday' }))).toEqual({ ok: false, reason: 'missing' });
+    // A header this build cannot read has its own reason, so the server log tells it from a wrong secret.
+    expect(v(headers(body, { 'x-webhook-timestamp': 'yesterday' }))).toEqual({ ok: false, reason: 'timestamp_format' });
+    expect(v(headers(body, { 'x-webhook-id': 'id with spaces' }))).toEqual({ ok: false, reason: 'id_format' });
+    expect(v(headers(body, { 'x-webhook-id': 'a/b' }))).toEqual({ ok: false, reason: 'id_format' });
     expect(v(headers(body), body, '')).toEqual({ ok: false, reason: 'missing' });
     // A replay of a correctly signed delivery outside the 5 minute window.
     expect(v(headers(body), body, SECRET, NOW_MS + 301_000)).toEqual({ ok: false, reason: 'stale' });
@@ -258,6 +261,8 @@ describe('the Twilio provider is a thin wrapper with unchanged behavior', () => 
     expect(await p.verifyWebhook(req({ MessageSid: 'SM1', MessageStatus: 'delivered' }))).toMatchObject({ ok: true, event: { kind: 'delivery_receipt', providerMessageId: 'SM1', status: 'DELIVERED' } });
     expect(await p.verifyWebhook(req({ MessageSid: 'SM1', MessageStatus: 'sent' }))).toMatchObject({ ok: true, event: { kind: 'ignored' } });
     expect(await p.verifyWebhook(req({ CallSid: 'CA1', CallStatus: 'completed' }, 'other-token'))).toEqual({ ok: false, reason: 'signature_invalid' });
+    // A verified body with no call or message ID has no event ID to dedupe on: refused, never given a constant one.
+    expect(await p.verifyWebhook(req({ Foo: 'bar' }))).toEqual({ ok: false, reason: 'malformed' });
   });
   it('has no texting at all: a text is sent only by the approved message step (agentphone-review.test.ts)', () => {
     expect('sendText' in p).toBe(false);
