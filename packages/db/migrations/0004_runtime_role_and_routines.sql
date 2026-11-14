@@ -1,10 +1,16 @@
 -- Forward-only runtime privilege boundary. Apply as the migration/table owner.
+-- On Supabase that owner ("postgres") is not a superuser. CREATE ROLE may state negative
+-- attributes, but ALTER ROLE ... NOSUPERUSER or NOBYPASSRLS needs privileges it may lack, so an
+-- existing role is checked and refused instead of altered.
 do $$ begin
   if not exists (select 1 from pg_catalog.pg_roles where rolname = 'abos_app') then
-    create role abos_app nologin noinherit nosuperuser nocreatedb nocreaterole nobypassrls;
+    create role abos_app nologin noinherit nosuperuser nocreatedb nocreaterole noreplication nobypassrls;
+  end if;
+  if exists (select 1 from pg_catalog.pg_roles where rolname = 'abos_app'
+             and (rolsuper or rolinherit or rolcreatedb or rolcreaterole or rolreplication or rolbypassrls)) then
+    raise exception 'ROLE: existing abos_app has unsafe attributes; an administrator must remove them before this migration';
   end if;
 end $$;
-alter role abos_app noinherit nosuperuser nocreatedb nocreaterole nobypassrls;
 -- Remove inherited or SET ROLE routes even if the role was provisioned previously.
 do $$ declare r record; begin
   for r in select parent.rolname from pg_catalog.pg_auth_members m
@@ -12,7 +18,8 @@ do $$ declare r record; begin
     join pg_catalog.pg_roles child on child.oid = m.member where child.rolname = 'abos_app'
   loop execute pg_catalog.format('revoke %I from abos_app', r.rolname); end loop;
 end $$;
-grant usage on schema public, private, extensions to abos_app;
+-- No USAGE on extensions: abos_app needs no extension function directly; definer routines do.
+grant usage on schema public, private to abos_app;
 grant usage on schema private to service_role;
 grant execute on function public.gen_id(text) to abos_app;
 revoke all on all tables in schema public from abos_app;
@@ -73,6 +80,12 @@ begin
     else null end;
   if keys is null or pg_catalog.jsonb_typeof(p) is distinct from 'object' then raise exception 'MATERIAL: invalid bundle'; end if;
   foreach k in array keys loop
+    -- A customer who declined messages has no recipient. Only qr_only, which never sends,
+    -- may omit it or sign it as null; the routing check below validates every other case.
+    if k = 'messageRecipient' and p->>'messageChannel' = 'qr_only' and (not p ? k or p->k = 'null'::jsonb) then
+      if p ? k then result := result || pg_catalog.jsonb_build_object(k, p->k); end if;
+      continue;
+    end if;
     if not p ? k then raise exception 'MATERIAL: missing %', k; end if;
     if k in ('actionBundle') then
       if pg_catalog.jsonb_typeof(p->k) is distinct from 'array' then raise exception 'MATERIAL: % must be array', k; end if;
@@ -86,6 +99,7 @@ begin
   end loop;
   if p_type in ('order_bundle','price_edit') and p->>'currency' <> 'USD' then raise exception 'MATERIAL: currency'; end if;
   if p_type in ('order_bundle','booking_bundle') and (p->>'messageChannel' not in ('surge','android_gateway','whatsapp_sandbox','qr_only')
+    or (p->>'messageRecipient' is null and p->>'messageChannel' <> 'qr_only')
     or p->>'messageRecipient' !~ '^\+[1-9][0-9]{6,14}$') then raise exception 'MATERIAL: message routing'; end if;
   return result;
 end $$;
@@ -145,6 +159,8 @@ begin
     or p_type = 'booking_bundle' and not exists(select 1 from public.bookings where id=p_subject and business_id=p_business and status='AWAITING_OWNER_APPROVAL')
   then raise exception 'SUBJECT: requires AWAITING_OWNER_APPROVAL'; end if;
   if p_expires is null or p_expires <= pg_catalog.clock_timestamp() then raise exception 'EXPIRED: proposal'; end if;
+  -- SPEC 2.9: an approval lives 10 minutes. One extra minute absorbs server and database clock skew.
+  if p_expires > pg_catalog.clock_timestamp() + interval '11 minutes' then raise exception 'EXPIRED: proposal window exceeds 10 minutes'; end if;
   insert into public.approval_requests(business_id,bundle_type,subject_id,actor_type,actor_id,payload,payload_canonical,payload_hash,action_bundle,expires_at)
     values(p_business,p_type,p_subject,p_actor_type,p_actor,p_payload,p_canonical,p_hash,p_actions,p_expires) returning * into a;
   return a;
@@ -236,7 +252,9 @@ begin
   select * into x from public.action_executions where id=p_id and business_id=p_business for update;
   if x.status <> 'QUEUED' or x.attempts >= 3 or x.next_attempt_at > pg_catalog.clock_timestamp()
     or not public.execution_claim_allowed(x.approval_id,p_business,x.step_index,x.action_type) then return; end if;
-  perform private.check_subject(a);
+  -- Revalidate stored subject material before the first step consumes it. Later steps follow a
+  -- completed provider write that may legitimately change the subject (price_edit's catalog row).
+  if x.step_index = 0 then perform private.check_subject(a); end if;
   return query update public.action_executions set status='RUNNING',attempts=attempts+1,locked_by=p_worker,
     locked_at=pg_catalog.clock_timestamp(),started_at=coalesce(started_at,pg_catalog.clock_timestamp()) where id=p_id returning *;
 end $$;
@@ -248,7 +266,14 @@ begin
   for candidate in select id from public.action_executions where business_id=p_business and status='QUEUED'
     and attempts<3 and next_attempt_at<=pg_catalog.clock_timestamp() order by next_attempt_at,created_at,id
   loop
-    select * into x from private.claim_execution(p_business,candidate.id,p_worker);
+    begin
+      select * into x from private.claim_execution(p_business,candidate.id,p_worker);
+    exception when raise_exception then
+      -- A step whose subject no longer matches its approval stays QUEUED for review; a direct
+      -- claim still reports it. It must not block every later step in the business.
+      if sqlerrm like 'SUBJECT:%' or sqlerrm like 'MATERIAL:%' then continue; end if;
+      raise;
+    end;
     if found then return next x; return; end if;
   end loop;
 end $$;
@@ -270,6 +295,12 @@ begin
   if p_status='QUEUED' and (x.attempts>=3 or p_retry_at is null) then raise exception 'RETRY: attempt limit or missing retry time'; end if;
   if p_status='SUCCEEDED' and x.action_type not like 'local.%' and nullif(p_external_ref,'') is null then
     raise exception 'RESULT: provider reference required'; end if;
+  -- Never-broken rule 5: a message step succeeds only when its dispatch was sent, and the
+  -- reference is that dispatch's provider message ID.
+  if p_status='SUCCEEDED' and x.action_type like 'message.%' and not exists(
+    select 1 from public.message_dispatches m where m.execution_id=x.id and m.status in ('SENT','DELIVERED')
+      and m.provider_message_id=p_external_ref) then
+    raise exception 'RESULT: message step needs its sent dispatch and provider message ID'; end if;
   update public.action_executions set status=p_status,external_ref=p_external_ref,last_error=p_error,
     next_attempt_at=case when p_status='QUEUED' then p_retry_at else next_attempt_at end,
     locked_by=null,locked_at=null,finished_at=case when p_status='QUEUED' then null else pg_catalog.clock_timestamp() end
@@ -431,6 +462,26 @@ do $$ declare f record; begin
     end if;
   end loop;
 end $$;
+
+-- Fail closed if abos_app could create objects where they would be reachable or run with its rights.
+do $$ declare s text; begin
+  foreach s in array array['public','private','extensions','graphql_public'] loop
+    if pg_catalog.to_regnamespace(s) is not null and pg_catalog.has_schema_privilege('abos_app', s, 'CREATE') then
+      raise exception 'ROLE: abos_app can create objects in schema %; revoke that CREATE before this migration', s;
+    end if;
+  end loop;
+end $$;
+
+-- Security advisor: Supabase's SECURITY DEFINER public.rls_auto_enable() must not be callable
+-- through the API. Absent in plain Postgres, so this loop does nothing there.
+do $$ declare f record; begin
+  for f in select p.oid::regprocedure as signature from pg_catalog.pg_proc p
+    join pg_catalog.pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname = 'rls_auto_enable'
+  loop
+    execute pg_catalog.format('revoke execute on function %s from public, anon, authenticated', f.signature);
+  end loop;
+end $$;
+
 create or replace function public.approval_requests_guard() returns trigger
 language plpgsql set search_path = '' as $$
 begin

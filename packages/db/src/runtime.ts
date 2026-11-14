@@ -1,3 +1,4 @@
+import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 import type { ApprovalRow, ExecutionRow, ExpiredApproval, QueryExecutor } from './guarded-updates';
 
 export interface DispatchRow {
@@ -98,14 +99,31 @@ export async function runtimeExpireApprovals(db: QueryExecutor, businessId: stri
   return (await db.query('select * from private.expire_approvals($1)', [businessId])).rows as ExpiredApproval[];
 }
 
-/** Operator only. Never log the query or credentials; pass an administrator client. */
+/**
+ * The PostgreSQL SCRAM-SHA-256 verifier for a password (RFC 7677, as stored in pg_authid).
+ * Valid for printable ASCII passwords, which SASLprep leaves unchanged.
+ */
+export function scramSha256Verifier(password: string, salt: Buffer = randomBytes(16), iterations = 4096): string {
+  const salted = pbkdf2Sync(Buffer.from(password, 'utf8'), salt, iterations, 32, 'sha256');
+  const clientKey = createHmac('sha256', salted).update('Client Key').digest();
+  const storedKey = createHash('sha256').update(clientKey).digest();
+  const serverKey = createHmac('sha256', salted).update('Server Key').digest();
+  return `SCRAM-SHA-256$${iterations}:${salt.toString('base64')}$${storedKey.toString('base64')}:${serverKey.toString('base64')}`;
+}
+
+/**
+ * Operator only; pass an administrator client. The password never leaves this process: the
+ * statement carries only its SCRAM verifier, so server statement logs and pg_stat_statements
+ * cannot capture it. Never log the password.
+ */
 export async function enableRuntimeLogin(adminClient: QueryExecutor, password: string): Promise<void> {
-  if (!password || password.includes('\0')) throw new Error('Password must be nonempty and contain no NUL');
-  // Utility statements cannot bind parameters. E-literals are safe with either setting of
-  // standard_conforming_strings. Escape backslashes before quotes; never interpolate raw input.
-  const literal = "E'" + password.replace(/\\/g, '\\\\').replace(/'/g, "''") + "'";
+  // Printable ASCII only: the verifier must match the server's SASLprep exactly.
+  if (!/^[\x20-\x7e]{16,}$/.test(password)) throw new Error('Password must be at least 16 printable ASCII characters');
+  const verifier = scramSha256Verifier(password);
+  // Utility statements cannot bind parameters. The verifier is base64, digits, ':' and '$' only.
+  if (!/^SCRAM-SHA-256\$\d+:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$/.test(verifier)) throw new Error('Could not enable runtime login');
   try {
-    await adminClient.query('ALTER ROLE abos_app LOGIN PASSWORD ' + literal);
+    await adminClient.query(`ALTER ROLE abos_app LOGIN PASSWORD '${verifier}'`);
   } catch {
     // Some drivers echo the statement in errors. Do not propagate credential-bearing errors.
     throw new Error('Could not enable runtime login');
