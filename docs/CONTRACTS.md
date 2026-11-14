@@ -74,7 +74,7 @@ Input and output shapes. Server context (`businessId`, `callId`, `agentVersionId
 | `order.propose` | `{ cart: Cart; contact: Contact; fulfillment: Fulfillment; quoteId }` | `{ proposalId?; quote?: Quote; missingFields: string[]; approvalId? }` |
 | `order.status.read` | `{ orderId }` (same business, and same call for a caller) | `{ orderId; status: OrderStatus; paid: boolean; checkoutLinkSent: boolean }` |
 | `order.checkout.prepare` | `{ orderId; approvalId }` | `{ squareOrderId; squarePaymentLinkId; checkoutUrl }` |
-| `message.checkout.send` | `{ orderId; approvalId }` | `{ dispatchId?; status: MessageDispatchStatus \| "SKIPPED" }` (`SKIPPED` and no `dispatchId` when `MESSAGE_CHANNEL` is `qr_only`) |
+| `message.checkout.send` | `{ orderId; approvalId }` | `{ dispatchId?; status: MessageDispatchStatus \| "SKIPPED" }` (`SKIPPED` and no `dispatchId` when the approval's `messageChannel` is `qr_only`) |
 | `calendar.availability.read` | `{ serviceId; date: "YYYY-MM-DD" (business timezone); maxSlots?: number (1 to 5, default 5) }` | `{ slots: AvailabilitySlot[]; timezone }` on a 15 minute grid |
 | `booking.propose` | `{ serviceId; startUtc; customer: BookingCustomer }` | `{ proposalId?; approvalId?; missingFields: string[]; slot?: AvailabilitySlot }` |
 | `calendar.event.create` | `{ bookingId; approvalId }` | `{ googleEventId; calendarId }` |
@@ -101,7 +101,7 @@ Input and output shapes. Server context (`businessId`, `callId`, `agentVersionId
 | `square.catalog.price.update` | `catalog.price.update` |
 | `local.order.record`, `local.booking.record`, `local.fact.update`, `local.catalog.sync` | none: internal steps that write only our database, inside an approved bundle |
 
-Step rules: `local.order.record` and `local.booking.record` copy the external references onto the order or booking and write its state transition after the external steps. The Sheets step is authorized by the approval, but no `ActionExecution` and no sync job is created for it at approval. The transition into `PAID_VERIFIED` or `BOOKED_VERIFIED` creates its sync job. An order that is never paid has no Sheets row and no pending job. The step never blocks or reverses another step. A message step that fails or has an unknown result does not fail the order or booking, because the dashboard QR code still carries the link. When `MESSAGE_CHANNEL` is `qr_only`, the message step's execution is `SKIPPED` and no `MessageDispatch` is created.
+Step rules: `local.order.record` and `local.booking.record` copy the external references onto the order or booking and write its state transition after the external steps. The Sheets step is authorized by the approval, but no `ActionExecution` and no sync job is created for it at approval. The transition into `PAID_VERIFIED` or `BOOKED_VERIFIED` creates its sync job. An order that is never paid has no Sheets row and no pending job. The step never blocks or reverses another step. A message step that fails or has an unknown result does not fail the order or booking, because the dashboard QR code still carries the link. When the approval's `messageChannel` is `qr_only` (the server's `MESSAGE_CHANNEL` is `qr_only`, or the customer declined messages), the message step's execution is `SKIPPED` and no `MessageDispatch` is created.
 
 ## 3. Core schemas
 
@@ -178,7 +178,8 @@ type Quote = {
   quotedAt: string;
   expiresAt: string;          // quotedAt plus 5 minutes
 };
-type Contact = { name: string; messageRecipient: string /* E.164 */; messageConsent: boolean /* must be true */; consentAt: string };
+type Contact = { name: string; messageConsent: boolean; messageRecipient?: string /* E.164, present exactly when messageConsent is true */;
+  consentAt?: string /* required when messageConsent is true */ };
 type Fulfillment = { type: "pickup"; pickupAt: string /* UTC, inside verified hours */ };
 
 type OrderStatus = "AWAITING_OWNER_APPROVAL" | "APPROVED" | "CREATING_CHECKOUT" | "PAYMENT_LINK_READY" | "MESSAGE_SENT"
@@ -195,7 +196,7 @@ type Order = {
 
 type BookingStatus = "AWAITING_OWNER_APPROVAL" | "RECHECKING_SLOT" | "BOOKED_VERIFIED"
   | "SLOT_CONFLICT" | "REJECTED" | "EXPIRED" | "RETRY_REQUIRED";
-type BookingCustomer = { name: string; messageRecipient: string; messageConsent: boolean };
+type BookingCustomer = { name: string; messageConsent: boolean; messageRecipient?: string /* E.164, present exactly when messageConsent is true */ };
 type Booking = {
   id: string; businessId: string; callId?: string; status: BookingStatus;
   serviceId: string; serviceName: string; startUtc: string; endUtc: string; timezone: string;
@@ -240,9 +241,14 @@ type MessageDispatch = {
   recipient: string;           // E.164, stored in full, never in events
   template: "checkout_link" | "booking_confirmed";
   status: MessageDispatchStatus; providerMessageId?: string; idempotencyKey: string; errorCode?: ErrorCode;
-  sentAt?: string; deliveredAt?: string; createdAt: string; updatedAt: string;
+  sentAt?: string; deliveredAt?: string /* DELIVERED only */; createdAt: string; updatedAt: string;
 };
 
+```
+
+`messageConsent` is a boolean on `Contact` and on `BookingCustomer`. With consent, `messageRecipient` is required (and `consentAt` on a `Contact`). Without consent there is no recipient, the approval's `messageChannel` is `qr_only`, and the checkout link is shown as a QR code at the counter. Only `whatsapp_sandbox` can reach `DELIVERED`. `SENT` is the last state for every other channel, and `deliveredAt` is present only on a `DELIVERED` dispatch.
+
+```ts
 type CallStage = "CALL_STARTED" | "COLLECTING" | "VALIDATING" | "UNAVAILABLE" | "CUSTOMER_CONFIRMED"
   | "INQUIRY" | "SLOT_SEARCH" | "PROPOSAL";
 type Call = {
@@ -301,18 +307,18 @@ type GuardrailRule = "no_fact_changes" | "no_secret_reveal" | "no_approval_bypas
 
 ## 4. Approval payloads
 
-The server builds `payload` from stored rows, never from model output. Only these material fields go in, and all of them are hashed.
+The server builds `payload` from stored rows, never from model output. The payload holds exactly the material fields below and nothing else. `payloadHash` is the SHA-256 of the canonical JSON of the whole payload, so the stored hash is the hash of the stored payload. The payload schemas are strict: an extra field, such as `callId` or `messageConsent`, is refused.
 
-| bundleType | Payload fields (all required) |
+| bundleType | Payload fields (all required unless marked) |
 |---|---|
-| `order_bundle` | `businessId`, `subjectId`, `agentVersionId`, `cartHash`, `totalMinor`, `currency`, `pickupAt`, `messageRecipient`, `messageChannel`, `actionBundle`, `expiresAt` |
-| `booking_bundle` | `businessId`, `subjectId`, `agentVersionId`, `serviceId`, `calendarId`, `startUtc`, `endUtc`, `timezone`, `messageRecipient`, `messageChannel`, `actionBundle`, `expiresAt` |
+| `order_bundle` | `businessId`, `subjectId`, `agentVersionId`, `cartHash`, `totalMinor`, `currency`, `pickupAt`, `messageRecipient` (absent when the customer declined messages), `messageChannel`, `actionBundle`, `expiresAt` |
+| `booking_bundle` | `businessId`, `subjectId`, `agentVersionId`, `serviceId`, `calendarId`, `startUtc`, `endUtc`, `timezone`, `messageRecipient` (absent when the customer declined messages), `messageChannel`, `actionBundle`, `expiresAt` |
 | `fact_edit` | `businessId`, `subjectId`, `kind`, `key`, `fromVersion`, `before`, `after`, `actionBundle`, `expiresAt` |
 | `price_edit` (SHOULD) | `businessId`, `subjectId` (the `cat_` id), `squareItemId`, `variationId`, `fromPriceMinor`, `newPriceMinor`, `currency`, `squareVersion`, `actionBundle`, `expiresAt` |
 
-`messageChannel` is the server's `MESSAGE_CHANNEL` at proposal time. `agentVersionId` always comes from the `calls` row (SPEC 2.9). `callId` is not a material field; the order row holds it. The full quote and contact are shown to the owner from the order row but are not separately hashed (SPEC 2.9). `before` is `null` when a fact is new.
+`messageChannel` is the server's `MESSAGE_CHANNEL` at proposal time, or `qr_only` when the customer declined messages. Any channel other than `qr_only` requires `messageRecipient`. A `qr_only` payload may have no recipient, and a `qr_only` payload with no recipient is how the payload records that the customer declined: the payload has no `messageConsent` field. The order's `contact` and the booking's `customer` keep `messageConsent`. `agentVersionId` always comes from the `calls` row (SPEC 2.9). `callId` is not a material field; the order row holds it. The full quote and contact are shown to the owner from the order row but are not separately hashed (SPEC 2.9). `before` is `null` when a fact is new.
 
-**Hash recipe (SPEC 2.9).** Canonical JSON: keys sorted by code point at every depth, no whitespace, UTF-8, arrays kept in order, absent fields omitted. `payloadHash = "sha256:" + hex(sha256(canonicalJson(payload)))`, lowercase hex. `cartHash` uses the same recipe on the `Cart`, after sorting `modifierIds` inside each line and sorting lines by `variationId`, then joined `modifierIds`, then `note`.
+**Hash recipe (SPEC 2.9).** Canonical JSON: keys sorted by code point at every depth, no whitespace, UTF-8, arrays kept in order, absent fields omitted. `payloadHash = "sha256:" + hex(sha256(canonicalJson(payload)))`, lowercase hex. Payload timestamps (`expiresAt`, `pickupAt`, `startUtc`, `endUtc`) are stored in `toISOString()` form (UTC, `Z`, milliseconds, for example `2026-11-14T20:35:00.000Z`) before hashing, because `+00:00` and `Z` name the same instant but hash differently. `toCanonicalTimestamp(value)` in `packages/contracts` returns that form. `pickMaterialFields(bundleType, source)` picks the material fields from a wider object and validates them; for a stored payload it returns an equal object. `cartHash` uses the same recipe on the `Cart`, after sorting `modifierIds` inside each line and sorting lines by `variationId`, then joined `modifierIds`, then `note`.
 
 **Rules.**
 - An approval is one-use. The only move out of `PENDING` is one conditional update, so a second, different decision gets `APPROVAL_ALREADY_DECIDED`.
@@ -393,7 +399,7 @@ The payment poller checks every 30 seconds for 15 minutes after the link is read
 
 | From | Event | To |
 |---|---|---|
-| `QUEUED` | message step claimed while `MESSAGE_CHANNEL` is `qr_only` | `SKIPPED` (terminal; no dispatch row) |
+| `QUEUED` | message step claimed while the approval's `messageChannel` is `qr_only` | `SKIPPED` (terminal; no dispatch row) |
 | `QUEUED` | worker claims the row (`FOR UPDATE SKIP LOCKED`) | `RUNNING` |
 | `RUNNING` | provider confirms the result | `SUCCEEDED` (terminal, server only) |
 | `RUNNING` | retryable error, `attempts` below 3 | `QUEUED` (`attempts` plus one, with backoff) |
@@ -417,7 +423,7 @@ The payment poller checks every 30 seconds for 15 minutes after the link is read
 | `SENT` | verified delivery callback: delivered | `DELIVERED` (terminal, server only) |
 | `SENT` | verified delivery callback: failed | `FAILED` (terminal) |
 
-`SENT` is the last state for channels without delivery callbacks (only `whatsapp_sandbox` sends them).
+Only `whatsapp_sandbox` can reach `DELIVERED`. `SENT` is the last state for every other channel. The `MessageDispatch` schema refuses `DELIVERED` on any other channel.
 
 **Fact.** `draft` to `verified` when an approved `fact_edit` runs `local.fact.update`; the old `verified` row becomes `superseded` in the same transaction. `superseded` is terminal. **Fact conflict.** `open` to `resolved` when the owner picks a candidate (or an approved edit carries `resolvesConflictId`); `resolved` is terminal.
 
@@ -432,7 +438,7 @@ type ActivityEvent = { id: string; businessId: string; type: ActivityEventType; 
   actorType: "owner" | "deployed_agent" | "system" | "provider"; occurredAt: string; payload: object };
 ```
 
-Payloads are redacted. `guardrail.refused` names the rule that fired in `rule`. Phone numbers appear only as `recipientLast4`, `callerLast4` or `phoneNumberLast4`. Card data never appears in any field. Customer names appear as first name only. `correlationId` is the `call_` id for call journeys, the `bld_` id for builder journeys, the `file_` id for extraction and the `apv_` id for owner edits. Screens: OV Overview, LO Live operations (the sidebar item "Activity", SPEC 2.9), AP Approvals, MA My Agents, BK Business Knowledge, IN Integrations.
+Payloads are redacted. `guardrail.refused` names the rule that fired in `rule` and the specific reason in `reasonCode`. Phone numbers appear only as `recipientLast4`, `callerLast4` or `phoneNumberLast4`. Card data never appears in any field. Customer names appear as first name only. `correlationId` is the `call_` id for call journeys, the `bld_` id for builder journeys, the `file_` id for extraction and the `apv_` id for owner edits. Screens: OV Overview, LO Live operations (the sidebar item "Activity", SPEC 2.9), AP Approvals, MA My Agents, BK Business Knowledge, IN Integrations.
 
 | Type | Payload | Screens |
 |---|---|---|
@@ -462,7 +468,7 @@ Payloads are redacted. `guardrail.refused` names the rule that fired in `rule`. 
 | `agent.published` | `{ agentId, agentVersionId, version, phoneNumberLast4?, rolledBackFrom? }` (`rolledBackFrom` is the previous `agv_` id, on rollback only) | OV, MA |
 | `agent.paused` | `{ agentId }` | OV, MA |
 | `live_agent.changed` | `{ phoneNumberLast4, agentId, agentVersionId, previousAgentId? }` | OV, MA |
-| `guardrail.refused` | `{ callId, rule: GuardrailRule, toolName? }` | LO, MA |
+| `guardrail.refused` | `{ callId?, executionId?, approvalId?, reasonCode, rule: GuardrailRule, toolName? }`. `reasonCode` is a machine code of 1 to 64 characters matching `^[A-Za-z0-9_][A-Za-z0-9_.:-]*$`, for example `fact_change_forbidden` or `approval_pending`. `callId` is set for a refusal on a call, `executionId` and `approvalId` for a refusal in the executor or the approval engine | LO, MA |
 | `webhook.rejected` | `{ provider: "square" \| "twilio", reason: "signature_invalid" \| "malformed" }`. `businessId` is the business that owns the integration the webhook URL belongs to, read from `integrations`. Nothing from the request body is trusted, stored or copied | IN, LO |
 
 ## 8. Agent tools
@@ -489,33 +495,29 @@ The real toolset (`apps/server/src/tools/real`) calls the capability handlers of
 [
   { "type": "function", "name": "read_catalog",
     "description": "Search this shop's menu. Use exact item, size and topping IDs from the result.",
-    "parameters": { "type": "object", "properties": { "query": { "type": "string" } }, "additionalProperties": false } },
+    "parameters": {"type":"object","properties":{"query":{"type":"string"}},"additionalProperties":false} },
   { "type": "function", "name": "read_business_facts",
     "description": "Read verified opening hours, policies and services. Answer only from this result.",
-    "parameters": { "type": "object", "properties": { "kinds": { "type": "array", "items": { "enum": ["hours","policy","service","contact","faq"] } } }, "additionalProperties": false } },
+    "parameters": {"type":"object","properties":{"kinds":{"type":"array","items":{"type":"string","enum":["hours","policy","service","contact","faq"]}}},"additionalProperties":false} },
   { "type": "function", "name": "quote_order",
     "description": "Get the exact total and tax for a cart. Read the total back to the caller from this result only.",
-    "parameters": { "type": "object", "required": ["cart"], "additionalProperties": false, "properties": { "cart": { "$ref": "#/$defs/Cart" } } } },
+    "parameters": {"type":"object","properties":{"cart":{"type":"object","properties":{"lines":{"minItems":1,"type":"array","items":{"type":"object","properties":{"catalogItemId":{"type":"string","minLength":1},"variationId":{"type":"string","minLength":1},"quantity":{"type":"integer","minimum":1,"maximum":20},"modifierIds":{"type":"array","items":{"type":"string","minLength":1}},"note":{"type":"string","maxLength":140}},"required":["catalogItemId","variationId","quantity","modifierIds"]}}},"required":["lines"]}},"required":["cart"],"additionalProperties":false} },
   { "type": "function", "name": "propose_order",
-    "description": "Send the confirmed order to the owner for approval. Call only after the caller confirmed the read-back of this quote and agreed to receive a payment link.",
-    "parameters": { "type": "object", "required": ["cart","contact","fulfillment","quoteId"], "additionalProperties": false,
-      "properties": { "cart": { "$ref": "#/$defs/Cart" }, "contact": { "$ref": "#/$defs/Contact" },
-                      "fulfillment": { "$ref": "#/$defs/Fulfillment" }, "quoteId": { "type": "string" } } } },
+    "description": "Send the confirmed order to the owner for approval. Call only after the caller confirmed the read-back of this quote. Record whether the caller consents to messages; without consent, omit the recipient and use the dashboard QR code.",
+    "parameters": {"type":"object","properties":{"cart":{"type":"object","properties":{"lines":{"minItems":1,"type":"array","items":{"type":"object","properties":{"catalogItemId":{"type":"string","minLength":1},"variationId":{"type":"string","minLength":1},"quantity":{"type":"integer","minimum":1,"maximum":20},"modifierIds":{"type":"array","items":{"type":"string","minLength":1}},"note":{"type":"string","maxLength":140}},"required":["catalogItemId","variationId","quantity","modifierIds"]}}},"required":["lines"]},"contact":{"type":"object","properties":{"name":{"type":"string","minLength":1},"messageRecipient":{"type":"string","pattern":"^\\+[1-9][0-9]{6,14}$"},"messageConsent":{"type":"boolean"},"consentAt":{"type":"string","format":"date-time"}},"required":["name","messageConsent"]},"fulfillment":{"type":"object","properties":{"type":{"type":"string","const":"pickup"},"pickupAt":{"type":"string","format":"date-time"}},"required":["type","pickupAt"]},"quoteId":{"type":"string","pattern":"^qte_[A-Za-z0-9_]+$"}},"required":["cart","contact","fulfillment","quoteId"],"additionalProperties":false} },
   { "type": "function", "name": "get_order_status",
     "description": "Read the verified status of an order placed on this call.",
-    "parameters": { "type": "object", "required": ["orderId"], "additionalProperties": false, "properties": { "orderId": { "type": "string" } } } },
+    "parameters": {"type":"object","properties":{"orderId":{"type":"string","pattern":"^ord_[A-Za-z0-9_]+$"}},"required":["orderId"],"additionalProperties":false} },
   { "type": "function", "name": "read_calendar_availability",
     "description": "List free appointment slots for one service on one date.",
-    "parameters": { "type": "object", "required": ["serviceId","date"], "additionalProperties": false,
-      "properties": { "serviceId": { "type": "string" }, "date": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }, "maxSlots": { "type": "integer", "minimum": 1, "maximum": 5 } } } },
+    "parameters": {"type":"object","properties":{"serviceId":{"type":"string","pattern":"^svc_[A-Za-z0-9_]+$"},"date":{"type":"string","format":"date"},"maxSlots":{"type":"integer","minimum":1,"maximum":5}},"required":["serviceId","date"],"additionalProperties":false} },
   { "type": "function", "name": "propose_booking",
     "description": "Send the confirmed appointment to the owner for approval. Call only after the caller confirmed service, time and contact.",
-    "parameters": { "type": "object", "required": ["serviceId","startUtc","customer"], "additionalProperties": false,
-      "properties": { "serviceId": { "type": "string" }, "startUtc": { "type": "string" }, "customer": { "$ref": "#/$defs/BookingCustomer" } } } }
+    "parameters": {"type":"object","properties":{"serviceId":{"type":"string","pattern":"^svc_[A-Za-z0-9_]+$"},"startUtc":{"type":"string","format":"date-time"},"customer":{"type":"object","properties":{"name":{"type":"string","minLength":1},"messageRecipient":{"type":"string","pattern":"^\\+[1-9][0-9]{6,14}$"},"messageConsent":{"type":"boolean"}},"required":["name","messageConsent"]}},"required":["serviceId","startUtc","customer"],"additionalProperties":false} }
 ]
 ```
 
-`$defs` are the JSON Schema forms of `Cart`, `Contact`, `Fulfillment` and `BookingCustomer`, generated from the Zod schemas. If the Realtime API rejects `$ref`, S-02 inlines them.
+This is `TOOL_DEFINITIONS` from `packages/contracts/src/tools.ts`, exactly as generated from the Zod schemas, and a test checks that this block equals it. `Cart`, `Contact`, `Fulfillment` and `BookingCustomer` are inlined; there is no `$ref`. A `pattern` is dropped where a `format` (`date`, `date-time`) already says it; the server still validates the full schema. Under `propose_order`, `contact.messageConsent` is required and `messageRecipient` and `consentAt` are optional: without consent the model omits the recipient and the order uses the dashboard QR code.
 
 | Tool | Result when `ok: true` |
 |---|---|
@@ -545,7 +547,7 @@ Task S-03 creates these in `packages/contracts/fixtures/`. Every file validates 
 | `timeline.pizza-order.jsonl` | One `ActivityEvent` per line, `call.started` to `payment.verified`, including every `order.status_changed` |
 | `timeline.booking.jsonl` | One `ActivityEvent` per line, `proposal.created` to `booking.verified` |
 
-The mock feed in `apps/web/mocks` replays the two timelines. Short worked examples follow; the fixture files carry every line. Tax is illustrative; Square computes the real value.
+`materializeFixtures(now)` from `@abos/contracts/fixtures` returns a deep copy of the whole fixture world with every timestamp shifted by one delta, so the fixture now (`FIXTURE_NOW`, `2026-11-14T20:30:00Z`) lands on `now`, and with every `payloadHash` recomputed. The `PENDING` approvals are then live at `now`. `shiftTimeline(timeline, startAt)` and `materializeTimeline(timeline, startAt)` move one timeline. The mock feed in `apps/web/mocks` replays the two timelines. Short worked examples follow; the fixture files carry every line. Tax is illustrative; Square computes the real value.
 
 ```jsonl
 {"id":"evt_p01","businessId":"biz_pizza_01","type":"call.started","correlationId":"call_p01","actorType":"provider","occurredAt":"2026-11-14T19:00:00Z","payload":{"callId":"call_p01","agentId":"agt_pizza_01","agentVersionId":"agv_pizza_01_v1","channel":"phone","callerLast4":"0123"}}
