@@ -161,6 +161,8 @@ describe("catalog and prices", () => {
 
 const PIZZA_MENU_PDF = "%PDF-1.4\nDemo Pizza Co. Menu\nMargherita Large 21.00\n%%EOF\n";
 const HOURS_CSV = "Opening hours\nday,open,close\nFriday,11:00,23:00\n";
+// The barbershop closes Saturday at 16:00; this sheet says 21:00.
+const SATURDAY_HOURS_CSV = "Opening hours\nday,open,close\nSaturday,09:00,21:00\n";
 const BARBER_CSV = "Demo Barbershop price list\nservice,price,minutes\nHaircut,30,30\nBeard trim,15,15\nHaircut and beard,40,45\n";
 
 describe("files and conflicts", () => {
@@ -211,11 +213,16 @@ describe("files and conflicts", () => {
 
   // Uploads, their draft facts and their conflicts are rows in the database (#116), the same rows
   // GET /api/businesses/:id/facts reads, so a conflict from an upload reaches the Knowledge screen.
+  // The test above resolved its conflict, and getFacts lists open conflicts only, so this one uploads
+  // its own sheet and looks for the conflict that upload opened, by its ID.
   it("a conflict an upload opened is listed by getFacts, so the Knowledge screen can show it", async () => {
+    const file = await api.uploadFile(BARBER, new Blob([SATURDAY_HOURS_CSV], { type: "text/csv" }), "saturday-hours.csv");
+    const done = await waitFor(() => api.getFile(BARBER, file.id), (f) => f.extractionState === "EXTRACTED" || f.extractionState === "FAILED");
+    expect(done.extractionState).toBe("EXTRACTED");
+    const conflictId = done.conflictIds?.[0];
+    expect(conflictId).toBeDefined();
     const res = await api.getFacts(BARBER);
-    const files = s.requests.filter((r) => r.url.pathname.startsWith("/api/files/"));
-    expect(files.length).toBeGreaterThan(0);
-    expect(res.conflicts.some((c) => c.kind === "hours" && c.key === "fri")).toBe(true);
+    expect(res.conflicts.find((c) => c.id === conflictId)).toMatchObject({ id: conflictId, businessId: BARBER, kind: "hours", state: "open" });
   });
 
   describe("a conflict stored in the database", () => {
