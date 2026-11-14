@@ -10,14 +10,14 @@
 // contract error codes. It never performs an external write.
 import {
   ActionExecutionSchema, ApprovalRequestSchema, PriceEditApprovalPayloadSchema, type PriceEditApprovalPayload, OrderSchema, BookingSchema, BusinessIdSchema, UserIdSchema,
-  MessageChannelSettingSchema, ContactSchema, BookingCustomerSchema, FactKindSchema,
+  MessageChannelSettingSchema, ContactSchema, BookingCustomerSchema, FactKindSchema, FactConflictIdSchema, FactSourceTypeSchema,
   BUNDLE_ACTIONS, APPROVAL_EXPIRY_MS, ACTION_TYPE_CAPABILITY, CAPABILITIES,
   executionStepsFor, cartHash, payloadHash, idempotencyKey, canonicalJson, hashCanonical, pickMaterialFields,
   type ApprovalRequest, type BundleType, type ActivityEventType, type ActivityEventPayloads, type ActorType,
   type ActionExecution, type ErrorCode, type FactEditApprovalRequest, type Order, type Booking, type JsonValue,
 } from '@abos/contracts';
 import { applyFactUpdate, createApproval, runtimeClaimExecution, runtimeDecideAndEnqueue, runtimeExpireApprovals, type ExpiredApproval } from '@abos/db';
-import { mapRow } from '../api/rows';
+import { mapApprovalRow, mapRow } from '../api/rows';
 import { emitActivity } from './activity';
 import {
   PolicyError, type PolicyDb, type PolicyDeps, type QueryInterface,
@@ -49,7 +49,22 @@ export function executionFromRow(row: unknown): ActionExecution {
 }
 
 export function approvalFromRow(row: unknown): ApprovalRequest {
-  return ApprovalRequestSchema.parse(mapRow(row));
+  return ApprovalRequestSchema.parse(mapApprovalRow(row));
+}
+
+/**
+ * The conflict a fact edit named when it was proposed (API 3.1 `resolvesConflictId`). It is not hashed
+ * material, so it is not in `payload_canonical`. It is stored once, by `create_approval`, in the approval
+ * row's `payload` beside the material: the database requires `payload` to contain the canonical material
+ * (not to equal it), rebuilds the material from it, and freezes the column from insert, and abos_app
+ * cannot write the table at all. So the ID travels from the proposal to the step inside the database,
+ * and nothing a later request carries can set or change it.
+ */
+const RESOLVES_CONFLICT = 'resolvesConflictId';
+function namedConflictId(row: Row | undefined): string | undefined {
+  const payload = row?.payload;
+  const id = payload && typeof payload === 'object' && !Array.isArray(payload) ? (payload as Row)[RESOLVES_CONFLICT] : undefined;
+  return typeof id === 'string' && FactConflictIdSchema.safeParse(id).success ? id : undefined;
 }
 
 /** Routine refusals carry a short prefix (packages/db README). Map each to the contract code. */
@@ -124,12 +139,14 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
 
   /** Stores the approval through the routine: payload is exactly the material, hashed as canonical JSON. */
   async function storeApproval(tx: QueryInterface, bundleType: BundleType, source: Record<string, unknown>,
-    actorType: 'owner' | 'deployed_agent', actorId: string): Promise<ApprovalRequest> {
+    actorType: 'owner' | 'deployed_agent', actorId: string, beside: Record<string, string> = {}): Promise<ApprovalRequest> {
     const payload = pickMaterialFields(bundleType, source);
     const canonical = canonicalJson(payload);
+    // `beside` is stored in the row's payload next to the material and is never hashed. The material
+    // is spread last, so a field stored beside it can never replace a material field.
     const row = await createApproval(tx, {
       businessId: payload.businessId, bundleType, subjectId: payload.subjectId, actorType, actorId,
-      payload: payload as unknown as Record<string, unknown>, canonical, payloadHash: await hashCanonical(payload),
+      payload: { ...beside, ...(payload as unknown as Record<string, unknown>) }, canonical, payloadHash: await hashCanonical(payload),
       actionBundle: [...BUNDLE_ACTIONS[bundleType]], expiresAt: payload.expiresAt,
     });
     return approvalFromRow(row);
@@ -155,8 +172,8 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
 
   /**
    * Runs `local.fact.update` for an approved fact edit: claim the step through the routine, supersede
-   * the edited fact, insert the new verified version with the approved value, settle open conflicts on
-   * that key, and finish the step. One transaction. Returns false when the step was not claimable
+   * the edited fact, insert the new verified version with the approved value, resolve the one conflict
+   * the proposal named (if it named one and it is still open), and finish the step. One transaction. Returns false when the step was not claimable
    * (already done, or claimed by another worker). The executor can call this for the same step; the
    * claim routine lets exactly one caller run it.
    */
@@ -174,8 +191,25 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
         // apply_fact_update re-checks the subject against the signed material under the lease, then either
         // supersedes the verified row and inserts the next version, or promotes the new-key draft to
         // verified version 1. It writes fact.changed and finishes the step in this transaction.
-        // No conflict is resolved here (review finding 2): the approval does not carry a selected conflict.
-        await applyFactUpdate(tx, { businessId: a.businessId, executionId: claimed.id, workerId, attempt: claimed.attempts });
+        const fact = await applyFactUpdate(tx, { businessId: a.businessId, executionId: claimed.id, workerId, attempt: claimed.attempts });
+        // Review finding 2 and issue #97: only the conflict this approval named when it was proposed is
+        // resolved, never "whatever is open on this key". The ID is read from the stored approval row, and
+        // the update names the conflict, this business, the approved kind and key, and the open state, so
+        // a conflict that was resolved meanwhile, or one opened later on the same key, is left alone. It
+        // runs in the step's transaction: the fact and its conflict change together or not at all.
+        const conflictId = namedConflictId(await one(tx, 'select payload from public.approval_requests where id=$1 and business_id=$2', [a.id, a.businessId]));
+        if (conflictId) {
+          const resolved = await tx.query(`update public.fact_conflicts set state='resolved', resolved_by=$5, resolved_at=pg_catalog.clock_timestamp(), resolved_fact_id=$6
+            where id=$1 and business_id=$2 and kind=$3 and key=$4 and state='open' returning id`,
+          [conflictId, a.businessId, a.payload.kind, a.payload.key, a.decidedBy, fact.id]);
+          // apply_fact_update already wrote fact.changed for the version change and cannot take a conflict
+          // ID. This second event says the conflict is resolved by that fact; like the "keep the current
+          // value" event (api/conflicts.ts) it changes no version, so fromVersion equals toVersion.
+          if (resolved.rows.length === 1) {
+            await event(tx, at, a.businessId, a.id, 'fact.changed', { resolvedConflictId: conflictId, factId: String(fact.id), kind: a.payload.kind, key: a.payload.key,
+              fromVersion: Number(fact.version), toVersion: Number(fact.version), sourceType: FactSourceTypeSchema.parse(fact.source_type) }, 'owner');
+          }
+        }
         await event(tx, at, a.businessId, a.id, 'execution.succeeded', { executionId: claimed.id, actionType: 'local.fact.update' });
         return true;
       });
@@ -332,12 +366,18 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
             and expires_at > $3 order by created_at desc limit 1`, [input.businessId, subjectId, at.toISOString()]);
           if (pending) {
             const existing = approvalFromRow(pending);
-            if (existing.bundleType === 'fact_edit' && canonicalJson((existing.payload as { after: unknown }).after) === canonicalJson(input.value)) return { approval: existing };
+            if (existing.bundleType === 'fact_edit' && canonicalJson((existing.payload as { after: unknown }).after) === canonicalJson(input.value)) {
+              // The stored approval is frozen. It is the same proposal when it named the same conflict, or
+              // when this repeat names none. It can never gain a conflict it was not proposed with.
+              const named = namedConflictId(pending);
+              if (!input.resolvesConflictId || input.resolvesConflictId === named) return { approval: existing };
+              throw new PolicyError('INVALID_STATE', 'This edit is already waiting for confirmation without the conflict. Decide it first, then keep the current value on the conflict.');
+            }
           }
           const approval = await storeApproval(tx, 'fact_edit', {
             businessId: input.businessId, subjectId, kind, key: input.key, fromVersion: current ? Number(current.version) : 0,
             before: current ? current.value as JsonValue : null, after: input.value, actionBundle: BUNDLE_ACTIONS.fact_edit, expiresAt,
-          }, 'owner', input.ownerUserId);
+          }, 'owner', input.ownerUserId, input.resolvesConflictId ? { [RESOLVES_CONFLICT]: input.resolvesConflictId } : {});
           await requested(tx, at, approval, approval.id);
           if (approval.bundleType !== 'fact_edit') throw new PolicyError('INTERNAL');
           return { approval };

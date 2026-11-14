@@ -8,7 +8,7 @@ import {
 import type { Db } from '../db/index';
 import type { Env } from '../env';
 import { AppError } from '../errors';
-import { mapRow } from './rows';
+import { mapApprovalRow, mapRow } from './rows';
 import { setLiveAgent } from './live-agent';
 import { unavailableCatalog, type CatalogPort, type EnginePorts } from './ports';
 import { createHealthMonitor, type HealthMonitor } from '../compose/health';
@@ -101,7 +101,7 @@ async function list(db: Db, name: keyof typeof collections, businessId: string, 
   values.push(limit + 1);
   const rows = (await db.query(`select *, to_char(${time} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as page_time
     from public.${table} where ${clauses.join(' and ')} order by ${time} desc, id desc limit $${values.length}`, values)).rows;
-  const mapped = rows.slice(0, limit).map(mapRow);
+  const mapped = rows.slice(0, limit).map(name === 'listApprovals' ? mapApprovalRow : mapRow);
   const page = name === 'listActivity' ? await normalizeActivity(db, mapped) : mapped;
   const last = page.at(-1);
   return { items: page, ...(rows.length > limit && last ? {
@@ -112,7 +112,7 @@ async function list(db: Db, name: keyof typeof collections, businessId: string, 
 async function one(db: Db, table: string, id: string, businessId: string) {
   const row = (await db.query(`select * from public.${table} where id = $1 and business_id = $2`, [id, businessId])).rows[0];
   if (!row) throw notFound();
-  return mapRow(row);
+  return table === 'approval_requests' ? mapApprovalRow(row) : mapRow(row);
 }
 
 async function catalog(db: Db, businessId: string) {
