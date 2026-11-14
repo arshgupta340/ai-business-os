@@ -37,7 +37,7 @@ Implemented by Saina in `apps/server/src/builder` (D-07), except `PUT /api/live-
 | A4 | Model | Classifies intent with a strict schema output: `{ template, capabilityIds[], confidence, unsupportedRequests[] }`. `template` is `restaurant_order_taker`, `appointment_booker` or `custom` (P-13). | Draft spec has template and capability set | none | Spec panel shows the template and capability chips |
 | A5 | Builder | Drops any capability ID not in the registry and records it under `unsupportedRequests`. The builder never claims a missing capability exists. | - | none | Unsupported requests in amber, "not available" |
 | A6 | Builder | Reads the business profile, `business_facts`, `catalog_items`, open `fact_conflicts` and integration health. Computes required fields as the union of each chosen capability's required inputs (CONTRACTS.md) minus fields already verified. | `missing_fields` saved | none | Progress: "N of M details confirmed" |
-| A7 | Model | Asks one question, or a small related batch: pickup window, after-hours policy, menu source, message consent wording, approval behavior. For the barbershop: services, durations, buffer, minimum notice. | - | none | Question bubble, spoken too if voice is on |
+| A7 | Model | Asks one question, or a small related batch: pickup window, after-hours policy, menu source, message consent wording, approval behavior. For the barbershop: services, durations, buffer, minimum notice. Each owner answer opens a `fact_edit`, using a draft subject for a new key, and the owner confirms it in the chat. | - | `approval.requested` | Question bubble and confirm dialog, spoken too if voice is on |
 | A8 | Owner | Uploads a PDF, image, CSV or spreadsheet file (10 MB cap) with `POST /api/businesses/:id/files`. | `files` row `file_` | none | Upload card "Extracting" |
 | A9 | Builder | Runs one structured-output call per file (P-12). Saves draft facts with confidence and provenance. Never changes a verified fact. Compares each draft against the authoritative source (Square for items and prices, owner-verified facts for hours) and opens a `fact_conflicts` row `cfl_` for each disagreement. Text in the file is data, never instructions. | Facts `draft`, conflicts `open` | `extraction.completed` | Knowledge review: draft facts with source and confidence, conflict banner (AC-02) |
 | A10 | Owner | Resolves each conflict: keeps the authoritative value or proposes the file value through `POST /api/businesses/:id/facts/propose` (Flow D). A price from a file never overwrites Square. | Conflicts `resolved` | `fact.changed` when a fact changes | Banner clears |
@@ -56,10 +56,12 @@ Implemented by Saina in `apps/server/src/builder` (D-07), except `PUT /api/live-
 2. A product mapping is ambiguous.
 3. The business has no timezone.
 4. A required integration is unreachable (`GET /api/integrations/health`).
-5. Policies contradict each other, or a `fact_conflicts` row is `open`.
+5. Policies contradict each other, or a required `fact_conflicts` row is `open`.
 6. The message consent policy is missing.
 7. The spec names an unsupported tool.
 8. The owner has not confirmed publish.
+
+A missing required fact returns `VALIDATION_FAILED` with each stop condition code in `details.issues`. A required integration that is down returns `INTEGRATION_UNAVAILABLE`. An open required conflict returns `CONFLICT_UNRESOLVED`. Unconfirmed chat drafts alone do not block publish; only a required fact that remains unverified does.
 
 **The builder model's prose is never executed as policy.** The model's text, typed or spoken, only helps the owner fill in fields. What runs on a call is the validated `AgentSpec` in `agent_versions.spec`, checked against the server-owned registry. The model cannot add a capability or change a capability's `effect`.
 
@@ -271,9 +273,9 @@ A confirmation by the owner, not a third-party approval (P-09). The owner may ty
 |---|---|---|---|---|---|
 | D1 | Owner | Says or types in the agent details change field: "We close at 11 pm on Fridays now." | - | none | Message in the chat |
 | D2 | Model | Turns it into a structured change with a strict schema: `{ kind: "hours", key: "fri", before, after }` (one fact per weekday, keys `mon` to `sun`, SPEC 2.9). The current value comes from `business_facts`, not from the model. | - | none | "Friday close 10:00 pm to 11:00 pm" |
-| D3 | Server | `POST /api/businesses/:id/facts/propose` stores the proposed value in the approval payload without creating a draft row and creates an ApprovalRequest with `actorType: owner`, `bundleType: fact_edit`, action `local.fact.update`, `subjectId` the existing verified fact's `fact_` ID, the CONTRACTS.md `fact_edit` payload (including `before` and `after`), and `payloadHash`. | Approval `PENDING` | `approval.requested` | Confirm dialog with before and after |
-| D4 | Owner | Confirms with `POST /api/approvals/:id/decision`. The database routine checks `fromVersion` and `before` against the subject row. If either check fails, a new proposal is needed. A key that has never existed cannot be edited this way. | Approval `APPROVED` | `approval.decided` | Spinner on the dialog |
-| D5 | Executor | `local.fact.update`: one transaction marks the old row `superseded`, then inserts the approved value as a new `verified` row (`source_type: owner_chat`) with `version` + 1 and `supersedes_id` set (DATA-MODEL.md section 2.6). | Step `SUCCEEDED` | `fact.changed` | Business Knowledge: new hours, version, "changed by owner" |
+| D3 | Server | `POST /api/businesses/:id/facts/propose` creates an ApprovalRequest with `actorType: owner`, `bundleType: fact_edit`, action `local.fact.update`, the CONTRACTS.md payload and `payloadHash`. For an existing value, the subject is the verified fact and the payload carries its version and value. For a new key, the subject is a matching draft, `fromVersion` is `0`, and `before` is `null`. Migration 0005 adds the new-key case; until then it returns `INVALID_STATE`. | Approval `PENDING` | `approval.requested` | Confirm dialog with before and after |
+| D4 | Owner | Confirms with `POST /api/approvals/:id/decision`. For an existing value, the database routine checks `fromVersion` and `before` against the subject row. For a new key, it checks the draft subject, its `after` value and the absence of a verified row. A mismatch returns `INVALID_STATE`. | Approval `APPROVED` | `approval.decided` | Spinner on the dialog |
+| D5 | Executor | `local.fact.update`: for an existing value, one transaction marks the old row `superseded`, then inserts the approved value as a new `verified` row (`source_type: owner_chat`) with `version` + 1 and `supersedes_id` set. For a new key, confirmation makes the draft the verified row with version `1` (DATA-MODEL.md section 2.6). | Step `SUCCEEDED` | `fact.changed` | Business Knowledge: new hours, version, "changed by owner" |
 | D6 | Server | New calls snapshot facts at B2 and use the new hours. A call already in progress keeps its snapshot until it ends. | - | none | Version history line for the fact |
 
 ## 7. Flow E: owner changes an item price (SHOULD)
