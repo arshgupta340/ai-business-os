@@ -34,6 +34,8 @@ const SPEC_CAPABILITIES = [
   ['message.booking.confirm', 'external_message', 'required', 'MUST'],
   ['sheets.rows.append', 'write', 'required', 'MUST'],
   ['catalog.price.update', 'write', 'required', 'SHOULD'],
+  // D-13 demo mode only. A propose that opens no approval; the database pairs every propose with creates_approval.
+  ['menu.message.propose', 'propose', 'creates_approval', 'SHOULD'],
 ] as const;
 
 describe('capability registry', () => {
@@ -104,12 +106,13 @@ describe('capability registry', () => {
       get_order_status: 'order.status.read',
       read_calendar_availability: 'calendar.availability.read',
       propose_booking: 'booking.propose',
+      propose_menu_message: 'menu.message.propose',
     });
     for (const tool of ToolNameSchema.options) {
       const effect = CAPABILITIES[TOOL_CAPABILITY[tool]].effect;
       expect(['read', 'propose']).toContain(effect);
     }
-    expect(TOOL_DEFINITIONS).toHaveLength(7);
+    expect(TOOL_DEFINITIONS).toHaveLength(8);
   });
 
   it('refuses a write or external_message capability as a tool, and unknown ids', () => {

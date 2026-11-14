@@ -96,6 +96,10 @@ export const MessageBookingConfirmInputSchema = z.object({ bookingId: BookingIdS
 export const SheetsAppendInputSchema = z.object({ recordType: SyncRecordTypeSchema, recordId: z.string().min(1) });
 export const SheetsAppendOutputSchema = z.object({ syncJobId: SyncJobIdSchema });
 
+/** D-13 demo mode: no arguments. The server picks the recipient (the listed caller) and the menu (the cached catalog). */
+export const MenuMessageProposeInputSchema = z.strictObject({});
+export const MenuMessageProposeOutputSchema = z.object({ sent: z.boolean(), message: z.string().optional() });
+
 export const PriceUpdateInputSchema = z.object({
   squareItemId: z.string().min(1),
   variationId: z.string().min(1),
@@ -190,6 +194,14 @@ export const CAPABILITIES = {
     effect: 'write', approvalMode: 'required', requiredScopes: ['square:catalog.write'], handlerId: 'square.updateVariationPrice', timeoutMs: 8000, tier: 'SHOULD',
     inputSchema: PriceUpdateInputSchema, outputSchema: PriceUpdateOutputSchema,
   },
+  // D-13 demo mode only. A propose: the model asks and the server decides whether to send. It opens no
+  // approval; approvalMode is 'creates_approval' only because the capabilities table requires that pairing
+  // for every propose capability. It is never in a template, and the server adds it to a call only in demo mode.
+  'menu.message.propose': {
+    id: 'menu.message.propose', description: 'Ask the server to send the menu to the caller by message (demo mode only)',
+    effect: 'propose', approvalMode: 'creates_approval', requiredScopes: ['demo:menu.message'], handlerId: 'demo.sendMenu', timeoutMs: 8000, tier: 'SHOULD',
+    inputSchema: MenuMessageProposeInputSchema, outputSchema: MenuMessageProposeOutputSchema,
+  },
 } as const satisfies Record<CapabilityId, CapabilityDefinition>;
 
 export const CAPABILITY_LIST: readonly CapabilityDefinition[] = CapabilityIdSchema.options.map((id) => CAPABILITIES[id]);
@@ -211,6 +223,7 @@ export const TOOL_CAPABILITY = {
   get_order_status: 'order.status.read',
   read_calendar_availability: 'calendar.availability.read',
   propose_booking: 'booking.propose',
+  propose_menu_message: 'menu.message.propose',
 } as const satisfies Record<ToolName, CapabilityId>;
 
 /** Effects a deployed agent (phone, sim-call or test console) may hold as tools. */

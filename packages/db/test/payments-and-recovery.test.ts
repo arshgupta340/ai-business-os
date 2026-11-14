@@ -72,7 +72,7 @@ describe('0005 migration', () => {
       const q = await fresh.query<{ name: string }>('select name from public.schema_migrations order by name');
       expect(q.rows.map(r => r.name)).toEqual(readMigrations().map(f => f.name));
       expect(q.rows.map(r => r.name)).toContain('0005_payments_and_stale_leases.sql');
-      expect(q.rows.at(-1)?.name).toBe('0008_owner_recovery.sql');
+      expect(q.rows.at(-1)?.name).toBe('0009_demo_orders.sql');
       const owners = await fresh.query<{ o: string }>(`select distinct pg_get_userbyid(proowner) o from pg_proc p
         join pg_namespace n on n.oid=p.pronamespace where n.nspname='private' and proname in ('mark_order_paid','mark_order_payment_failed','recover_stale_executions')`);
       expect(owners.rows).toEqual([{ o: 'supabase_postgres' }]);
@@ -796,7 +796,7 @@ it('upgrades populated 0004 with a legacy APPROVED running checkout using only a
     const originalChecksums = (await fresh.query('select name,checksum from public.schema_migrations order by name')).rows;
     await fresh.exec('set role supabase_postgres');
     const result = await applyMigrations(migrationDb(fresh));
-    expect(result.applied).toEqual(['0005_payments_and_stale_leases.sql', '0006_ownership_material_and_receipts.sql', '0007_agentphone_channel.sql', '0008_owner_recovery.sql']);
+    expect(result.applied).toEqual(['0005_payments_and_stale_leases.sql', '0006_ownership_material_and_receipts.sql', '0007_agentphone_channel.sql', '0008_owner_recovery.sql', '0009_demo_orders.sql']);
     await fresh.exec('reset role');
     expect((await fresh.query('select name,checksum from public.schema_migrations order by name limit 4')).rows).toEqual(originalChecksums);
     await fresh.exec('set role abos_app');

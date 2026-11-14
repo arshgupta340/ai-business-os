@@ -209,3 +209,13 @@ What is now recorded, and what still needs a contract field. The contract was no
 - Not proven: the Google Calendar read on a real calendar. The adapter uses the same two reads `createEvent` already makes (property search, then the event by ID, 404 or 410 meaning none); the tests use a fake client. Google refuses a second insert with the same event ID, so a wrong "absent" cannot create a second event. A cancelled or deleted (410) event under the step's ID is "unknown" for recovery, so an approval never recreates a booking someone cancelled. Whether Google's `events.get` returns a cancelled event or 410 was not tested; both are handled.
 - The uploaded draft after "keep the current value" still stays `draft` (issue #96). An honest `superseded` needs a change to a 0002 check; not done.
 - The price link of issue #96 needed no migration: the conflict ID is stored beside the hashed material in `approval_requests.payload`, as a fact edit's is.
+
+## Migration 0009 and demo mode (D-13), 2026-11-14, branch `arsh/demo-pay-first`
+
+- Migration 0009 (`0009_demo_orders.sql`) is written and tested on PGlite only. It is NOT applied to the live database. Demo mode needs it: with `DEMO_PAY_FIRST=1` and no 0009, the demo sends fail on the missing tables. Apply it with `npm run migrate -w @abos/db` as the migration owner.
+- It adds `demo_orders` and `demo_messages`. `abos_app` may select, insert and update them; anon, authenticated and service_role get nothing. No existing object changes. The reset script empties both when they exist.
+- `demo_orders` has one column the design did not list, `sandbox_payment_id`. The worker records the Square sandbox payment there so it never pays twice while it waits for Square to confirm.
+- Not verified: a real WhatsApp send through the Twilio sandbox, the 24-hour sandbox window, a real Square sandbox UpdateOrder and CreatePayment from the server worker, and a real phone call that asks for the menu. All are tested with fakes only.
+- The demo pay link and confirmation put the link last, after "Demo: no real money moves." and "Demo message.", because of the SPEC 2.9 message wording rule. The owner's wording put the link in the middle.
+- The dashboard does not show the demo payment. No existing activity event fits it honestly: `payment.verified` would claim a provider-confirmed payment. The owner sees the real `payment.verified` once Square confirms the sandbox payment after approval.
+- If the owner approves while the caller is still on the line, the agent hears the normal qr_only decision line ("the link is at the counter"), which does not match the demo story. The demo prompt changes one line only.

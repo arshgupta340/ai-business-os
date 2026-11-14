@@ -35,7 +35,7 @@ describe('migrations', () => {
 
   it('apply cleanly to an empty database, in name order', async () => {
     const files = readMigrations();
-    expect(files.length).toBe(8);
+    expect(files.length).toBe(9);
     const result = await applyMigrations(migrationDb(db), files);
     expect(result.applied).toEqual(files.map((f) => f.name));
     expect(result.skipped).toEqual([]);

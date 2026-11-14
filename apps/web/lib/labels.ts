@@ -288,6 +288,7 @@ export const TOOL_LABELS: Record<ToolName, string> = {
   get_order_status: 'Checked an order status',
   read_calendar_availability: 'Checked the calendar',
   propose_booking: 'Proposed a booking',
+  propose_menu_message: 'Asked to send the menu (demo)',
 };
 
 /**

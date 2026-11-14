@@ -174,7 +174,7 @@ it('upgrades a database shaped like the real one (seeded world, two businesses, 
     expect(before.f).toBeGreaterThanOrEqual(33); expect(before.c).toBeGreaterThanOrEqual(6); expect(counts0.v).toBeGreaterThan(0);
 
     await fresh.exec('set role supabase_postgres');
-    expect((await applyMigrations(migrationDb(fresh))).applied).toEqual(['0005_payments_and_stale_leases.sql', '0006_ownership_material_and_receipts.sql', '0007_agentphone_channel.sql', '0008_owner_recovery.sql']);
+    expect((await applyMigrations(migrationDb(fresh))).applied).toEqual(['0005_payments_and_stale_leases.sql', '0006_ownership_material_and_receipts.sql', '0007_agentphone_channel.sql', '0008_owner_recovery.sql', '0009_demo_orders.sql']);
     await fresh.exec('reset role');
     expect((await fresh.query('select distinct spec_revision from public.agents')).rows).toEqual([{ spec_revision: 1 }]);
     expect((await fresh.query<{ f: number; c: number }>('select (select count(*)::int from public.business_facts) f,(select count(*)::int from public.catalog_items) c')).rows[0]).toEqual(before);

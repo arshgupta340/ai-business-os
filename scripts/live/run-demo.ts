@@ -23,6 +23,7 @@ import { createPool } from '../../apps/server/src/db/index';
 import { createCalendarAdapter } from '../../apps/server/src/adapters/calendar/index';
 import { APPROVAL_EXPIRY_MS } from '@abos/contracts';
 import { parseEnv } from '../../apps/server/src/env';
+import { sandboxPay as sharedSandboxPay, type SandboxPayResult } from '../../apps/server/src/adapters/square/sandbox-pay';
 import { sheets } from '@googleapis/sheets';
 import { calendar } from '@googleapis/calendar';
 import { JWT } from 'google-auth-library';
@@ -251,34 +252,16 @@ async function loadPizzaState() {
 
 type PizzaState = NonNullable<typeof state.pizza>;
 const sandboxOk = () => process.env.SQUARE_ENVIRONMENT === 'sandbox' && new URL(SQUARE_SANDBOX).host === 'connect.squareupsandbox.com';
-type PayResult = { httpOk: boolean; opened: boolean; at: number; payment: Json | undefined; detail: string };
+type PayResult = Omit<SandboxPayResult, 'payment'> & { payment: Json | undefined };
 /**
  * SIMULATED customer payment in the sandbox, without a card form. Decision by the lead (2026-11-14):
  * open the payment link's DRAFT order through UpdateOrder, then pay it with a Square sandbox nonce.
  * Stable keys per order and attempt, so a rerun cannot open or pay twice.
  */
 async function sandboxPay(p: PizzaState, nonce: string, attempt: string): Promise<PayResult> {
-  const sim = (m: string) => log(`SIMULATED ${m}`);
-  const sqHeaders = { Authorization: `Bearer ${env('SQUARE_ACCESS_TOKEN')}`, 'Content-Type': 'application/json', 'Square-Version': '2025-01-23' };
-  const errs = (b: Json) => (b.errors as Json[] | undefined)?.map((e) => `${e.code} ${e.field ?? ''} ${String(e.detail ?? '').slice(0, 160)}`).join(' | ') ?? '';
-  const sqOrder = (await (await fetch(`${SQUARE_SANDBOX}/v2/orders/${p.squareOrderId}`, { headers: sqHeaders, redirect: 'error' })).json() as Json).order as Json;
-  sim(`Square order ${short(p.squareOrderId)} state ${sqOrder?.state} version ${sqOrder?.version} total ${sqOrder?.total_money?.amount}`);
-  if (sqOrder?.state === 'DRAFT') {
-    const up = await fetch(`${SQUARE_SANDBOX}/v2/orders/${p.squareOrderId}`, { method: 'PUT', redirect: 'error', headers: sqHeaders,
-      body: JSON.stringify({ idempotency_key: `open-${p.orderId.slice(-24)}-${attempt}`, order: { location_id: env('SQUARE_LOCATION_ID'), version: sqOrder.version, state: 'OPEN' } }) });
-    const upBody = (await up.json()) as Json;
-    sim(`UpdateOrder state OPEN: HTTP ${up.status} ${up.ok ? `state ${upBody.order?.state} version ${upBody.order?.version}` : errs(upBody)}`);
-    if (!up.ok || upBody.order?.state !== 'OPEN') return { httpOk: false, opened: false, at: Date.now(), payment: undefined, detail: `UpdateOrder refused: HTTP ${up.status} ${errs(upBody)}` };
-  } else if (sqOrder?.state !== 'OPEN') return { httpOk: false, opened: false, at: Date.now(), payment: undefined, detail: `Square order is ${sqOrder?.state}, not payable` };
-  const payKey = `pay-${p.orderId.slice(-24)}-${attempt}`;
-  const at = Date.now();
-  const payRes = await fetch(`${SQUARE_SANDBOX}/v2/payments`, { method: 'POST', redirect: 'error', headers: sqHeaders,
-    body: JSON.stringify({ source_id: nonce, idempotency_key: payKey.slice(0, 45), order_id: p.squareOrderId,
-      amount_money: { amount: p.totalMinor, currency: p.currency }, location_id: env('SQUARE_LOCATION_ID'), autocomplete: true }) });
-  const payBody = (await payRes.json()) as Json;
-  const payment = payBody.payment as Json | undefined;
-  sim(`CreatePayment: HTTP ${payRes.status} ${payRes.ok ? `payment ${short(payment?.id)} ${payment?.status} ${payment?.amount_money?.amount} ${payment?.amount_money?.currency}` : `${errs(payBody)}${payment ? ` payment ${short(payment.id)} ${payment.status}` : ''}`}`);
-  return { httpOk: payRes.ok, opened: true, at, payment, detail: `HTTP ${payRes.status} ${errs(payBody)}`.trim() };
+  // One implementation, shared with the server's D-13 demo worker (apps/server/src/adapters/square/sandbox-pay.ts).
+  return sharedSandboxPay({ fetch, accessToken: env('SQUARE_ACCESS_TOKEN'), locationId: env('SQUARE_LOCATION_ID'), environment: process.env.SQUARE_ENVIRONMENT ?? '', log },
+    { orderId: p.orderId, squareOrderId: p.squareOrderId, totalMinor: p.totalMinor, currency: p.currency, nonce, attempt }) as Promise<PayResult>;
 }
 
 /** Simulated call, approval and checkout for a fresh pizza order, to PAYMENT_PENDING. */

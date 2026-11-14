@@ -256,6 +256,8 @@ export function buildInstructions(spec: AgentSpec, facts: InstructionFacts): str
         : `After propose_order succeeds, say: "${canMessage ? wait.consented : wait.declined}"${canMessage ? ` If the caller declined messages, say instead: "${wait.declined}"` : ''}`,
       'Never say the order is placed, confirmed by the kitchen, or paid. For "is my order done?", call get_order_status and say what it returns in plain words.',
     );
+    // D-13 DEMO MODE only: the capability is on the spec only when the server pinned a listed demo caller.
+    if (spec.capabilities.includes('menu.message.propose')) lines.push('Demo mode: if the caller asks for the menu to be sent to them, call propose_menu_message. After propose_order succeeds, say instead: "I sent a payment link to your WhatsApp. Once you pay, the shop reviews your order."');
   } else if (spec.template === 'appointment_booker') {
     const wait = bookingWaitScript(channel);
     lines.push(

@@ -181,5 +181,9 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
   // POST /webhooks/agentphone (D-12). Off (503, body never read) unless AgentPhone is the selected provider.
   await app.register(composed.agentphone.plugin);
 
+  // D-13 DEMO MODE pages (/demo/pay, /demo/track, /demo/status). Registered only when demo mode is on;
+  // off (the default), none of these paths exists and each answers the normal 404.
+  if (composed.demo) await app.register(composed.demo.routes);
+
   return app;
 }

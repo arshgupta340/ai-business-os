@@ -52,6 +52,8 @@ import { notWiredExecutor, notWiredWebhooks, type Executor, type ExecutorFactory
 import { buildTelephony, type Telephony } from '../telephony/index';
 import type { HttpPort } from '../telephony/agentphone/client';
 import { createAgentPhoneWiring, type AgentPhoneWiring } from './agentphone';
+import { DEMO_MENU_CAPABILITY, buildDemoMode, type DemoMode } from '../demo/index';
+import type { DemoOverrides } from '../demo/index';
 
 
 export type { ExecutorFactory, WebhooksFactory, Executor, SeamDeps } from './seams';
@@ -79,6 +81,8 @@ export interface ComposeOptions {
   healthProbeTimeoutMs?: number;
   /** D-12: the AgentPhone HTTP ports and voice-turn timings (tests inject fakes and short times). */
   telephony?: { http?: HttpPort; interimAfterMs?: number; turnTimeoutMs?: number };
+  /** D-13 demo mode test seams (a fake WhatsApp adapter, a fake Square sandbox HTTP). Production passes none. */
+  demo?: DemoOverrides;
 }
 
 export interface ComposedServer {
@@ -138,6 +142,8 @@ export interface ComposedServer {
   newId(prefix: string): string;
   /** The server's structured logger (the one the seams use). */
   log: SeamDeps['log'];
+  /** D-13 DEMO MODE, or undefined when it is off (the default). Off, nothing of it runs or answers. */
+  demo: DemoMode | undefined;
 }
 
 /** For server-side reads that no caller can cancel (the voice worker's pinned snapshot, sim-call). */
@@ -189,11 +195,23 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       proposals: engineProposalPort(engine, pinned, providers, now), availability: calendarAvailabilityPort(providers, pinned) };
     // The evidence reader is bound to this call; the toolset also refuses evidence for any other call or version.
     const consent = ctx.consent !== undefined && ctx.consent.callId === ctx.callId && ctx.consent.agentVersionId === ctx.agentVersionId ? ctx.consent : undefined;
-    const ts = createRealToolset({ businessId: ctx.businessId, messageChannel, ports, capabilities: ctx.capabilities, now, ...(ctx.facts ? { factsSnapshot: ctx.facts } : {}), ...(consent ? { consent } : {}) });
+    // D-13 demo mode: only a call whose listed caller the voice webhook pinned gets the demo menu tool, the
+    // menu port and the pay link after a proposal. Every other call never has the demo capability.
+    const demoCall = demo !== undefined && demo.hasCaller(ctx.callId) ? demo : undefined;
+    const capabilities = demoCall ? ctx.capabilities : ctx.capabilities.filter((c) => c !== DEMO_MENU_CAPABILITY);
+    const ts = createRealToolset({ businessId: ctx.businessId, messageChannel, ports, capabilities, now, ...(ctx.facts ? { factsSnapshot: ctx.facts } : {}), ...(consent ? { consent } : {}),
+      ...(demoCall ? { menuMessage: demoCall.menuPort(ctx.businessId) } : {}) });
     // The fourth argument (the relay's cancellation and deadline) is passed through unchanged (voice NOTES 7).
     const call: RealToolset['handler']['call'] = (name, input, c, control) => {
       const stop = telemetry.time('tool_latency', { businessId: ctx.businessId, correlationId: ctx.callId });
-      return ts.handler.call(name, input, c, control).finally(stop);
+      const done = ts.handler.call(name, input, c, control).finally(stop);
+      if (!demoCall || name !== 'propose_order') return done;
+      // D-13: the server, not the model, sends the demo pay link for a stored proposal. The result is unchanged.
+      return done.then((result) => {
+        const r = result as { ok: boolean; proposalId?: string; missingFields?: string[] };
+        if (r.ok && typeof r.proposalId === 'string' && (r.missingFields ?? []).length === 0) demoCall.orderProposed({ callId: ctx.callId, businessId: ctx.businessId, orderId: r.proposalId });
+        return result;
+      });
     };
     return { businessId: ts.businessId, handler: { ...ts.handler, call }, tools: ts.tools, trace: () => ts.trace(), clearTrace: () => ts.clearTrace(), dispose: () => ts.dispose() };
   };
@@ -235,6 +253,10 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       return { jobId };
     },
   };
+
+  // D-13 DEMO MODE: off unless DEMO_PAY_FIRST=1 and every demo setting is present (demo/config.ts).
+  const demo = buildDemoMode(env, { db, hasDb, log, now, squareLocationId: providers.squareLocationId, catalog: toolsetPorts.catalog,
+    reconcile: webhooks ? () => webhooks.reconcileNow() : undefined, ...(options.demo ? { overrides: options.demo } : {}) });
 
   const recovery = createDbRecoveryPorts({ db, now, newId, providers, reconcile: webhooks ? () => webhooks.reconcileNow() : undefined });
 
@@ -330,7 +352,8 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       menu: { snapshot: (businessId) => toolsetPorts.catalog.search({ businessId, limit: VOICE_MENU_LIMIT, signal: NO_SIGNAL }) },
       events: dbVoiceEventsPort(db, newId, now, env.TWILIO_PHONE_NUMBER),
       // The relay disposes the call's toolset just before it logs the call end; the tap pairs the two.
-      toolsetFactory: (ctx) => { const ts = toolsetFor(ctx); return { handler: ts.handler, dispose: () => { firstAudio.callEnding({ callId: ctx.callId, businessId: ctx.businessId }); ts.dispose(); } }; },
+      toolsetFactory: (ctx) => { const ts = toolsetFor(ctx); return { handler: ts.handler, dispose: () => { firstAudio.callEnding({ callId: ctx.callId, businessId: ctx.businessId }); ts.dispose(); demo?.release(ctx.callId); } }; },
+      ...(demo ? { demo: { listedCaller: (from: string | undefined) => demo.listedCaller(from), pin: (callId: string, number: string) => demo.pinCaller(callId, number) } } : {}),
       twilioValidator: providers.twilioValidator,
       openaiSocketFactory: providers.openaiSocketFactory, messageChannel, fallback: fallback.relay, decisions,
       ...(env.OPENAI_REALTIME_MODEL ? { model: env.OPENAI_REALTIME_MODEL } : {}),
@@ -387,7 +410,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
 
   let sweep: ReturnType<typeof setInterval> | undefined;
   return {
-    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, prices, recovery, fallback, decisions,
+    demo, env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, prices, recovery, fallback, decisions,
     databaseProbe: hasDb ? async () => (await db.query('select 1 as ok', [])).rows.length === 1 : undefined, telemetry: telemetryOptions, firstAudio, health, telephony, agentphone, now, newId, log,
     async close() { if (pool) await pool.end(); },
     async assertRuntimeRole() { if (hasDb) await assertRestrictedRuntimeRole(db); },
@@ -401,6 +424,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       executor.start();
       webhooks?.start();
       agentphone.start();
+      demo?.start();
       // Review finding 4: one bounded, read-only health refresh in the background at startup, so the
       // health screens show checked results on a fresh deploy. It never blocks listen; publish refreshes too.
       void health.read({ refresh: true }).catch(() => log.warn({ job: 'health' }, 'startup integration check failed'));
@@ -411,6 +435,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       await executor.stop();
       await webhooks?.stop();
       await agentphone.stop();
+      await demo?.stop();
     },
   };
 }

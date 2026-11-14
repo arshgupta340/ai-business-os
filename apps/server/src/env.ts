@@ -72,6 +72,16 @@ const EnvSchema = z.object({
   VOICE_BARGE_IN_TAIL_MS: z.coerce.number().int().min(0).max(150).optional(),
   PORT: z.coerce.number().int().positive().default(4000),
   PUBLIC_SERVER_URL: z.url().optional(),
+  // D-13 DEMO MODE (docs/SPEC.md): off unless DEMO_PAY_FIRST is "1" and the settings below are all present,
+  // with Twilio credentials (apps/server/src/demo/config.ts decides). It must be off for real use.
+  DEMO_PAY_FIRST: z.enum(['0', '1'], { error: 'DEMO_PAY_FIRST must be "1" (on) or "0" (off).' }).optional(),
+  // The only numbers demo mode may message: comma-separated E.164 numbers.
+  DEMO_TEXT_NUMBERS: z.string().regex(/^\s*\+[1-9][0-9]{6,14}\s*(,\s*\+[1-9][0-9]{6,14}\s*)*$/, { error: 'DEMO_TEXT_NUMBERS must be comma-separated E.164 numbers.' }).optional(),
+  // Signs the demo pay and track links (HMAC-SHA256).
+  DEMO_LINK_SECRET: z.string().min(32, { error: 'DEMO_LINK_SECRET must be at least 32 characters.' }).optional(),
+  // The demo tracker: "Ready for pickup" this long after the confirmation when the pickup time is further away than DEMO_PICKUP_FAR_SECONDS.
+  DEMO_READY_AFTER_SECONDS: z.coerce.number().int().min(10).max(86_400).optional(),
+  DEMO_PICKUP_FAR_SECONDS: z.coerce.number().int().min(60).max(86_400).optional(),
   // AC-19: this build is sandbox only. Any other value stops the server.
   SQUARE_ENVIRONMENT: z
     .literal('sandbox', {

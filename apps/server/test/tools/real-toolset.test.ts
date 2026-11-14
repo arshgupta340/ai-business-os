@@ -15,7 +15,7 @@ import {
   type ToolName,
 } from '@abos/contracts';
 import { FIXTURE_NOW, SQ, barberFacts, pizzaCatalog, pizzaVerifiedFacts, serviceHaircut } from '@abos/contracts/fixtures';
-import { MAX_QUOTES, MAX_TRACE_ENTRIES, createRealToolset } from '../../src/tools/real/index';
+import { MAX_QUOTES, MAX_TRACE_ENTRIES, MENU_NOT_SENT, createRealToolset } from '../../src/tools/real/index';
 import type { BookingProposalInput, ConsentEvidence, FactsSnapshot, OrderProposalInput, RealToolsetDeps, RealToolsetPorts } from '../../src/tools/real/types';
 
 const READBACK_MIN_MS = 3000; // Elapsed time is deliberately not consent evidence.
@@ -44,7 +44,7 @@ function clock(start = FIXTURE_NOW) {
   return { now: () => new Date(t), advance: (ms: number) => { t += ms; } };
 }
 
-type SetupOpts = { businessId?: string; facts?: FactsSnapshot | null; capabilities?: RealToolsetDeps['capabilities']; unavailable?: boolean; toolTimeoutMs?: number; consent?: RealToolsetDeps['consent']; channel?: RealToolsetDeps['messageChannel'] };
+type SetupOpts = { menuMessage?: RealToolsetDeps['menuMessage']; businessId?: string; facts?: FactsSnapshot | null; capabilities?: RealToolsetDeps['capabilities']; unavailable?: boolean; toolTimeoutMs?: number; consent?: RealToolsetDeps['consent']; channel?: RealToolsetDeps['messageChannel'] };
 
 function setup(opts: SetupOpts = {}) {
   const c = clock();
@@ -85,7 +85,7 @@ function setup(opts: SetupOpts = {}) {
     availability: { freeSlots: vi.fn<RealToolsetPorts['availability']['freeSlots']>(async () => [slot]) },
   } satisfies RealToolsetPorts;
   const pinned = opts.facts === null ? undefined : structuredClone(live.facts);
-  const ts = createRealToolset({ businessId: opts.businessId ?? PIZZA, messageChannel: opts.channel ?? 'surge', ports, now: c.now, capabilities: opts.capabilities, factsSnapshot: pinned, toolTimeoutMs: opts.toolTimeoutMs, consent: opts.consent });
+  const ts = createRealToolset({ businessId: opts.businessId ?? PIZZA, messageChannel: opts.channel ?? 'surge', ports, now: c.now, capabilities: opts.capabilities, factsSnapshot: pinned, toolTimeoutMs: opts.toolTimeoutMs, consent: opts.consent, menuMessage: opts.menuMessage });
   return { ts, ports, live, clock: c, orderProposals, bookingProposals, slot };
 }
 
@@ -108,8 +108,8 @@ async function proposeConsented(s: ReturnType<typeof setup>, q: Quote, contact =
 }
 
 describe('real toolset: the tool table', () => {
-  it('has exactly seven tools, every one read or propose', () => {
-    expect(ToolNameSchema.options).toHaveLength(7);
+  it('has exactly eight tools (seven, plus the D-13 demo menu tool), every one read or propose', () => {
+    expect(ToolNameSchema.options).toHaveLength(8);
     const caps = ToolNameSchema.options.map((t) => TOOL_CAPABILITY[t]);
     expect(validateToolCapabilities(caps).ok).toBe(true);
     for (const c of caps) expect(isToolEffect(CAPABILITIES[c].effect)).toBe(true);
@@ -615,3 +615,34 @@ describe('real toolset: consent evidence from the phone relay', () => {
     expect(s.bookingProposals[0]?.customer.messageRecipient).toBeUndefined();
   });
 });
+
+describe('real toolset: propose_menu_message (D-13 demo mode)', () => {
+  const demoCaps = [...pizzaSpecV2Caps(), 'menu.message.propose'] as RealToolsetDeps['capabilities'];
+  it('without the demo port (demo mode off, or an unlisted caller) nothing is sent and the agent is told to read the menu out', async () => {
+    const s = setup({ capabilities: demoCaps });
+    const r = await s.ts.tools.propose_menu_message({}, { ...pizzaCtx, callId: 'call_test_01' });
+    expect(r).toEqual({ ok: true, sent: false, message: MENU_NOT_SENT });
+    expectValid('propose_menu_message', r);
+  });
+  it('with the demo port, the server decides: sent or not, and arguments are refused', async () => {
+    const send = vi.fn(async () => ({ sent: true }));
+    const s = setup({ capabilities: demoCaps, menuMessage: { send } });
+    expect(await s.ts.tools.propose_menu_message({}, { ...pizzaCtx, callId: 'call_test_01' })).toEqual({ ok: true, sent: true });
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ callId: 'call_test_01' }));
+    const smuggled = { to: '+15555550000' } as unknown as Record<string, never>;
+    expect(await s.ts.tools.propose_menu_message(smuggled, { ...pizzaCtx, callId: 'call_test_01' })).toMatchObject({ ok: false, reason: 'VALIDATION_FAILED' });
+    expect(send).toHaveBeenCalledTimes(1);
+    const no = setup({ capabilities: demoCaps, menuMessage: { send: async () => ({ sent: false }) } });
+    expect(await no.ts.tools.propose_menu_message({}, { ...pizzaCtx, callId: 'call_test_01' })).toEqual({ ok: true, sent: false, message: MENU_NOT_SENT });
+  });
+  it('is refused for an agent version without the demo capability', async () => {
+    const send = vi.fn(async () => ({ sent: true }));
+    const s = setup({ capabilities: pizzaSpecV2Caps() as RealToolsetDeps['capabilities'], menuMessage: { send } });
+    expect(await s.ts.tools.propose_menu_message({}, { ...pizzaCtx, callId: 'call_test_01' })).toMatchObject({ ok: false, reason: 'CAPABILITY_NOT_ALLOWED' });
+    expect(send).not.toHaveBeenCalled();
+  });
+});
+
+function pizzaSpecV2Caps(): string[] {
+  return ['catalog.read', 'business.facts.read', 'order.quote', 'order.propose', 'order.status.read', 'order.checkout.prepare', 'message.checkout.send', 'sheets.rows.append'];
+}

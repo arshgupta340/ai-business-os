@@ -168,6 +168,15 @@ export type ConsentSource = {
   read: () => ConsentEvidence | undefined;
 };
 
+/**
+ * D-13 demo mode: sends the menu to the caller of `callId` at most once. The port is bound to one call by
+ * the composition root, which passes it only when demo mode is on and the caller is a listed number.
+ * `sent` is true only when the message went out on this call.
+ */
+export interface MenuMessagePort {
+  send(args: { callId: string; signal: AbortSignal }): Promise<{ sent: boolean }>;
+}
+
 export type RealToolsetDeps = {
   businessId: string;
   /** The server's MESSAGE_CHANNEL setting. A caller who declines messages always gets `qr_only`. */
@@ -186,6 +195,8 @@ export type RealToolsetDeps = {
    * is `qr_only` with no recipient. Whatever the model sends in `contact` beyond the name is ignored.
    */
   consent?: ConsentSource | undefined;
+  /** D-13 demo mode only. Absent, `propose_menu_message` sends nothing and says so. */
+  menuMessage?: MenuMessagePort | undefined;
 };
 
 /** One trace entry holds metadata only: field names and outcome codes, never values. */

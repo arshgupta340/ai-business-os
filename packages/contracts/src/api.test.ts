@@ -136,7 +136,7 @@ describe('tools', () => {
     const toolset: Toolset = {
       read_catalog: async (input) => { calls.push(`read_catalog:${input.query ?? ''}`); return { ok: true, items: [] }; },
       read_business_facts: notUsed, quote_order: notUsed, propose_order: notUsed, get_order_status: notUsed,
-      read_calendar_availability: notUsed, propose_booking: notUsed,
+      read_calendar_availability: notUsed, propose_booking: notUsed, propose_menu_message: notUsed,
     };
     const handler = createToolHandler('mock', toolset);
     const ctx = { businessId: 'biz_pizza_01', agentVersionId: 'agv_pizza_01_v1', testSessionId: 'tst_01', correlationId: 'tst_01' };

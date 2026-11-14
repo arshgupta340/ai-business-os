@@ -302,3 +302,53 @@ Use the claim in SPEC section 7 only when the run has earned it: "A business own
 - If the phone was answered by a seeded version and not by the one just published, say so.
 - If a step stopped before the provider confirmed it, say where it stopped.
 - There is no backup video. If one is recorded later, label it with its date and say it is a recording.
+
+## 9. Demo mode (D-13, `DEMO_PAY_FIRST`)
+
+Demo mode is for the hackathon demo only. It must be off for real use. While it is on, a call from a listed number gets the menu and a demo pay link by WhatsApp before the owner approves, and a demo pay page shows "Payment processed (demo)". These are the two things the product normally forbids (rules 1 and 5 in SPEC section 1.3). The owner's approval, the executor and the Square sandbox still decide the real order status. A call from any other number behaves exactly as with demo mode off. Decision: SPEC D-13.
+
+None of this has been run against real Twilio, a real WhatsApp phone or the real Square sandbox. It is tested with fakes only.
+
+### 9.1 Settings
+
+| Setting | Value |
+|---|---|
+| `DEMO_PAY_FIRST` | `1` turns demo mode on. Unset or `0` is off. |
+| `DEMO_TEXT_NUMBERS` | The phones that may get demo messages, as E.164 numbers separated by commas. Only these are ever messaged. |
+| `DEMO_LINK_SECRET` | At least 32 random characters. It signs the pay and track links. Make a new one for each demo. |
+| `DEMO_READY_AFTER_SECONDS` | Optional, default 180. See 9.4. |
+| `DEMO_PICKUP_FAR_SECONDS` | Optional, default 600. See 9.4. |
+
+Demo mode also needs `PUBLIC_SERVER_URL`, `TWILIO_ACCOUNT_SID` and `TWILIO_AUTH_TOKEN`, which the server already has. It uses `TWILIO_WHATSAPP_FROM` when set, and Twilio's sandbox number otherwise. It sends through the WhatsApp sandbox whatever `MESSAGE_CHANNEL` says. Keep `MESSAGE_CHANNEL` at `qr_only`. The sandbox payment after approval needs `SQUARE_ACCESS_TOKEN` and `SQUARE_LOCATION_ID`, which the server already has.
+
+If a setting is missing, demo mode stays off and the server logs one line, `demo mode is off`, with the missing names. When it is on, the server logs `DEMO MODE IS ON` with the count of listed numbers. Neither line holds a number or a secret.
+
+### 9.2 Turn it on in Render
+
+1. Apply migration 0009 first, from the laptop, as the migration owner: `npm run migrate -w @abos/db` with `DATABASE_ADMIN_URL` set. It adds the tables `demo_orders` and `demo_messages` and changes nothing else.
+2. In Render, open the server service, then Environment. Add `DEMO_PAY_FIRST=1`, `DEMO_TEXT_NUMBERS` and `DEMO_LINK_SECRET`. Save. Render deploys again, which closes open calls, so do this before the demo starts.
+3. Open the server log and look for `DEMO MODE IS ON`.
+
+### 9.3 Join the WhatsApp sandbox
+
+Each listed phone must join Twilio's WhatsApp sandbox before it can receive a message. In the Twilio console, open Messaging, then "Try it out", then "Send a WhatsApp message". It shows the sandbox number and a join phrase. From each listed phone, send that phrase on WhatsApp to the sandbox number, and wait for Twilio's reply. Twilio's documentation says the sandbox delivers free-form messages only for 24 hours after the phone last messaged the sandbox, so send any message to the sandbox again shortly before the demo. This was read from Twilio's documentation and not tested.
+
+### 9.4 Call script
+
+1. From a listed phone, call the shop number.
+2. Ask: "Can you send me the menu?" The menu arrives on WhatsApp and ends with "Demo message."
+3. Order: "One large pepperoni for Sam, pickup in ten minutes." The agent reads back the order and the total. Say yes.
+4. The agent says: "I sent a payment link to your WhatsApp. Once you pay, the shop reviews your order." The pay link arrives on WhatsApp.
+5. Open the link. Type anything in the card fields. They are decorative and are never sent. Press Pay. The page shows "Payment processed (demo). The shop is reviewing your order."
+6. On the laptop, approve the order on the Approvals screen as usual. The dashboard does not show the demo payment: no honest event exists for it. It shows the real sandbox payment once Square confirms it.
+7. Within a few seconds the server pays the sandbox order with Square's test nonce. Square's signed webhook, or the reconcile poll, moves the order to paid and then to ready for pickup.
+8. The confirmation arrives on WhatsApp with the ready time and a track link. The pay page moves to the tracker on its own.
+9. The tracker shows "Order placed", then "Being made" after 30 seconds, then "Ready for pickup" at the pickup time. If the pickup time is more than `DEMO_PICKUP_FAR_SECONDS` away, it shows ready `DEMO_READY_AFTER_SECONDS` after the confirmation instead, so the demo can show it.
+
+If the owner rejects the order, or the approval expires, the pay page says the shop could not take the order and that no money was taken.
+
+What to say: "The payment page is a demo. The payment that the dashboard shows is a Square sandbox payment the server made after the owner approved."
+
+### 9.5 Turn it off
+
+In Render, set `DEMO_PAY_FIRST=0` or delete it, and save. After the deploy, the log shows `demo mode is off`. The demo pages then answer 404, the menu tool is not offered, and no demo message is sent. The demo tables stay; `npm run reset -- --yes` empties them.

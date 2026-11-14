@@ -45,9 +45,12 @@ const MINUTE_MS = 60 * 1000;
 /** Bounds on per-call memory. */
 export const MAX_TRACE_ENTRIES = 50;
 export const MAX_QUOTES = 10;
-// AGENTS rule 6: exactly seven tools, every one a read or propose capability. Checked once at load.
+// AGENTS rule 6: exactly eight tools (the seven of SPEC 2.6 and the D-13 demo menu tool), every one a
+// read or propose capability. Checked once at load.
 const ALL_TOOLS: readonly ToolName[] = ToolNameSchema.options;
-if (ALL_TOOLS.length !== 7 || Object.keys(TOOL_CAPABILITY).length !== 7) throw new Error('real toolset: expected exactly seven agent tools');
+if (ALL_TOOLS.length !== 8 || Object.keys(TOOL_CAPABILITY).length !== 8) throw new Error('real toolset: expected exactly eight agent tools');
+/** D-13: what the menu tool says when nothing was sent. */
+export const MENU_NOT_SENT = 'The menu cannot be sent by message on this call. Read it out instead.';
 assertToolCapabilities(ALL_TOOLS.map((t) => TOOL_CAPABILITY[t]));
 
 const fail = (reason: ToolFailure['reason'], message: string): ToolFailure => ({ ok: false, reason, message });
@@ -173,7 +176,7 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
   const channelFor = (consent: ConsentEvidence | undefined): MessageChannelSetting => (consent === undefined ? 'qr_only' : deps.messageChannel);
   const live = (op: Invocation) => !op.controller.signal.aborted && !disposed;
 
-  // ---- The seven tools ----
+  // ---- The tools ----
 
   const impl: Impl = {
     async read_catalog(input, _ctx, op) {
@@ -332,6 +335,16 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
         return out;
       }
       return { ok: true, proposalId: r.bookingId, approvalId: r.approvalId, missingFields: [], slot: r.slot };
+    },
+
+    // D-13 demo mode. The model only asks; the server's demo port decides whether to send, to whom and what.
+    // Without the port (demo mode off, or a caller who is not a listed number) nothing is sent.
+    async propose_menu_message(_input, ctx, op) {
+      const port = deps.menuMessage;
+      if (port === undefined || ctx.callId === undefined) return { ok: true, sent: false, message: MENU_NOT_SENT };
+      const r = await port.send({ callId: ctx.callId, signal: op.controller.signal });
+      if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
+      return r.sent ? { ok: true, sent: true } : { ok: true, sent: false, message: MENU_NOT_SENT };
     },
   };
 

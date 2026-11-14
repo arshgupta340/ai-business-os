@@ -309,6 +309,11 @@ export function createMockToolset(options: MockToolsetOptions): MockToolset {
 
       return { ok: true, proposalId: nextId('bkg_mock_', 'booking'), approvalId: nextId(MOCK_APPROVAL_PREFIX, 'approval'), missingFields: [], slot };
     },
+
+    // D-13 demo mode tool. The mock never sends anything (AC-03).
+    async propose_menu_message() {
+      return { ok: true, sent: false, message: 'Nothing is sent in a test. Read the menu out instead.' };
+    },
   };
 
   async function call<N extends ToolName>(name: N, input: ToolInput[N], ctx: ToolContext): Promise<ToolResult<N>> {

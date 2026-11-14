@@ -24,6 +24,7 @@ export const TOOL_INPUT_SCHEMAS = {
     maxSlots: z.int().min(1).max(5).optional(),
   }),
   propose_booking: z.strictObject({ serviceId: ServiceIdSchema, startUtc: IsoDateTimeSchema, customer: BookingCustomerSchema }),
+  propose_menu_message: z.strictObject({}),
 } as const satisfies Record<ToolName, z.ZodType>;
 
 export type ToolInput = { [N in ToolName]: z.infer<(typeof TOOL_INPUT_SCHEMAS)[N]> };
@@ -79,6 +80,8 @@ export const TOOL_OUTPUT_SCHEMAS = {
       slot: AvailabilitySlotSchema,
     })
     .superRefine(presentIffNoMissing),
+  // D-13 demo mode: `sent` is true only when the server sent the menu on this call.
+  propose_menu_message: z.object({ sent: z.boolean(), message: z.string().optional() }),
 } as const satisfies Record<ToolName, z.ZodType>;
 
 export type ToolOutput = { [N in ToolName]: z.infer<(typeof TOOL_OUTPUT_SCHEMAS)[N]> };
@@ -147,6 +150,7 @@ export const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   get_order_status: 'Read the verified status of an order placed on this call.',
   read_calendar_availability: 'List free appointment slots for one service on one date.',
   propose_booking: 'Send the confirmed appointment to the owner for approval. Call only after the caller confirmed service, time and contact.',
+  propose_menu_message: 'Send the menu to the caller by message. Call only when the caller asks for the menu to be sent.',
 };
 
 /** Drops the long generated regex where a `format` (date, date-time) already says it; the server still validates fully. */
@@ -168,7 +172,7 @@ function toParameters(schema: z.ZodType): JsonSchemaObject {
   return json;
 }
 
-/** The seven tools in the `{ type: "function", name, description, parameters }` form. No write or external_message tool exists. */
+/** The agent tools (seven, plus the D-13 demo menu tool) in the `{ type: "function", name, description, parameters }` form. No write or external_message tool exists. */
 export const TOOL_DEFINITIONS: readonly ToolDefinition[] = ToolNameSchema.options.map((name) => ({
   type: 'function' as const,
   name,
