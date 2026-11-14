@@ -96,6 +96,8 @@ export interface ComposedServer {
   newId(prefix: string): string;
 }
 
+/** For server-side reads that no caller can cancel (the voice worker's pinned snapshot, sim-call). */
+const NO_SIGNAL = new AbortController().signal;
 const defaultNewId = (prefix: string) => `${prefix}${randomUUID().replaceAll('-', '')}`;
 const silentLog: SeamDeps['log'] = { info() {}, warn() {}, error() {} };
 
@@ -119,9 +121,9 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     catalog: dbCatalogPort(db),
     facts,
     quotes: squareQuotePort(db, providers),
-    proposals: engineProposalPort(engine, (businessId) => facts.readVerified({ businessId }), providers, now),
+    proposals: engineProposalPort(engine, (businessId) => facts.readVerified({ businessId, signal: NO_SIGNAL }), providers, now),
     orderStatus: dbOrderStatusPort(db),
-    availability: calendarAvailabilityPort(providers, (businessId) => facts.readVerified({ businessId })),
+    availability: calendarAvailabilityPort(providers, (businessId) => facts.readVerified({ businessId, signal: NO_SIGNAL })),
   };
   // One pinned snapshot per call (AC-16, review finding 4): the toolset's own fact reads, availability
   // and the booking proposal all read the same facts, taken once, however the owner edits them mid-call.
@@ -129,7 +131,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     let snapshot: Promise<FactsSnapshot> | undefined = ctx.facts ? Promise.resolve(ctx.facts) : undefined;
     const pinned = (businessId: string) => {
       if (businessId !== ctx.businessId) return Promise.reject(new AppError('FORBIDDEN_BUSINESS', 'Another business.'));
-      snapshot ??= facts.readVerified({ businessId });
+      snapshot ??= facts.readVerified({ businessId, signal: NO_SIGNAL });
       return snapshot;
     };
     const ports: RealToolsetPorts = { ...toolsetPorts, facts: { readVerified: ({ businessId }) => pinned(businessId) },
@@ -193,7 +195,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   const voice: ComposedServer['voice'] = voiceMissing.length === 0 && env.PUBLIC_SERVER_URL && providers.twilioValidator && providers.openaiSocketFactory
     ? { ok: true, options: {
       publicServerUrl: env.PUBLIC_SERVER_URL, liveAgent: dbLiveAgentPort(db), calls,
-      facts: { snapshot: (businessId) => facts.readVerified({ businessId }) },
+      facts: { snapshot: (businessId) => facts.readVerified({ businessId, signal: NO_SIGNAL }) },
       events: dbVoiceEventsPort(db, newId, now),
       toolsetFactory: (ctx) => { const ts = toolsetFor(ctx); return { handler: ts.handler, dispose: () => ts.dispose() }; },
       twilioValidator: providers.twilioValidator,

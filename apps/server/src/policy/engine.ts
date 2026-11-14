@@ -96,6 +96,8 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
   async function assertCall(tx: QueryInterface, businessId: string, callId: string | undefined, agentVersionId: string) {
     const row = await one(tx, 'select agent_version_id, status from public.calls where id=$1 and business_id=$2 for update', [callId ?? '', businessId]);
     if (!row || row.agent_version_id !== agentVersionId) throw new PolicyError('FORBIDDEN_BUSINESS');
+    // A proposal belongs to a live call (voice NOTES 1): an ended call cannot propose.
+    if (row.status !== 'IN_PROGRESS') throw new PolicyError('INVALID_STATE', 'The call has ended.');
   }
 
   /** Stores the approval through the routine: payload is exactly the material, hashed as canonical JSON. */

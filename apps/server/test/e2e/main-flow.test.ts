@@ -5,7 +5,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { APPROVAL_EXPIRY_MS, ENDPOINTS, executionStepsFor, idempotencyKey, type Cart, type ToolResult } from '@abos/contracts';
 import { ageApproval, currentRole } from '../support/db';
 import { notWiredExecutor } from '../../src/compose/seams';
-import { READBACK_MIN_MS } from '../../src/tools/real/index';
 import { CALENDAR_ID, OTHER, OWNER, createWorld, nextLocalDate, zonedIso, type World } from './world';
 
 const PIZZA = 'biz_pizza_01';
@@ -38,7 +37,6 @@ async function pizzaOrder(consent: boolean) {
       const pickupAt = zonedIso(nextLocalDate([0, 1, 2, 3, 4, 5, 6]), '18:00', 'America/Los_Angeles');
       let r = await executeTool('propose_order', { cart: CART, contact, fulfillment: { type: 'pickup', pickupAt }, quoteId });
       // With consent the recipient is read back first: the same number again at least 3 seconds later.
-      if (consent) { w.clock.advance(READBACK_MIN_MS + 100); r = await executeTool('propose_order', { cart: CART, contact, fulfillment: { type: 'pickup', pickupAt }, quoteId }); }
       return JSON.stringify(r);
     },
   );
@@ -79,14 +77,17 @@ describe('pizza order (Flow B)', () => {
     const { orderId, approvalId, callId } = await pizzaOrder(true);
     expect(await status('orders', orderId)).toBe('AWAITING_OWNER_APPROVAL');
     const approval = await pendingApproval(PIZZA, approvalId);
-    expect(approval).toMatchObject({ state: 'PENDING', bundleType: 'order_bundle', subjectId: orderId, payload: { messageChannel: 'surge', messageRecipient: '+15555550123' } });
+    // B-15: the deployed toolset proposes qr_only with no recipient, even when the caller agreed, until
+    // server-owned consent evidence exists (voice NOTES 3). The link is shown at the counter.
+    expect(approval).toMatchObject({ state: 'PENDING', bundleType: 'order_bundle', subjectId: orderId, payload: { messageChannel: 'qr_only' } });
+    expect(approval!.payload).not.toHaveProperty('messageRecipient');
     const res = await decide(PIZZA, approvalId, 'approve', approval!.payloadHash);
     expect(res.statusCode).toBe(200);
     expect(ENDPOINTS.decideApproval.response.parse(res.json()).approval.state).toBe('APPROVED');
     const queued = await steps(approvalId);
     expect(queued.map((s) => ({ actionType: s.action_type, stepIndex: s.step_index }))).toEqual(executionStepsFor('order_bundle'));
     for (const s of queued) {
-      expect(s.status).toBe('QUEUED');
+      expect(s.status).toBe(s.action_type === 'message.checkout.send' ? 'SKIPPED' : 'QUEUED');
       expect(s.idempotency_key).toBe(await idempotencyKey({ businessId: PIZZA, subjectId: orderId, actionType: s.action_type as never, approvalId }));
     }
     expect(await status('orders', orderId)).toBe('APPROVED');
@@ -197,9 +198,7 @@ describe('barbershop booking (Flow C)', () => {
       },
       async ({ executeTool }) => {
         const input = { serviceId: 'svc_haircut', startUtc: slot, customer: { name: 'Ana', messageRecipient: '+15555550124', messageConsent: true } };
-        await executeTool('propose_booking', input);
-        w.clock.advance(READBACK_MIN_MS + 100);
-        return JSON.stringify(await executeTool('propose_booking', input));
+                return JSON.stringify(await executeTool('propose_booking', input));
       },
     );
     const first = await sim('agt_barber_01', BARBER, { message: 'Can I get a haircut?' });

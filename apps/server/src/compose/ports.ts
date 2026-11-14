@@ -171,9 +171,37 @@ function toolReason(error: unknown): ToolFailureReason {
   return 'INTEGRATION_UNAVAILABLE';
 }
 
+/**
+ * Results by operation ID, so a retry of one operation returns its stored result instead of a second
+ * proposal. INTEGRATION GAP (voice NOTES 1 and 2): this is per process. Cross-process uniqueness needs a
+ * routine with a unique (business_id, call_id, operation_id), which 0005 does not have. Within one
+ * process the engine's own replay (same call and cart returns the stored pending proposal) also holds.
+ */
+const OPERATION_MEMORY = 500;
+function operationMemo() {
+  const done = new Map<string, Promise<unknown>>();
+  return <T>(input: { businessId: string; callId?: string | undefined; operationId: string }, run: () => Promise<T>): Promise<T> => {
+    const key = `${input.businessId}:${input.callId ?? ''}:${input.operationId}`;
+    const existing = done.get(key);
+    if (existing) return existing as Promise<T>;
+    const result = run();
+    done.set(key, result);
+    if (done.size > OPERATION_MEMORY) done.delete(done.keys().next().value as string);
+    return result;
+  };
+}
+
 export function engineProposalPort(engine: PolicyEngine, pinned: PinnedFacts, providers: Providers, now: () => Date = () => new Date()): ProposalPort {
+  const once = operationMemo();
   return {
-    async createOrderProposal(input) {
+    // One engine transaction stores the subject and its approval together, and refuses unless the call
+    // is this business's IN_PROGRESS call on this agent version (policy/engine.ts assertCall).
+    atomicOperations: true,
+    createOrderProposal: (input) => input.signal.aborted ? Promise.resolve({ ok: false, reason: 'INTEGRATION_UNAVAILABLE' }) : once(input, () => createOrder(input)),
+    createBookingProposal: (input) => input.signal.aborted ? Promise.resolve({ ok: false, reason: 'INTEGRATION_UNAVAILABLE' }) : once(input, () => createBooking(input)),
+  };
+  async function createOrder(input: Parameters<ProposalPort['createOrderProposal']>[0]): ReturnType<ProposalPort['createOrderProposal']> {
+    {
       try {
         const { order, approval } = await engine.createOrderProposal({
           businessId: input.businessId, callId: input.callId ?? '', agentVersionId: input.agentVersionId,
@@ -183,8 +211,10 @@ export function engineProposalPort(engine: PolicyEngine, pinned: PinnedFacts, pr
       } catch (error) {
         return { ok: false, reason: toolReason(error) };
       }
-    },
-    async createBookingProposal(input) {
+    }
+  }
+  async function createBooking(input: Parameters<ProposalPort['createBookingProposal']>[0]): ReturnType<ProposalPort['createBookingProposal']> {
+    {
       try {
         const ctx = bookingContext(await pinned(input.businessId), input.businessId, input.serviceId, providers.calendarId);
         if (!ctx) return { ok: false, reason: 'NOT_FOUND', message: 'No such service.' };
@@ -212,8 +242,8 @@ export function engineProposalPort(engine: PolicyEngine, pinned: PinnedFacts, pr
       } catch (error) {
         return { ok: false, reason: toolReason(error) };
       }
-    },
-  };
+    }
+  }
 }
 
 // ---------- order status ----------
@@ -221,11 +251,13 @@ export function engineProposalPort(engine: PolicyEngine, pinned: PinnedFacts, pr
 export function dbOrderStatusPort(db: Db): OrderStatusPort {
   return {
     async read({ businessId, orderId, callId }) {
-      const order = (await rows(db, `select id, status, call_id from public.orders where id = $1 and business_id = $2`, [orderId, businessId]))[0];
-      if (!order || (callId !== undefined && order.call_id !== callId)) return null;
+      // Scoped by business and, when given, by call in the query itself (voice NOTES 6).
+      const order = (await rows(db, `select id, business_id, status, call_id from public.orders where id = $1 and business_id = $2 and ($3::text is null or call_id = $3)`,
+        [orderId, businessId, callId ?? null]))[0];
+      if (!order || order.business_id !== businessId || (callId !== undefined && order.call_id !== callId)) return null;
       const sent = await rows(db, `select 1 from public.message_dispatches where business_id = $1 and order_id = $2 and status in ('SENT','DELIVERED') limit 1`, [businessId, orderId]);
       const status = OrderStatusSchema.parse(order.status);
-      return { orderId, status, paid: status === 'PAID_VERIFIED' || status === 'FULFILLMENT_READY', checkoutLinkSent: sent.length > 0 };
+      return { businessId, callId: String(order.call_id), orderId, status, paid: status === 'PAID_VERIFIED' || status === 'FULFILLMENT_READY', checkoutLinkSent: sent.length > 0 };
     },
   };
 }
