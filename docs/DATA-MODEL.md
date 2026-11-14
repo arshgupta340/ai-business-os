@@ -372,20 +372,15 @@ create unique index approval_requests_one_pending_per_subject
   on public.approval_requests (subject_id) where state = 'PENDING';
 ```
 
-`bundle_type` is the kind of bundle; the single step is `action_executions.action_type` (SPEC 2.3). `subject_id` is the `ord_`, `bkg_`, `fact_` or `cat_` ID. A `fact_edit` subject is either an existing verified fact or a draft fact for a new key. It has no foreign key because it points at four tables. `actor_id` is the `agv_` ID for a deployed agent and the `usr_` ID for an owner (P-09). The bundle check pins each bundle type to the exact SPEC 2.3 list. Expiry is 10 minutes (P-07, SPEC 2.9). `payload` is never updated after insert (application rule; the guarded update below does not touch it).
+`bundle_type` is the kind of bundle; the single step is `action_executions.action_type` (SPEC 2.3). `subject_id` is the `ord_`, `bkg_`, `fact_` or `cat_` ID. A `fact_edit` subject is either an existing verified fact or a draft fact for a new key. It has no foreign key because it points at four tables. `actor_id` is the `agv_` ID for a deployed agent and the `usr_` ID for an owner (P-09). The bundle check pins each bundle type to the exact SPEC 2.3 list. Expiry is 10 minutes (P-07, SPEC 2.9). `payload` is never updated after insert: the `approval_requests_guard` trigger refuses any change to it.
 
-The one-use rule is this guarded update. Zero rows returned means the request was already decided, has expired, or the hash the owner saw no longer matches. The server then reads the row to return the right error.
+The server cannot insert or update this table directly. As `abos_app` it can only read it, and it changes rows through three checked routines in schema `private` (migration 0004).
 
-```sql
--- $1 approval id, $2 business id, $3 'APPROVED' or 'REJECTED', $4 owner usr_ id, $5 payload hash shown to the owner
-update public.approval_requests
-set    state = $3, decided_by = $4, decided_at = now()
-where  id = $1 and business_id = $2 and payload_hash = $5
-  and  state = 'PENDING' and expires_at > now()
-returning *;
-```
+`private.create_approval` inserts the `PENDING` row. It rebuilds the material fields from the payload and refuses a canonical string, hash, subject, action list or expiry that does not match them or the stored subject row. It also refuses an expiry that has passed or that lies more than 11 minutes ahead.
 
-On approval the same transaction moves the order or booking to its next state, inserts one `action_executions` row as `QUEUED` for each step except the Sheets step (section 2.17), and inserts the `approval.decided` event. Every 30 seconds the expiry sweeper runs `update approval_requests set state = 'EXPIRED', decided_at = now() where state = 'PENDING' and expires_at <= now() returning id, subject_id`, then moves each order to `APPROVAL_EXPIRED` and each booking to `EXPIRED` and writes `approval.expired`.
+`private.decide_and_enqueue` is the one-use rule and the only way to record a decision. Under a lock on the approval row it requires the approval to belong to the business, the deciding user to be the business owner, and the hash the owner saw to equal the stored hash. For a `PENDING` approval it refuses a decision at or after `expires_at` and leaves the row `PENDING`. Otherwise it checks the subject row against the payload again, records the decision, moves an order to `APPROVED` or `REJECTED` and a booking to `RECHECKING_SLOT` or `REJECTED`, and writes the subject's status event and `approval.decided`. On approval it inserts one `action_executions` row for each step except the Sheets step (section 2.17). Each row is `QUEUED`, except that a message step is inserted already `SKIPPED` when the payload's `messageChannel` is `qr_only`. A repeat of a recorded decision with the same outcome, owner and reason updates nothing and writes no second event. If an approved approval is missing execution rows, the repeat inserts them. Any other repeat is refused as conflicting.
+
+Every 30 seconds the expiry sweeper calls `private.expire_approvals` for a business. The routine sets each `PENDING` approval whose `expires_at` has been reached to `EXPIRED`, moves an order still in `AWAITING_OWNER_APPROVAL` to `APPROVAL_EXPIRED` and a booking still in that state to `EXPIRED`, and writes `approval.expired`. It writes the subject's status event only when the subject moved.
 
 ### 2.15 `orders`
 
@@ -479,9 +474,11 @@ create table public.action_executions (
 );
 ```
 
-`idempotency_key` is `sha256(businessId:subjectId:actionType:approvalId)` in hex (SPEC 2.9). It is computed once at insert and sent unchanged to Square, Google and the message channel on every retry; where a provider caps key length, the adapter shortens it the same way every time. `unique (approval_id, action_type)` means a double click on Approve cannot queue a bundle twice. A worker claims a row with `update ... set status = 'RUNNING', attempts = attempts + 1, locked_by = $1, locked_at = now() where id = $2 and status = 'QUEUED' and next_attempt_at <= now() returning *`, so only one worker owns an intent. A retryable failure returns to `QUEUED` with a later `next_attempt_at`; after 3 attempts it is `FAILED`; an unknown result is `NEEDS_REVIEW`, never a blind retry (SPEC 2.9). When `MESSAGE_CHANNEL` is `qr_only`, a message step goes straight to `SKIPPED` and no `message_dispatches` row is created (SPEC 2.9). `last_error` is `ActionExecution.lastError`. `capability_id` follows the SPEC 2.3 mapping and is null for `local.*` steps.
+`idempotency_key` is `sha256(businessId:subjectId:actionType:approvalId)` in hex (SPEC 2.9). `private.decide_and_enqueue` computes it once, when it inserts the row (section 2.14). The server cannot insert or update this table directly. The key is sent unchanged to Square, Google and the message channel on every retry; where a provider caps key length, the adapter shortens it the same way every time. `unique (approval_id, action_type)` means a double click on Approve cannot queue a bundle twice.
 
-The Sheets step is authorized at approval but runs later (SPEC 2.3), and it never gets an `action_executions` row (SPEC 2.9). That is why the `action_type` check leaves out `sheets.order.append` and `sheets.booking.append`. The transaction that moves an order into `PAID_VERIFIED`, or a booking into `BOOKED_VERIFIED`, inserts the `sync_jobs` row; the approval in `action_bundle` is its authority. An order that is never paid has no Sheets row and no pending job.
+A worker claims a row with `private.claim_execution` (one named row) or `private.claim_next_execution` (the next due row of a business). A claim succeeds only for a `QUEUED` row with fewer than 3 attempts whose `next_attempt_at` has been reached and whose earlier steps allow it to run. The claim sets `RUNNING`, adds one to `attempts` and records `locked_by` and `locked_at`, so only one worker owns an intent. Attempts are counted on the claim, not when a failure is reported. The worker reports the result with `private.finish_execution`, which requires the row to be `RUNNING` under the same worker and attempt number and accepts `SUCCEEDED`, `FAILED`, `NEEDS_REVIEW` or `QUEUED`. A retryable failure returns to `QUEUED` with a later `next_attempt_at`, which the routine allows only while `attempts` is below 3. The third failed attempt is `FAILED`. An unknown result is `NEEDS_REVIEW`, never a blind retry (SPEC 2.9). Migration 0004 has no routine that moves a step out of `NEEDS_REVIEW` or that takes back a `RUNNING` row whose worker stopped. Migration 0005, not yet applied, adds both. When the approval's `messageChannel` is `qr_only`, the message step is inserted already `SKIPPED` and no `message_dispatches` row is created (SPEC 2.9). `last_error` is `ActionExecution.lastError`. `capability_id` follows the SPEC 2.3 mapping and is null for `local.*` steps.
+
+The Sheets step is authorized at approval but runs later (SPEC 2.3), and it never gets an `action_executions` row (SPEC 2.9). That is why the `action_type` check leaves out `sheets.order.append` and `sheets.booking.append`. The transaction that moves an order into `PAID_VERIFIED`, or a booking into `BOOKED_VERIFIED`, calls `private.enqueue_sheets_sync`, which inserts the `sync_jobs` row (section 2.20); the approved Sheets action in `action_bundle` is its authority. An order that is never paid has no Sheets row and no pending job.
 
 ### 2.18 `message_dispatches`
 
@@ -511,7 +508,7 @@ create unique index message_dispatches_provider_id_key
   on public.message_dispatches (channel, provider_message_id) where provider_message_id is not null;
 ```
 
-The adapter inserts this row with the execution's idempotency key before it calls the provider, so a retry finds the row and does not send twice. Under `qr_only` nothing is sent, so no row exists and nothing is ever marked sent (SPEC 2.9). A timeout with no provider answer sets `UNKNOWN`, which needs review; a failed or unknown message does not fail the order or booking (SPEC 2.3). `order_id` and `booking_id` keep real foreign keys; `subject_id` is a generated column that gives the `MessageDispatch.subjectId` field. Only the body hash is stored; the checkout URL lives on the order. `recipient` is stored in full and must equal the number in the approved payload (application rule, checked against `payload_hash`); events show only its last four digits. The adapter adds WhatsApp's `whatsapp:` prefix; it is not stored.
+The server cannot insert or update this table directly. Before it calls the provider, the adapter calls `private.record_dispatch`, which inserts this row with the execution's idempotency key and takes the recipient and channel from the approved payload. A retry gets the existing row back and does not send twice. Under `qr_only` nothing is sent, so no row exists and nothing is ever marked sent (SPEC 2.9). Results are written with `private.update_dispatch`, which works only while the message step is `RUNNING` under the calling worker and attempt number. It allows `QUEUED` to move to `SENT`, `DELIVERED`, `FAILED` or `UNKNOWN`, and `SENT` to move to `DELIVERED`, and it refuses every other change. A timeout with no provider answer sets `UNKNOWN`, which needs review; a failed or unknown message does not fail the order or booking (SPEC 2.3). Migration 0005, not yet applied, changes how an `UNKNOWN` dispatch is resolved. `order_id` and `booking_id` keep real foreign keys; `subject_id` is a generated column that gives the `MessageDispatch.subjectId` field. Only the body hash is stored; the checkout URL lives on the order. `recipient` is stored in full and must equal the number in the approved payload (the `message_dispatches_guard` trigger checks it on insert); events show only its last four digits. The adapter adds WhatsApp's `whatsapp:` prefix; it is not stored.
 
 ### 2.19 `webhook_events`
 
@@ -545,15 +542,21 @@ create table public.sync_jobs (
   next_retry_at timestamptz not null default now(),
   external_ref text, last_error text,
   created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  -- the next four columns are added by migration 0004
+  approval_id     text references public.approval_requests (id),
+  idempotency_key text unique,
+  locked_by text, locked_at timestamptz,
   unique (target, record_type, record_id)
 );
 ```
 
-A row is created only when the order reaches `PAID_VERIFIED` or the booking reaches `BOOKED_VERIFIED` (section 2.17). `unique (target, record_type, record_id)` is the local export key: one Sheets row per order or booking however often the step runs. The Sheets row carries `record_id` in its first column so a retry can check the sheet before it appends (PRD section 14). After 5 attempts the job is `FAILED`. A failed sync never changes the order or booking status (AC-13). Catalog sync is not a `sync_jobs` row; it is a background job (section 7).
+`approval_id` is the approval that authorizes the Sheets step, and `idempotency_key` is the SPEC 2.9 key for that step. `locked_by` and `locked_at` record the worker that holds the job. The `retain_sync` trigger (`private.retain_identity`) refuses a delete and freezes `id`, `business_id`, `target`, `record_type`, `record_id`, `approval_id` and `idempotency_key` after insert.
+
+The server cannot insert or update this table directly. `private.enqueue_sheets_sync` creates the row, and only when the order is `PAID_VERIFIED` or `FULFILLMENT_READY`, or the booking is `BOOKED_VERIFIED`, and its approval is `APPROVED` and lists the Sheets action (section 2.17). `private.claim_sync_job` takes a `PENDING` or `RETRYING` job with fewer than 5 attempts whose `next_retry_at` has been reached, sets `RUNNING` and adds one to `attempts`. `private.finish_sync_job` requires the job to be `RUNNING` under the same worker and attempt number and sets `DONE`, `RETRYING` or `FAILED`. `unique (target, record_type, record_id)` is the local export key: one Sheets row per order or booking however often the step runs. The Sheets row carries `record_id` in its first column so a retry can check the sheet before it appends (PRD section 14). After 5 attempts the job is `FAILED`. A failed sync never changes the order or booking status (AC-13). Catalog sync is not a `sync_jobs` row; it is a background job (section 7).
 
 ### 2.21 `activity_events`
 
-Until migration 0005, `decide_and_enqueue` and `expire_approvals` write `order.status_changed` and `booking.status_changed` with `{ subjectId, from, to }` only. An `order.status_changed` row received over Realtime does not parse with `activityEventFromRow`, because `callId` is required, so the client treats every Realtime insert as a signal to refetch. From migration 0005, the routines write the full contract payload: `orderId` or `bookingId`, `callId` when the subject has one, `from`, and `to`; call journeys use the call ID as `correlationId`. The activity list route continues filling these fields for older rows.
+Until migration 0005, which is not yet applied, `decide_and_enqueue` and `expire_approvals` write `order.status_changed` and `booking.status_changed` with `{ subjectId, from, to }` only. They also give every event they write (those two, `approval.decided` and `approval.expired`) the approval ID as `correlation_id`, on call journeys too. An `order.status_changed` row received over Realtime does not parse with `activityEventFromRow`, because `callId` is required, so the client treats every Realtime insert as a signal to refetch. From migration 0005, the routines write the full contract payload: `orderId` or `bookingId`, `callId` when the subject has one, `from`, and `to`; call journeys use the call ID as `correlationId`. The activity list route continues filling these fields for older rows.
 
 ```sql
 create table public.activity_events (
@@ -578,7 +581,7 @@ create trigger activity_events_append_only before update or delete on public.act
   for each row execute function public.activity_events_append_only();
 ```
 
-`type` has a check constraint with the full SPEC 2.5 list, so a misspelled event fails at insert. Adding a type is one `ALTER TABLE`. Append only is enforced twice: RLS gives no update or delete policy, and the trigger blocks the service role too. `TRUNCATE` fires no row triggers, so the reset script still works. The server redacts `payload` before insert: phone numbers as last four digits only, first names only, no checkout URLs, no secrets. Except for the pre-migration status events described above, `correlation_id` is the `call_` ID for phone journeys, the `bld_` ID for builder journeys and the `apv_` ID for fact edits (CONTRACTS.md).
+`type` has a check constraint with the full SPEC 2.5 list, so a misspelled event fails at insert. Adding a type is one `ALTER TABLE`. Append only is enforced twice: RLS gives no update or delete policy, and the trigger blocks the service role too. `TRUNCATE` fires no row triggers, so the reset script still works. The server redacts `payload` before insert: phone numbers as last four digits only, first names only, no checkout URLs, no secrets. Except for the pre-migration decision, expiry and status events described above, `correlation_id` is the `call_` ID for phone journeys, the `bld_` ID for builder journeys and the `apv_` ID for fact edits (CONTRACTS.md).
 
 ## 3. Indexes for dashboard queries
 
@@ -606,7 +609,7 @@ order by o.created_at desc;
 
 ## 4. Row level security and Realtime
 
-The Fastify server connects with the service role key, which bypasses RLS. Every server query still filters on the `business_id` of the owner's selected business, through one repository helper that refuses a query without it. RLS is the second wall: if the anon key or an owner JWT ever reaches a table, the owner sees only their own businesses and nobody can write. The browser reads only `activity_events` directly, for Realtime.
+The Fastify server connects to Postgres as the restricted role `abos_app` (D-10, migration 0004), not with the service role key. `abos_app` does not bypass RLS, so migration 0004 gives it its own policies: `runtime_read` on every table, and `runtime_insert`, `runtime_update` and `runtime_delete` on the tables it may write directly. It has no direct insert, update or delete on `approval_requests`, `action_executions`, `message_dispatches` or `sync_jobs`. It changes those four tables only through the checked routines in schema `private`. Every server query still filters on the `business_id` of the owner's selected business, through one repository helper that refuses a query without it. RLS is the second wall: if the anon key or an owner JWT ever reaches a table, the owner sees only their own businesses and nobody can write. The browser reads only `activity_events` directly, for Realtime.
 
 ```sql
 create or replace function public.owns_business(b text) returns boolean
@@ -637,7 +640,7 @@ begin
   end loop;
 end $$;
 
-alter table public.webhook_events enable row level security;  -- no policy: service role only
+alter table public.webhook_events enable row level security;  -- no owner policy; abos_app reads and inserts under its runtime policies (migration 0004)
 
 revoke insert, update, delete, truncate on all tables in schema public from anon, authenticated;
 revoke all on all tables in schema public from anon;
@@ -645,7 +648,7 @@ revoke all on all tables in schema public from anon;
 alter publication supabase_realtime add table public.activity_events;
 ```
 
-No table has an insert, update or delete policy, so `authenticated` and `anon` cannot write anything. Supabase Realtime applies `activity_events_owner_read` to each subscriber, so a dashboard subscribed with the owner's JWT receives only that owner's events (P-16). The UI treats each event as a signal to refetch through the API. The isolation test (AC-17) queries each table with a second owner's JWT and expects zero rows.
+No table has an insert, update or delete policy for `authenticated` or `anon`, so they cannot write anything. The only write policies are the ones migration 0004 creates for `abos_app`. `runtime_insert` covers `businesses`, `users`, `business_facts`, `files`, `catalog_items`, `fact_conflicts`, `agents`, `agent_versions`, `live_agent`, `builder_sessions`, `calls`, `orders`, `bookings`, `integrations`, `activity_events` and `webhook_events`. `runtime_update` covers the same tables except `activity_events` and `webhook_events`. `runtime_delete` covers `builder_sessions`, `files`, `fact_conflicts`, `catalog_items` and `live_agent`. `abos_app` can also read verified `webhook_events` rows through `runtime_read`. Supabase Realtime applies `activity_events_owner_read` to each subscriber, so a dashboard subscribed with the owner's JWT receives only that owner's events (P-16). The UI treats each event as a signal to refetch through the API. The isolation test (AC-17) queries each table with a second owner's JWT and expects zero rows.
 
 ## 5. Source precedence
 
@@ -738,7 +741,7 @@ On failure the worker sets `state = 'QUEUED'` and `run_after = now() + backoff` 
 
 **Functions, triggers, settings, storage:** `gen_id`, `set_updated_at`, `agent_versions_immutable`, `activity_events_append_only`, `owns_business`, the session setting `app.allow_reset`, the Storage bucket `business-files`, and the seed variables `SEED_OWNER_EMAIL` and `SEED_OWNER_PASSWORD`.
 
-**Columns not defined in SPEC or the PRD:** `users.display_name`; `businesses.currency`; `capabilities.approval_mode`, `tier`; `integrations.config`, `last_error`; `files.name`, `size_bytes` (PRD `size`), `uploaded_by`; `business_facts.confidence`, `file_id`, `supersedes_id`, `verified_by`, `updated_at`; all `catalog_items` and `fact_conflicts` column names; `agents.channel`, `draft_spec`, `seeded`; `agent_versions.business_id`, `guardrail_version`; all `live_agent` column names; `builder_sessions.owner_id`, `agent_id`, `status`, `messages` (PRD `messages_json_ref`); `calls.agent_id`, `caller_last4` (PRD `caller_ref`), `fact_snapshot_ref`, `end_reason`, `started_at` (PRD `began_at`); `approval_requests.actor_id`, `decision_reason`; `action_executions.step_index`, `next_attempt_at`, `locked_by`, `locked_at`, `last_error`, `started_at`, `finished_at`; `message_dispatches.approval_id`, `order_id`, `booking_id`, `subject_id` (generated), `body_hash`, `sent_at`, `delivered_at`; `webhook_events.event_type`, `business_id`, `payload`, `process_error`; `sync_jobs.external_ref`, `last_error`; `activity_events.payload` (PRD `redacted_payload`).
+**Columns not defined in SPEC or the PRD:** `users.display_name`; `businesses.currency`; `capabilities.approval_mode`, `tier`; `integrations.config`, `last_error`; `files.name`, `size_bytes` (PRD `size`), `uploaded_by`; `business_facts.confidence`, `file_id`, `supersedes_id`, `verified_by`, `updated_at`; all `catalog_items` and `fact_conflicts` column names; `agents.channel`, `draft_spec`, `seeded`; `agent_versions.business_id`, `guardrail_version`; all `live_agent` column names; `builder_sessions.owner_id`, `agent_id`, `status`, `messages` (PRD `messages_json_ref`); `calls.agent_id`, `caller_last4` (PRD `caller_ref`), `fact_snapshot_ref`, `end_reason`, `started_at` (PRD `began_at`); `approval_requests.actor_id`, `decision_reason`; `action_executions.step_index`, `next_attempt_at`, `locked_by`, `locked_at`, `last_error`, `started_at`, `finished_at`; `message_dispatches.approval_id`, `order_id`, `booking_id`, `subject_id` (generated), `body_hash`, `sent_at`, `delivered_at`; `webhook_events.event_type`, `business_id`, `payload`, `process_error`; `sync_jobs.external_ref`, `last_error`, `approval_id`, `idempotency_key`, `locked_by`, `locked_at`; `activity_events.payload` (PRD `redacted_payload`).
 
 **Enumerated values:** `users.role`; `builder_sessions.status`; `calls.end_reason`; `webhook_events.source`; `sync_jobs.record_type`; `jobs.queue` and `state`. The values of `files.extraction_state`, `integrations.state`, `capabilities.approval_mode` and `business_facts.kind` come from CONTRACTS.md and SPEC 2.9.
 
