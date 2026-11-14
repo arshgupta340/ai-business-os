@@ -153,7 +153,15 @@ export const pizzaVerifiedFacts: BusinessFact[] = [
   ...pizzaFaqFacts,
 ];
 
-export const pizzaFacts: BusinessFact[] = [...pizzaVerifiedFacts, menuItemDraftFact, fridayHoursDraftFact];
+export const pickupWindowDraftFact: BusinessFact = { ...menuItemDraftFact, id: 'fact_pizza_draft_pickup', kind: 'policy', key: 'pickup_window', value: { minutes: 25 }, confidence: 0.58 };
+export const pickupWindowConflict: FactConflict = {
+  id: 'cfl_pizza_02', businessId: PIZZA_BUSINESS_ID, kind: 'policy', key: 'pickup_window', required: false, state: 'open', createdAt: menuPriceConflict.createdAt,
+  candidates: [
+    { factId: pickupWindowDraftFact.id, sourceType: 'upload', value: { minutes: 25 } },
+    { factId: 'fact_pizza_policy_pickup_window', sourceType: 'owner_chat', value: { minutes: 20 } },
+  ],
+};
+export const pizzaFacts: BusinessFact[] = [...pizzaVerifiedFacts, menuItemDraftFact, fridayHoursDraftFact, pickupWindowDraftFact];
 
 // ---- Demo Barbershop ----
 
@@ -233,6 +241,18 @@ export const barberFacts: BusinessFact[] = [
   ...barberFaqFacts,
 ];
 
+export const servicesFile: FileRecord = {
+  id: 'file_services_01', businessId: BARBER_BUSINESS_ID, name: 'services.csv', mime: 'text/csv', sizeBytes: 912,
+  sha256: 'sha256:9a3e5f1c0b2d4e6f8a1c3e5d7b9f0a2c4e6d8f0b1a3c5e7d9f1b3a5c7e9d1f3a',
+  extractionState: 'EXTRACTED', draftFactIds: ['fact_barber_draft_kids'], conflictIds: [], createdAt: '2026-11-14T17:30:00Z',
+};
+export const kidsServiceDraftFact: BusinessFact = {
+  id: 'fact_barber_draft_kids', businessId: BARBER_BUSINESS_ID, kind: 'service', key: 'svc_kids',
+  value: { id: 'svc_kids', businessId: BARBER_BUSINESS_ID, name: 'Kids cut', durationMinutes: 20, priceMinor: 2000, currency: 'USD' },
+  sourceType: 'upload', fileId: servicesFile.id, status: 'draft', confidence: 0.71, version: 1,
+  createdAt: servicesFile.createdAt, updatedAt: servicesFile.createdAt,
+};
+barberFacts.push(kidsServiceDraftFact);
 export const allFacts: BusinessFact[] = [...pizzaFacts, ...barberFacts];
-export const factConflicts: FactConflict[] = [menuPriceConflict];
-export const files: FileRecord[] = [menuFile];
+export const factConflicts: FactConflict[] = [menuPriceConflict, pickupWindowConflict];
+export const files: FileRecord[] = [menuFile, servicesFile];

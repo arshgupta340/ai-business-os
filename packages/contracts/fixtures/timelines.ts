@@ -206,7 +206,7 @@ export function materializeTimeline(timeline: ScriptedTimeline, startAt: Date, o
 
 /**
  * Moves a whole timeline so its offset 0 is `startAt`: `baseStartAt`, every `occurredAt` and every payload
- * timestamp shift by the same amount, and offsets stay the same. `materializeFixtures` uses the same shift.
+ * timestamp shift by the same amount, and offsets stay the same. This helper is for elapsed-time replay.
  */
 export function shiftTimeline(timeline: ScriptedTimeline, startAt: Date): ScriptedTimeline {
   return shiftIsoTimes(timeline, startAt.getTime() - Date.parse(timeline.baseStartAt));

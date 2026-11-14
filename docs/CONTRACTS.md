@@ -235,6 +235,15 @@ type ActionExecution = {
   createdAt: string; updatedAt: string;
 };
 type MessageDispatchStatus = "QUEUED" | "SENT" | "DELIVERED" | "FAILED" | "UNKNOWN";
+// SyncJobSchema mirrors sync_jobs, with nullable columns omitted.
+type SyncJob = {
+  id: string; businessId: string; target: "google_sheets";
+  recordType: "order" | "booking"; recordId: string;
+  state: "PENDING" | "RUNNING" | "DONE" | "RETRYING" | "FAILED";
+  attempts: number; // integer, 0 through 5
+  nextRetryAt: string; externalRef?: string; lastError?: string;
+  createdAt: string; updatedAt: string;
+};
 type MessageDispatch = {
   id: string; businessId: string; executionId: string; subjectId: string;
   channel: "surge" | "android_gateway" | "whatsapp_sandbox";
@@ -306,6 +315,8 @@ type GuardrailRule = "no_fact_changes" | "no_secret_reveal" | "no_approval_bypas
 ```
 
 ## 4. Approval payloads
+
+`payloadHash(payload, bundleType?)` accepts an optional bundle type. When supplied, it validates the whole payload with that bundle's strict schema before hashing and throws on a mismatch or extra field. Omitting it preserves the existing bundle inference and material-field projection.
 
 The server builds `payload` from stored rows, never from model output. The payload holds exactly the material fields below and nothing else. `payloadHash` is the SHA-256 of the canonical JSON of the whole payload, so the stored hash is the hash of the stored payload. The payload schemas are strict: an extra field, such as `callId` or `messageConsent`, is refused.
 
@@ -465,7 +476,7 @@ Payloads are redacted. `guardrail.refused` names the rule that fired in `rule` a
 | `sync.queued` | `{ target: "google_sheets" \| "catalog", syncJobId?, recordType?, recordId?, jobId? }`. Sheets events carry `syncJobId`, `recordType` and `recordId`; catalog sync events carry `jobId` | LO |
 | `sync.succeeded` | `{ target, syncJobId?, recordType?, recordId?, jobId? }` (same rule) | LO |
 | `sync.failed` | `{ target, syncJobId?, recordType?, recordId?, jobId?, attempts, final: boolean }` (same rule) | LO, IN |
-| `fact.changed` | `{ factId, kind, key, fromVersion, toVersion, sourceType }` | BK, MA |
+| `fact.changed` | `{ factId, kind, key, fromVersion, toVersion, sourceType, resolvedConflictId? }` (`cfl_` ID when resolving a conflict, including keeping the authoritative value; refresh publish eligibility) | BK, MA |
 | `extraction.completed` | `{ fileId, mime, extractionState: "EXTRACTED" \| "FAILED", draftFactCount, conflictCount }` | BK |
 | `agent.published` | `{ agentId, agentVersionId, version, phoneNumberLast4?, rolledBackFrom? }` (`rolledBackFrom` is the previous `agv_` id, on rollback only) | OV, MA |
 | `agent.paused` | `{ agentId }` | OV, MA |
@@ -549,7 +560,7 @@ Task S-03 creates these in `packages/contracts/fixtures/`. Every file validates 
 | `timeline.pizza-order.jsonl` | One `ActivityEvent` per line, `call.started` to `payment.verified`, including every `order.status_changed` |
 | `timeline.booking.jsonl` | One `ActivityEvent` per line, `proposal.created` to `booking.verified` |
 
-`materializeFixtures(now)` from `@abos/contracts/fixtures` returns a deep copy of the whole fixture world with every timestamp shifted by one delta, so the fixture now (`FIXTURE_NOW`, `2026-11-14T20:30:00Z`) lands on `now`, and with every `payloadHash` recomputed. The `PENDING` approvals are then live at `now`. `shiftTimeline(timeline, startAt)` and `materializeTimeline(timeline, startAt)` move one timeline. The mock feed in `apps/web/mocks` replays the two timelines. Short worked examples follow; the fixture files carry every line. Tax is illustrative; Square computes the real value.
+`materializeFixtures(now)` from `@abos/contracts/fixtures` returns a deep copy. Approvals and expiry, quotes, calls and event occurrence times keep their distance from `FIXTURE_NOW`. Pickups, booking slots, availability alternatives and busy blocks keep their authored weekday and local time in the business timezone, including across daylight saving changes. Each authored local day moves to the nearest matching weekday, with pending pickups in the future and pending bookings beyond minimum notice. Related slots and busy blocks share that date. Every approval hash is recomputed; cart hashes and idempotency keys stay unchanged. `materializeBusyBlocks(now)` supplies the same shifted calendar to the mock toolset. `shiftTimeline(timeline, startAt)` and `materializeTimeline(timeline, startAt)` retain their elapsed-time replay behavior. Short worked examples follow; the fixture files carry every line. Tax is illustrative; Square computes the real value.
 
 ```jsonl
 {"id":"evt_p01","businessId":"biz_pizza_01","type":"call.started","correlationId":"call_p01","actorType":"provider","occurredAt":"2026-11-14T19:00:00Z","payload":{"callId":"call_p01","agentId":"agt_pizza_01","agentVersionId":"agv_pizza_01_v1","channel":"phone","callerLast4":"0123"}}

@@ -1,6 +1,5 @@
-// The fixture world moved to a chosen "now" (for the web mock, which needs PENDING approvals that are
-// still live). Every timestamp shifts by one delta, so every gap between two times is unchanged, and
-// every hash that covers a shifted timestamp is recomputed. Browser-safe: Web Crypto only.
+// Relative timestamps follow now, while business-hour fields keep their authored local wall times.
+// Every hash that covers a moved timestamp is recomputed. Browser-safe: Web Crypto only.
 import { approvalPayloadHash, type BundleType } from '../src/index';
 import * as agents from './agents';
 import * as approvals from './approvals';
@@ -14,7 +13,8 @@ import * as orders from './orders';
 import * as responses from './responses';
 import * as timelines from './timelines';
 import * as world from './world';
-import { FIXTURE_NOW, shiftIsoTimes } from './world';
+import { FIXTURE_NOW } from './world';
+import { shiftFixtureTimes, wallClockShifter } from './wall-clock';
 
 /** The data exports of a fixture module: every export that is not a function. */
 type DataOf<M> = { -readonly [K in keyof M as M[K] extends (...args: never[]) => unknown ? never : K]: M[K] };
@@ -78,8 +78,8 @@ function localDate(iso: string, timeZone: string): string {
 }
 
 /**
- * Returns a deep copy of the whole fixture world with every timestamp shifted by the same delta, so the
- * fixture "now" (`FIXTURE_NOW`, 2026-11-14T20:30:00Z) lands on `now`. Every approval's `payloadHash` is
+ * Returns a deep copy with relative timestamps shifted so FIXTURE_NOW lands on now. Business-hour
+ * fields keep their weekday and local time on the nearest suitable date. Every approval's payloadHash is
  * recomputed, because payloads hold `expiresAt` and `pickupAt` or `startUtc`. Cart hashes and idempotency
  * keys have no time input, so they carry over unchanged. A PENDING approval created before the fixture
  * "now" and not yet expired then is live at `now` too. The original fixtures are not changed.
@@ -88,7 +88,7 @@ export async function materializeFixtures(now: Date): Promise<FixtureWorld> {
   const target = now.getTime();
   if (!Number.isFinite(target)) throw new RangeError('materializeFixtures: invalid date');
   const deltaMs = target - Date.parse(FIXTURE_NOW);
-  const out = shiftIsoTimes(dataExports(), deltaMs) as FixtureWorld;
+  const out = shiftFixtureTimes(dataExports(), deltaMs, wallClockShifter(now)) as FixtureWorld;
 
   const found: ApprovalLike[] = [];
   collectApprovals(out, found);
