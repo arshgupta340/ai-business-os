@@ -188,3 +188,12 @@ Vendor facts are in `docs/notes-agentphone.md`, each with its URL. None was test
 ## Migration 0007 not applied (2026-11-14)
 
 - Migration 0007 (`0007_agentphone_channel.sql`) is not applied to the live database yet. Keep `TELEPHONY_PROVIDER` and `MESSAGE_CHANNEL` off `agentphone` until it is (docs/DEPLOY.md, "Switching the telephony provider").
+
+## Migration 0008 written, not applied (2026-11-14)
+
+- Migration 0008 (`0008_owner_recovery.sql`) is written and tested on PGlite only. It is NOT applied to the live database. Until it is, `POST /api/executions/:id/resolve` calls a routine that does not exist and answers 500, and the executor's dispatch sweep fails on each pass that finds a stuck row; the failure is caught and logged as `dispatch sweep failed`, the executor goes on, and the row stays QUEUED (nothing resends it). Apply it with `npm run migrate -w @abos/db` as the migration owner, then run the startup role check.
+- It adds two routines and grants: `private.owner_resolve_execution` (issue #54) and `private.mark_stale_dispatches_unknown` (issue #93). It changes no table, constraint, trigger, policy or existing routine.
+- Not proven: the PGlite tests run in one session, so two connections racing the owner's resolve against the executor or the sweep were not tested. The routines take the existing lock order (approval, step, dispatch).
+- Not proven: the Square read cannot prove that a timed-out CreatePaymentLink made nothing, so a checkout retry after a timeout is still refused in practice; the owner cancels the order. Whether a second CreatePaymentLink with the same key returns the first link is not in SPEC section 4 and was not tested, so the server does not rely on it.
+- The uploaded draft after "keep the current value" still stays `draft` (issue #96). An honest `superseded` needs a change to a 0002 check; not done.
+- The price link of issue #96 needed no migration: the conflict ID is stored beside the hashed material in `approval_requests.payload`, as a fact edit's is.

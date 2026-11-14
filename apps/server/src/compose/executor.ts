@@ -275,7 +275,11 @@ export function createDbExecutor(deps: SeamDeps, options: DbExecutorOptions = {}
       // recovered before 0008. It never resends: nothing sends from QUEUED or UNKNOWN once the step left RUNNING.
       for (const b of await all(db, `select distinct d.business_id from public.message_dispatches d join public.action_executions e on e.id = d.execution_id
         where d.status = 'QUEUED' and d.provider_message_id is null and e.status = 'NEEDS_REVIEW' order by d.business_id`, [])) {
-        for (const d of await markStaleDispatchesUnknown(db, { businessId: String(b.business_id) })) log.warn({ job: 'executor', dispatchId: d.id }, 'dispatch of a recovered step marked UNKNOWN');
+        // A failed sweep (for example before 0008 is applied) must not stop the executor: the row stays
+        // QUEUED, which nothing resends, and the next pass tries again.
+        try {
+          for (const d of await markStaleDispatchesUnknown(db, { businessId: String(b.business_id) })) log.warn({ job: 'executor', dispatchId: d.id }, 'dispatch of a recovered step marked UNKNOWN');
+        } catch { log.warn({ job: 'executor', businessId: String(b.business_id) }, 'dispatch sweep failed'); }
       }
       return [];
     },

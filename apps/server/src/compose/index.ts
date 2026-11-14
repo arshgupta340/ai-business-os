@@ -251,8 +251,13 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     approvals: { createPendingPriceEditApproval: async (input) => {
       const r = await engine.createPriceEditApproval({ ownerUserId: input.ownerUserId, payload: input.payload, payloadHash: input.payloadHash,
         ...(input.resolvesConflictId ? { resolvesConflictId: input.resolvesConflictId } : {}) })
-        // The prices route answers an AppError with its code; a refusal of the named conflict is one.
-        .catch((error: unknown) => { throw error instanceof Error && error.name === 'PolicyError' ? new AppError((error as Error & { code: ErrorCode }).code, error.message) : error; });
+        // The prices route answers an AppError with its code. A refusal when the proposal names a conflict
+        // (issue #96) is passed on as one. Without a named conflict the old mapping stays (a PolicyError
+        // answers INTERNAL); apps/web/test/real-server/knowledge.test.ts tracks that as an expected failure.
+        .catch((error: unknown) => {
+          throw input.resolvesConflictId && error instanceof Error && error.name === 'PolicyError'
+            ? new AppError((error as Error & { code: ErrorCode }).code, error.message) : error;
+        });
       return r.kind === 'conflict' ? r : { kind: r.kind, approval: r.approval as Extract<typeof r.approval, { bundleType: 'price_edit' }> };
     } },
     now,
