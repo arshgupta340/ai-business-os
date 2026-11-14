@@ -36,6 +36,7 @@ import { createDbExecutor } from './executor';
 import { createDbWebhooks, type DbWebhooks } from './webhooks';
 import { createHealthMonitor, type HealthMonitor } from './health';
 import { createTelemetry, type TelemetryPluginOptions } from '../telemetry/index';
+import { createFirstAudioTap, type FirstAudioTap } from '../telemetry/voice';
 import { mapRow } from '../api/rows';
 import type { PricesDependencies } from '../api/prices/index';
 import type { RecoveryPorts } from '../api/recovery/index';
@@ -121,6 +122,8 @@ export interface ComposedServer {
   agentphone: AgentPhoneWiring;
   /** GET /api/telemetry (B-30) and the recorder modules may record into. */
   telemetry: TelemetryPluginOptions;
+  /** first_audio per phone call (B-30): app.ts wraps the voice logger with it. */
+  firstAudio: FirstAudioTap;
   /**
    * Startup check (0006): throws unless the database connection is the restricted abos_app role.
    * index.ts refuses to start when it throws. Without a database there is nothing to check.
@@ -169,8 +172,10 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   // One pinned snapshot per call (AC-16, review finding 4): the toolset's own fact reads, availability
   // and the booking proposal all read the same facts, taken once, however the owner edits them mid-call.
   // Telemetry (B-30): one in-memory recorder. tool_latency is timed here around each tool call and
-  // webhook_delay in webhooks.ts; the voice relay and the executor take no telemetry port.
+  // webhook_delay in webhooks.ts. The voice relay takes no telemetry port: first_audio is read from
+  // its call-end line through the tap below (telemetry/voice.ts). The executor records nothing.
   const telemetry = createTelemetry({ now: () => now().getTime() });
+  const firstAudio = createFirstAudioTap(telemetry);
   const toolsetFor: ComposedServer['toolsetFor'] = (ctx) => {
     let snapshot: Promise<FactsSnapshot> | undefined = ctx.facts ? Promise.resolve(ctx.facts) : undefined;
     const pinned = (businessId: string) => {
@@ -320,7 +325,8 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       facts: { snapshot: (businessId) => facts.readVerified({ businessId, signal: NO_SIGNAL }) },
       menu: { snapshot: (businessId) => toolsetPorts.catalog.search({ businessId, limit: VOICE_MENU_LIMIT, signal: NO_SIGNAL }) },
       events: dbVoiceEventsPort(db, newId, now, env.TWILIO_PHONE_NUMBER),
-      toolsetFactory: (ctx) => { const ts = toolsetFor(ctx); return { handler: ts.handler, dispose: () => ts.dispose() }; },
+      // The relay disposes the call's toolset just before it logs the call end; the tap pairs the two.
+      toolsetFactory: (ctx) => { const ts = toolsetFor(ctx); return { handler: ts.handler, dispose: () => { firstAudio.callEnding({ callId: ctx.callId, businessId: ctx.businessId }); ts.dispose(); } }; },
       twilioValidator: providers.twilioValidator,
       openaiSocketFactory: providers.openaiSocketFactory, messageChannel, fallback: fallback.relay, decisions,
       ...(env.OPENAI_REALTIME_MODEL ? { model: env.OPENAI_REALTIME_MODEL } : {}),
@@ -376,7 +382,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   let sweep: ReturnType<typeof setInterval> | undefined;
   return {
     env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, prices, recovery, fallback, decisions,
-    databaseProbe: hasDb ? async () => (await db.query('select 1 as ok', [])).rows.length === 1 : undefined, telemetry: telemetryOptions, health, telephony, agentphone, now, newId, log,
+    databaseProbe: hasDb ? async () => (await db.query('select 1 as ok', [])).rows.length === 1 : undefined, telemetry: telemetryOptions, firstAudio, health, telephony, agentphone, now, newId, log,
     async close() { if (pool) await pool.end(); },
     async assertRuntimeRole() { if (hasDb) await assertRestrictedRuntimeRole(db); },
     startJobs() {

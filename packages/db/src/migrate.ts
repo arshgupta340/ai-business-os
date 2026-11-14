@@ -35,7 +35,13 @@ export interface PooledSession {
 export interface MigrationFile {
   name: string;
   sql: string;
+  /** SHA-256 of the file with LF line endings, whatever the checkout uses. */
   checksum: string;
+  /**
+   * Other checksums that mean the same content: the same file with CRLF line endings. A migration
+   * applied from a Windows checkout was recorded in that form.
+   */
+  alsoAccepted?: string[];
 }
 
 export interface MigrateResult {
@@ -49,14 +55,24 @@ const MIGRATION_NAME = /^\d{4}_[a-z0-9_]+\.sql$/;
 // Any fixed number works; it only has to be the same for every run of this runner.
 const ADVISORY_LOCK_KEY = 4206001;
 
+/**
+ * The checksum of a migration does not depend on line endings: git may check the same file out with
+ * LF or CRLF. New rows record the LF form. The CRLF form is accepted for a row recorded earlier.
+ * Nothing else about the content is normalized, so any real edit still stops the run.
+ */
+export function checksums(sql: string): { checksum: string; alsoAccepted: string[] } {
+  const sha = (text: string) => createHash('sha256').update(text).digest('hex');
+  const lf = sql.replace(/\r\n/g, '\n');
+  return { checksum: sha(lf), alsoAccepted: [sha(lf.replace(/\n/g, '\r\n'))] };
+}
+
 export function readMigrations(dir: string = MIGRATIONS_DIR): MigrationFile[] {
   return readdirSync(dir)
     .filter((name) => MIGRATION_NAME.test(name))
     .sort()
     .map((name) => {
       const sql = readFileSync(join(dir, name), 'utf8');
-      const checksum = createHash('sha256').update(sql).digest('hex');
-      return { name, sql, checksum };
+      return { name, sql, ...checksums(sql) };
     });
 }
 
@@ -124,7 +140,7 @@ async function runOnSession(
     for (const file of files) {
       const recorded = done.get(file.name);
       if (recorded !== undefined) {
-        if (recorded !== file.checksum) {
+        if (recorded !== file.checksum && !(file.alsoAccepted ?? []).includes(recorded)) {
           throw new Error(
             `Migration ${file.name} was already applied but its content has changed. ` +
               'Do not edit an applied migration; add a new file instead.',

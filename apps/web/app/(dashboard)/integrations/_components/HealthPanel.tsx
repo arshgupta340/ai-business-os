@@ -8,12 +8,12 @@ import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {LoadingState} from '@/components/LoadingState';
 import {StatusBadge} from '@/components/StatusBadge';
-import {PROVIDER_LABELS, summarizeHealth} from '@/components/shell/ConnectionHealth';
-import {useIntegrationsHealth, useRefreshIntegrationsHealth, type IntegrationProvider} from '@/lib/api';
+import {HEALTH_PROVIDERS, summarizeHealth} from '@/components/shell/ConnectionHealth';
+import {useIntegrationsHealth, useRefreshIntegrationsHealth} from '@/lib/api';
 import {ProviderCard} from './ProviderCard';
 import {SectionError} from './SectionError';
 
-const PROVIDERS = Object.keys(PROVIDER_LABELS) as IntegrationProvider[];
+const PROVIDERS = HEALTH_PROVIDERS;
 
 export function HealthPanel({businessId, timeZone}: {businessId: string; timeZone: string}) {
   const health = useIntegrationsHealth(businessId);

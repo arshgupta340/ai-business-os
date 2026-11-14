@@ -32,6 +32,7 @@ import {
   type PublishResponse,
   type ActivityEventType,
 } from '@/lib/api';
+import {errorText} from '@/lib/error-text';
 import {formatDateTime, actorName} from '@/lib/format';
 import {useBusiness} from '@/lib/session';
 import {statusView} from '@/lib/status';
@@ -84,7 +85,7 @@ export function VersionsScreen({agentId}: {agentId: string}) {
         <PageHeader title="Version history" actions={back} />
         <ErrorState
           title="Could not load the versions"
-          message={`${failed?.message ?? 'The versions could not be loaded.'}${
+          message={`${failed ? errorText(failed) : 'The versions could not be loaded.'}${
             isApiError(failed) && failed.correlationId ? ` Reference: ${failed.correlationId}` : ''
           }`}
           onRetry={

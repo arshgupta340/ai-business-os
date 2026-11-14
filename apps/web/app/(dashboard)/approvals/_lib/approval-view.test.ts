@@ -1,5 +1,16 @@
 import {describe, expect, it} from 'vitest';
+import {
+  ActionTypeSchema,
+  ApprovalActorTypeSchema,
+  BundleTypeSchema,
+  ErrorCodeSchema,
+  FactKindSchema,
+  MessageChannelSettingSchema,
+} from '@abos/contracts';
 import {ApiError} from '@/lib/api/errors';
+import {ERROR_TEXT, GENERIC_ERROR_TEXT} from '@/lib/error-text';
+import {approvalActorLabel, bundleLabel, factKeyLabel, factKindLabel} from '@/lib/labels';
+import {expectOwnerLabel, FUTURE_VALUES} from '@/lib/owner-label.test-helpers';
 import type {ApprovalRequest, OrderApprovalRequest} from '@/lib/api';
 import {
   actionSteps,
@@ -114,7 +125,7 @@ describe('labels', () => {
 
   it('maps every order step to the system it writes and flags an unknown step', () => {
     const steps = actionSteps(typedApproval(approval()));
-    expect(steps.map((s) => s.system)).toEqual(['Square (sandbox)', 'Customer message (surge)', 'This app', 'Google Sheets']);
+    expect(steps.map((s) => s.system)).toEqual(['Square (sandbox)', 'Surge text message', 'This app', 'Google Sheets']);
     expect(steps.map((s) => s.isExternal)).toEqual([true, true, false, true]);
     const odd = approval();
     (odd.payload as {actionBundle: string[]}).actionBundle = ['square.refund.create'];
@@ -169,5 +180,83 @@ describe('price edit names its item', () => {
     const a = approvalPriceEditPending as unknown as ApprovalRequest;
     expect(summaryLine(a, 'America/Los_Angeles')).toBe('An item in the Square catalog, $22.00 to $19.00');
     expect(summaryLine(a, 'America/Los_Angeles', [])).toBe('An item in the Square catalog, $22.00 to $19.00');
+  });
+});
+
+/** expectOwnerLabel, plus no dotted identifier such as "square.checkout.create". */
+function expectPlain(text: string, raw: string): void {
+  expectOwnerLabel(text, raw);
+  expect(text, `${JSON.stringify(text)} has a dotted identifier`).not.toMatch(/[a-z]\.[a-z]/);
+}
+
+describe('no raw contract value reaches the owner (#123)', () => {
+  const withChannel = (channel: string, actionBundle: readonly string[]) => {
+    const base = approval();
+    return {...base, payload: {...base.payload, messageChannel: channel, actionBundle}} as ApprovalRequest;
+  };
+
+  it.each(MessageChannelSettingSchema.options)('names the %s channel plainly in the step list', (channel) => {
+    for (const step of ['message.checkout.send', 'message.booking.confirm']) {
+      const [view] = actionSteps(typedApproval(withChannel(channel, [step])));
+      expectPlain(view.system, channel);
+      expectPlain(view.description, channel);
+      expect(view.system).not.toContain(channel);
+    }
+  });
+
+  it('says no message is sent when the business is QR code only', () => {
+    const [view] = actionSteps(typedApproval(withChannel('qr_only', ['message.checkout.send'])));
+    expect(view.system).toBe('QR code only');
+    expect(view.description).toContain('No message is sent');
+  });
+
+  it('describes every step of the contract, and an unknown step, with no raw identifier in the sentence', () => {
+    for (const step of [...ActionTypeSchema.options, ...FUTURE_VALUES]) {
+      const [view] = actionSteps(typedApproval(withChannel('surge', [step])));
+      expectPlain(view.system, step);
+      expectPlain(view.description, step);
+    }
+  });
+
+  it('uses the shared bundle names, so a request reads the same on every screen', () => {
+    for (const bundle of BundleTypeSchema.options) expectPlain(bundleLabel(bundle), bundle);
+    expect(bundleLabel('fact_edit')).toBe('Business fact change');
+    expect(bundleLabel('price_edit')).toBe('Price change');
+  });
+
+  it('labels every fact kind and every actor, and a value it does not know', () => {
+    for (const kind of [...FactKindSchema.options, ...FUTURE_VALUES]) {
+      expectPlain(factKindLabel(kind), kind);
+      expectPlain(factKeyLabel(kind, 'pickup_window'), 'pickup_window');
+    }
+    for (const actor of [...ApprovalActorTypeSchema.options, ...FUTURE_VALUES]) expectPlain(approvalActorLabel(actor), actor);
+    expect(approvalActorLabel('system')).not.toBe(approvalActorLabel('deployed_agent'));
+  });
+
+  it('summarizes a fact edit of every kind with no raw kind or key', () => {
+    for (const kind of FactKindSchema.options) {
+      const a = {
+        ...approval(),
+        bundleType: 'fact_edit',
+        subjectId: 'fact_1',
+        payload: {businessId: 'biz_pizza_01', subjectId: 'fact_1', kind, key: 'pickup_window', before: null, after: 'Twenty minutes', fromVersion: 0, actionBundle: ['local.fact.update'], expiresAt: '2026-11-13T19:52:00Z'},
+      } as unknown as ApprovalRequest;
+      const line = summaryLine(a, 'America/Los_Angeles');
+      expect(line).not.toContain('pickup_window');
+      expectOwnerLabel(line, kind);
+    }
+  });
+});
+
+describe('a failed decision never shows the server message (part of #128)', () => {
+  it('shows the sentence for an error code the screen does not handle', () => {
+    for (const code of ErrorCodeSchema.options) {
+      const v = decisionErrorView(err({code, message: 'Operation failed: INVALID_STATE.', retryable: false}));
+      expectPlain(v.message, code);
+      expect(v.message).not.toContain('Operation failed');
+      expectPlain(v.title, code);
+    }
+    expect(decisionErrorView(err({code: 'INVALID_STATE', message: 'Operation failed: INVALID_STATE.'})).message).toBe(ERROR_TEXT.INVALID_STATE);
+    expect(decisionErrorView(err({code: 'BRAND_NEW' as never, message: 'Operation failed: BRAND_NEW.'})).message).toBe(GENERIC_ERROR_TEXT);
   });
 });

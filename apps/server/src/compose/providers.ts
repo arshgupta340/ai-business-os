@@ -172,7 +172,7 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   const absent = channelKeys[messageChannel].filter(([, v]) => !v).map(([k]) => k);
   if (!env.MESSAGE_CHANNEL) status.message_channel = missing('MESSAGE_CHANNEL');
   else if (absent.length > 0) status.message_channel = missing(...absent);
-  else if (messageChannel === 'qr_only') status.message_channel = { configured: true, detail: 'qr_only sends nothing', noProviderNeeded: true };
+  else if (messageChannel === 'qr_only') status.message_channel = { configured: true, detail: 'no message is sent, the link is shown as a QR code', noProviderNeeded: true };
   else {
     try {
       message = createMessageAdapter({

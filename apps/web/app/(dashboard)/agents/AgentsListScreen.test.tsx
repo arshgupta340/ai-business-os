@@ -5,6 +5,7 @@ import {useState, type ReactNode} from 'react';
 import {QueryClient} from '@tanstack/react-query';
 import {QueryClientProvider} from '@tanstack/react-query';
 import {afterEach, beforeAll, describe, expect, it} from 'vitest';
+import {ERROR_TEXT} from '@/lib/error-text';
 import {createApiQueryClient} from '@/lib/api';
 import {BusinessProvider} from '@/lib/session';
 import {BUSINESS_STORAGE_KEY} from '@/lib/session/business-selection';
@@ -84,7 +85,8 @@ describe('AgentsListScreen', {timeout: 20_000}, () => {
     renderList();
     // The query client retries a retryable read twice before it shows the error.
     expect(await screen.findByText('Could not load your agents', undefined, {timeout: 10_000})).toBeTruthy();
-    expect(screen.getByText('Unexpected server error.')).toBeTruthy();
+    expect(screen.getByText(ERROR_TEXT.INTERNAL)).toBeTruthy();
+    expect(screen.queryByText('Unexpected server error.')).toBeNull();
     expect(screen.getByRole('button', {name: 'Try again'})).toBeTruthy();
   });
 

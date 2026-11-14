@@ -2,11 +2,11 @@
 // wired, on the in-process Postgres as abos_app, through the real toolset, engine, routines, REST
 // API and webhook routes, with fake providers. Every test asserts how many external writes ran.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ENDPOINTS, idempotencyKey, type Cart, type Quote, type ToolResult } from '@abos/contracts';
+import { APPROVAL_EXPIRY_MS, ENDPOINTS, idempotencyKey, type Cart, type Quote, type ToolResult } from '@abos/contracts';
 import { createSquareAdapterForTest } from '../../src/adapters/square/testing';
 import { createDbExecutor } from '../../src/compose/executor';
 import { notWiredExecutor, type SeamDeps } from '../../src/compose/seams';
-import { currentRole } from '../support/db';
+import { ageApproval, currentRole } from '../support/db';
 import { LOCATION_ID, OWNER, createWorld, fakeSquareClient, nextLocalDate, zonedIso, type World } from './world';
 
 const PIZZA = 'biz_pizza_01';
@@ -266,6 +266,54 @@ describe('pizza order bundle with the executor and webhooks', () => {
     expect(delta(w, before)).toEqual({ square: 1, messages: 0, calendar: 0, sheets: 0 });
   });
 
+  it('a declined payment: PAYMENT_FAILED, nothing marked paid, no Sheets row', async () => {
+    const { orderId } = await pizzaToPaymentPending(w);
+    const before = counts(w);
+    const o = await order(w, orderId);
+    // Square's own record says FAILED (a declined card); the decoy body says COMPLETED.
+    w.square.addPayment({ id: 'PAY_DECLINED', orderId: o.square_order_id!, amountMinor: await orderTotal(w, orderId), status: 'FAILED' });
+    expect((await postSquare(w, paymentEvent('evt_sq_declined', 'PAY_DECLINED', o.square_order_id!))).statusCode).toBe(200);
+    expect(await order(w, orderId)).toMatchObject({ status: 'PAYMENT_FAILED', square_payment_id: null });
+    const events = (await w.t.db.query("select type, payload from activity_events where business_id = $1 and payload->>'orderId' = $2 order by occurred_at, id", [PIZZA, orderId])).rows as
+      { type: string; payload: { to?: string; squarePaymentId?: string; reason?: string; sandbox?: boolean } }[];
+    expect(events.some((e) => e.type === 'order.status_changed' && e.payload.to === 'PAYMENT_FAILED')).toBe(true);
+    expect(events.filter((e) => e.type === 'payment.failed').map((e) => e.payload)).toEqual([expect.objectContaining({ squarePaymentId: 'PAY_DECLINED', reason: 'FAILED', sandbox: true })]);
+    expect(events.some((e) => e.type === 'payment.verified' || e.payload.to === 'PAID_VERIFIED')).toBe(false);
+    expect(await countRows(w, 'select count(*)::int as n from sync_jobs where record_id = $1', [orderId])).toBe(0);
+    // The reconcile poll sees the same failed payment and changes nothing.
+    await w.app.composed.webhooks!.reconcileNow();
+    await w.settle();
+    expect(await order(w, orderId)).toMatchObject({ status: 'PAYMENT_FAILED', square_payment_id: null });
+    expect(await countRows(w, "select count(*)::int as n from activity_events where business_id = $1 and type = 'payment.failed' and payload->>'orderId' = $2", [PIZZA, orderId])).toBe(1);
+    expect(await countRows(w, 'select count(*)::int as n from sync_jobs where record_id = $1', [orderId])).toBe(0);
+    expect(delta(w, before)).toEqual({ square: 0, messages: 0, calendar: 0, sheets: 0 });
+  });
+
+  it('an approval that expires before the owner decides: nothing runs, order APPROVAL_EXPIRED, events written', async () => {
+    const before = counts(w);
+    const { orderId, approvalId } = await pizzaOrder(w);
+    await ageApproval(w.t, approvalId, APPROVAL_EXPIRY_MS + 1000);
+    const expired = await w.app.composed.engine.expireDue(PIZZA);
+    expect(expired.map((e) => e.id)).toContain(approvalId);
+    await w.settle();
+    w.app.composed.executor.kick(PIZZA);
+    await w.settle();
+    expect((await order(w, orderId))).toMatchObject({ status: 'APPROVAL_EXPIRED', square_order_id: null, checkout_url: null });
+    expect((await w.t.db.query('select state from approval_requests where id = $1', [approvalId])).rows).toEqual([{ state: 'EXPIRED' }]);
+    expect(await steps(w, approvalId)).toEqual([]);
+    expect(await countRows(w, "select count(*)::int as n from activity_events where business_id = $1 and type = 'approval.expired' and payload->>'approvalId' = $2 and payload->>'subjectId' = $3", [PIZZA, approvalId, orderId])).toBe(1);
+    expect(await countRows(w, "select count(*)::int as n from activity_events where business_id = $1 and type = 'order.status_changed' and payload->>'orderId' = $2 and payload->>'from' = 'AWAITING_OWNER_APPROVAL' and payload->>'to' = 'APPROVAL_EXPIRED'", [PIZZA, orderId])).toBe(1);
+    // A late approval with the right hash is refused and queues nothing.
+    const a = (await w.app.inject({ url: `/api/approvals/${approvalId}?businessId=${PIZZA}`, headers: OWNER })).json() as { payloadHash: string; state: string };
+    expect(a.state).toBe('EXPIRED');
+    const late = await w.app.inject({ method: 'POST', url: `/api/approvals/${approvalId}/decision?businessId=${PIZZA}`, headers: OWNER, payload: { decision: 'approve', payloadHash: a.payloadHash } });
+    expect(late.json()).toMatchObject({ code: 'APPROVAL_EXPIRED' });
+    await w.settle();
+    expect(await steps(w, approvalId)).toEqual([]);
+    expect(await countRows(w, 'select count(*)::int as n from message_dispatches where approval_id = $1', [approvalId])).toBe(0);
+    expect(delta(w, before)).toEqual({ square: 0, messages: 0, calendar: 0, sheets: 0 });
+  });
+
   it('approving twice runs the steps once', async () => {
     const before = counts(w);
     const { orderId, approvalId } = await pizzaOrder(w);
@@ -287,8 +335,8 @@ describe('barbershop booking bundle with the executor', () => {
   beforeAll(async () => { w = await createWorld(); }, 120_000);
   afterAll(async () => { await w?.close(); });
 
-  it('availability, propose, approve: Calendar event with the step key, one confirmation, BOOKED_VERIFIED, Sheets job run', async () => {
-    const before = counts(w);
+  /** Availability and a booking proposal with consent, on a simulated call. Returns the booking and approval IDs. */
+  async function bookingProposal() {
     const date = nextLocalDate([3, 4]); // Wednesday or Thursday, open 09:00 to 18:00
     let slot = '';
     w.model.push(
@@ -304,11 +352,16 @@ describe('barbershop booking bundle with the executor', () => {
     // With consent, through the composed proposal port on the live call (the toolset proposes qr_only since B-15).
     const call = (await w.t.db.query('select agent_version_id from calls where id = $1', [first.callId])).rows[0] as { agent_version_id: string };
     const made = await w.app.composed.toolsetPorts.proposals.createBookingProposal({ businessId: BARBER, agentVersionId: call.agent_version_id, callId: first.callId,
-      correlationId: first.callId, operationId: 'op-booking-1', signal: new AbortController().signal, serviceId: 'svc_haircut', startUtc: slot,
+      correlationId: first.callId, operationId: `op-booking-${first.callId}`, signal: new AbortController().signal, serviceId: 'svc_haircut', startUtc: slot,
       customer: { name: 'Ana', messageRecipient: '+15555550124', messageConsent: true }, messageChannel: w.app.composed.providers.messageChannel });
     if (!made.ok) throw new Error(`booking proposal failed: ${made.reason}`);
     await sim(w, 'agt_barber_01', BARBER, { callId: first.callId, message: 'The first one, I am Ana', end: true });
-    const r = { ok: true, proposalId: made.bookingId, approvalId: made.approvalId };
+    return { ok: true, proposalId: made.bookingId, approvalId: made.approvalId };
+  }
+
+  it('availability, propose, approve: Calendar event with the step key, one confirmation, BOOKED_VERIFIED, Sheets job run', async () => {
+    const before = counts(w);
+    const r = await bookingProposal();
     await approve(w, BARBER, r.approvalId);
     await w.settle();
 
@@ -324,6 +377,28 @@ describe('barbershop booking bundle with the executor', () => {
     // A booking is listed as verified through the API.
     const api = ENDPOINTS.getBooking.response.parse((await w.app.inject({ url: `/api/bookings/${r.proposalId}?businessId=${BARBER}`, headers: OWNER })).json());
     expect(api.status).toBe('BOOKED_VERIFIED');
+  });
+
+  it('a booking approval that expires before the owner decides: no Calendar event, booking EXPIRED, events written', async () => {
+    const before = counts(w);
+    const r = await bookingProposal();
+    expect((await w.t.db.query('select status from bookings where id = $1', [r.proposalId])).rows).toEqual([{ status: 'AWAITING_OWNER_APPROVAL' }]);
+    await ageApproval(w.t, r.approvalId, APPROVAL_EXPIRY_MS + 1000);
+    expect((await w.app.composed.engine.expireDue(BARBER)).map((e) => e.id)).toContain(r.approvalId);
+    w.app.composed.executor.kick(BARBER);
+    await w.settle();
+    expect((await w.t.db.query('select status, google_event_id from bookings where id = $1', [r.proposalId])).rows).toEqual([{ status: 'EXPIRED', google_event_id: null }]);
+    expect((await w.t.db.query('select state from approval_requests where id = $1', [r.approvalId])).rows).toEqual([{ state: 'EXPIRED' }]);
+    expect(await steps(w, r.approvalId)).toEqual([]);
+    expect(await countRows(w, "select count(*)::int as n from activity_events where business_id = $1 and type = 'approval.expired' and payload->>'approvalId' = $2 and payload->>'subjectId' = $3", [BARBER, r.approvalId, r.proposalId])).toBe(1);
+    expect(await countRows(w, "select count(*)::int as n from activity_events where business_id = $1 and type = 'booking.status_changed' and payload->>'bookingId' = $2 and payload->>'from' = 'AWAITING_OWNER_APPROVAL' and payload->>'to' = 'EXPIRED'", [BARBER, r.proposalId])).toBe(1);
+    const a = (await w.app.inject({ url: `/api/approvals/${r.approvalId}?businessId=${BARBER}`, headers: OWNER })).json() as { payloadHash: string };
+    const late = await w.app.inject({ method: 'POST', url: `/api/approvals/${r.approvalId}/decision?businessId=${BARBER}`, headers: OWNER, payload: { decision: 'approve', payloadHash: a.payloadHash } });
+    expect(late.json()).toMatchObject({ code: 'APPROVAL_EXPIRED' });
+    await w.settle();
+    expect(await steps(w, r.approvalId)).toEqual([]);
+    expect(await countRows(w, 'select count(*)::int as n from sync_jobs where record_id = $1', [r.proposalId])).toBe(0);
+    expect(delta(w, before)).toEqual({ square: 0, messages: 0, calendar: 0, sheets: 0 });
   });
 });
 

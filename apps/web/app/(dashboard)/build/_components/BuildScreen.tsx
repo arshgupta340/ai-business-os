@@ -11,6 +11,7 @@ import {ErrorState} from '@/components/ErrorState';
 import {LoadingState} from '@/components/LoadingState';
 import {PageHeader} from '@/components/PageHeader';
 import {isMockMode} from '@/lib/api';
+import {errorText} from '@/lib/error-text';
 import {useBusiness} from '@/lib/session';
 import {BuilderThreadContext, useBuilderThread} from '../_hooks/useBuilderThread';
 import {useBuilderSessionId} from '../_hooks/useBuilderSessionId';
@@ -37,7 +38,7 @@ export function BuildScreen() {
     body = (
       <ErrorState
         title="The builder could not start"
-        message={createError.message}
+        message={errorText(createError)}
         onRetry={createError.retryable ? () => void startNew() : undefined}
       />
     );
@@ -61,7 +62,7 @@ export function BuildScreen() {
     body = (
       <ErrorState
         title="The builder session did not load"
-        message={thread.loadError.message}
+        message={errorText(thread.loadError)}
         onRetry={thread.loadError.retryable ? () => void thread.reload() : undefined}
       />
     );

@@ -3,8 +3,15 @@
 // browser would; every external write follows an owner approval made through the API.
 //
 // Run (server already listening):
-//   npx tsx scripts/live/run-demo.ts [all|pizza|pay|negative|booking|hours|health, comma list] [--order ord_...] [--base http://127.0.0.1:4010]
+//   npx tsx scripts/live/run-demo.ts [all|pizza|pay|negative|declined|expiry|booking|hours|health, comma list] [--order ord_...] [--base http://127.0.0.1:4010]
 // `pay` pays the order from `pizza` (or --order) in the Square sandbox and waits for reconciliation.
+// `declined` makes a new order, approves it and pays it with Square's sandbox decline nonce: it expects PAYMENT_FAILED.
+// `expiry` makes a new order and never decides it. It waits out the 10 minute approval window and the
+// 30 second expiry sweep (about 11 minutes), so `all` leaves it out: name it to run it.
+// `booking` deletes the Calendar event it created at the end, through the server's own Calendar adapter.
+//
+// LOCAL ONLY. This script is not part of `npm test` and does not run in CI. It needs real keys in
+// .env.local and writes to the sandbox providers (Square sandbox, the demo Calendar and Sheet).
 //
 // It reads credentials from the environment (.env.local is found by walking up). It prints steps and
 // results only: never a token, key, password, email, full phone number or payment link token. IDs are
@@ -13,6 +20,8 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createPool } from '../../apps/server/src/db/index';
+import { createCalendarAdapter } from '../../apps/server/src/adapters/calendar/index';
+import { APPROVAL_EXPIRY_MS } from '@abos/contracts';
 import { parseEnv } from '../../apps/server/src/env';
 import { sheets } from '@googleapis/sheets';
 import { calendar } from '@googleapis/calendar';
@@ -150,6 +159,22 @@ async function calendarEvent(eventId: string) {
   const r = await client.events.get({ calendarId: env('GOOGLE_CALENDAR_ID'), eventId });
   return { status: r.data.status, start: r.data.start?.dateTime, end: r.data.end?.dateTime };
 }
+/**
+ * Deletes the one booking's event through the server's own Calendar adapter (the same delete the
+ * operator cleanup uses). It is called only with a booking this run created and whose event ID this
+ * run read back, and it refuses unless the stored event for that booking is that one.
+ */
+async function deleteBookingEvent(bookingId: string, eventId: string) {
+  const sa = JSON.parse(env('GOOGLE_SERVICE_ACCOUNT_JSON')) as { client_email: string; private_key: string };
+  const client = calendar({ version: 'v3', auth: new JWT({ email: sa.client_email, key: sa.private_key, scopes: ['https://www.googleapis.com/auth/calendar.events'] }) });
+  const row = (await q<{ google_event_id: string | null }>('select google_event_id from public.bookings where id = $1', [bookingId]))[0];
+  check(row?.google_event_id === eventId, 'the event to delete is the one this run created for this booking');
+  const adapter = createCalendarAdapter({ client: client as unknown as Parameters<typeof createCalendarAdapter>[0]['client'], now: () => new Date() });
+  const r = await adapter.deleteEventForBooking(bookingId as never, env('GOOGLE_CALENDAR_ID'));
+  const after = await calendarEvent(eventId).catch(() => undefined);
+  // A deleted Google event reads back as cancelled, or not at all.
+  return { ok: r.ok && (!after || after.status === 'cancelled'), detail: r.ok ? `deleted=${r.deleted}, read back ${after?.status ?? 'gone'}` : `adapter refused: ${r.reason}` };
+}
 async function sheetsRecordId(recordType: 'order' | 'booking', recordId: string) {
   const job = (await q<{ id: string; state: string; attempts: number; external_ref: string | null }>(
     "select id, state, attempts, external_ref from public.sync_jobs where record_type = $1 and record_id = $2", [recordType, recordId]))[0];
@@ -224,6 +249,103 @@ async function loadPizzaState() {
   state.pizza = { orderId: o.id, approvalId: o.approvalId, payloadHash: a.payloadHash, squareOrderId: o.squareOrderId, totalMinor: o.totalMinor, currency: o.currency };
 }
 
+type PizzaState = NonNullable<typeof state.pizza>;
+const sandboxOk = () => process.env.SQUARE_ENVIRONMENT === 'sandbox' && new URL(SQUARE_SANDBOX).host === 'connect.squareupsandbox.com';
+type PayResult = { httpOk: boolean; opened: boolean; at: number; payment: Json | undefined; detail: string };
+/**
+ * SIMULATED customer payment in the sandbox, without a card form. Decision by the lead (2026-11-14):
+ * open the payment link's DRAFT order through UpdateOrder, then pay it with a Square sandbox nonce.
+ * Stable keys per order and attempt, so a rerun cannot open or pay twice.
+ */
+async function sandboxPay(p: PizzaState, nonce: string, attempt: string): Promise<PayResult> {
+  const sim = (m: string) => log(`SIMULATED ${m}`);
+  const sqHeaders = { Authorization: `Bearer ${env('SQUARE_ACCESS_TOKEN')}`, 'Content-Type': 'application/json', 'Square-Version': '2025-01-23' };
+  const errs = (b: Json) => (b.errors as Json[] | undefined)?.map((e) => `${e.code} ${e.field ?? ''} ${String(e.detail ?? '').slice(0, 160)}`).join(' | ') ?? '';
+  const sqOrder = (await (await fetch(`${SQUARE_SANDBOX}/v2/orders/${p.squareOrderId}`, { headers: sqHeaders, redirect: 'error' })).json() as Json).order as Json;
+  sim(`Square order ${short(p.squareOrderId)} state ${sqOrder?.state} version ${sqOrder?.version} total ${sqOrder?.total_money?.amount}`);
+  if (sqOrder?.state === 'DRAFT') {
+    const up = await fetch(`${SQUARE_SANDBOX}/v2/orders/${p.squareOrderId}`, { method: 'PUT', redirect: 'error', headers: sqHeaders,
+      body: JSON.stringify({ idempotency_key: `open-${p.orderId.slice(-24)}-${attempt}`, order: { location_id: env('SQUARE_LOCATION_ID'), version: sqOrder.version, state: 'OPEN' } }) });
+    const upBody = (await up.json()) as Json;
+    sim(`UpdateOrder state OPEN: HTTP ${up.status} ${up.ok ? `state ${upBody.order?.state} version ${upBody.order?.version}` : errs(upBody)}`);
+    if (!up.ok || upBody.order?.state !== 'OPEN') return { httpOk: false, opened: false, at: Date.now(), payment: undefined, detail: `UpdateOrder refused: HTTP ${up.status} ${errs(upBody)}` };
+  } else if (sqOrder?.state !== 'OPEN') return { httpOk: false, opened: false, at: Date.now(), payment: undefined, detail: `Square order is ${sqOrder?.state}, not payable` };
+  const payKey = `pay-${p.orderId.slice(-24)}-${attempt}`;
+  const at = Date.now();
+  const payRes = await fetch(`${SQUARE_SANDBOX}/v2/payments`, { method: 'POST', redirect: 'error', headers: sqHeaders,
+    body: JSON.stringify({ source_id: nonce, idempotency_key: payKey.slice(0, 45), order_id: p.squareOrderId,
+      amount_money: { amount: p.totalMinor, currency: p.currency }, location_id: env('SQUARE_LOCATION_ID'), autocomplete: true }) });
+  const payBody = (await payRes.json()) as Json;
+  const payment = payBody.payment as Json | undefined;
+  sim(`CreatePayment: HTTP ${payRes.status} ${payRes.ok ? `payment ${short(payment?.id)} ${payment?.status} ${payment?.amount_money?.amount} ${payment?.amount_money?.currency}` : `${errs(payBody)}${payment ? ` payment ${short(payment.id)} ${payment.status}` : ''}`}`);
+  return { httpOk: payRes.ok, opened: true, at, payment, detail: `HTTP ${payRes.status} ${errs(payBody)}`.trim() };
+}
+
+/** Simulated call, approval and checkout for a fresh pizza order, to PAYMENT_PENDING. */
+async function pizzaToPaymentPending(name: string): Promise<PizzaState> {
+  const call = await simulatedCall('agt_pizza_01', PIZZA, 'propose_order', pizzaLines(name));
+  const a = await approvalFor(PIZZA, call.approvalId);
+  check(a.state === 'PENDING' && a.bundleType === 'order_bundle', 'pending order_bundle approval');
+  const d = await decide(PIZZA, call.approvalId, 'approve', a.payloadHash);
+  check(d.status === 200 && d.body.approval?.state === 'APPROVED', `approve accepted (HTTP ${d.status} ${d.body.code ?? ''})`);
+  const o = (await waitFor('PAYMENT_PENDING', 90_000, async () => {
+    const x = await order(call.proposalId);
+    if (x.status === 'RECOVERY_REQUIRED') throw new Error(`order reached ${x.status}`);
+    return x.status === 'PAYMENT_PENDING' && x.squareOrderId ? x : undefined;
+  }, 1000)).value;
+  return { orderId: call.proposalId, approvalId: call.approvalId, payloadHash: a.payloadHash, squareOrderId: o.squareOrderId, totalMinor: o.totalMinor, currency: o.currency };
+}
+
+async function flowDeclined() {
+  log('FLOW 4b declined payment (SIMULATED, sandbox)');
+  if (!sandboxOk()) { record('4b declined payment', false, 'SIMULATED refused: not sandbox'); return; }
+  const p = await pizzaToPaymentPending('Declina Fakename');
+  // Square's sandbox decline nonce. It is not in SPEC section 4 (which lists the declined test card for
+  // the card form) and has not been run here yet. If Square keeps no FAILED payment for it, the order
+  // stays PAYMENT_PENDING and this flow reports FAIL with what it saw.
+  const r = await sandboxPay(p, 'cnon:card-nonce-declined', 'declined-1');
+  check(r.opened, `the order could be opened for payment: ${r.detail}`);
+  // The webhook or the reconcile poll (every 30 s) moves the order. Square's record is the authority.
+  const failed = await waitFor('PAYMENT_FAILED', 75_000, async () => {
+    const o = await order(p.orderId);
+    if (['PAID_VERIFIED', 'FULFILLMENT_READY'].includes(o.status)) throw new Error(`a declined payment reached ${o.status}`);
+    return o.status === 'PAYMENT_FAILED' ? o : undefined;
+  }, 1000).catch(() => undefined);
+  const o = await order(p.orderId);
+  const events = await q<{ type: string; to: string | null }>("select type, payload->>'to' as to from public.activity_events where business_id = $1 and payload->>'orderId' = $2 order by occurred_at, id", [PIZZA, p.orderId]);
+  const failedEvent = events.some((e) => e.type === 'payment.failed');
+  const paidEvent = events.some((e) => e.type === 'payment.verified' || e.to === 'PAID_VERIFIED');
+  const job = await sheetsRecordId('order', p.orderId);
+  const inSheet = await sheetHasRecord('Orders', p.orderId);
+  record('4b declined payment', !!failed && failedEvent && !paidEvent && !o.squarePaymentId && !job && !inSheet,
+    `SIMULATED CreatePayment ${r.detail}${r.payment ? ` (payment ${short(r.payment.id)} ${r.payment.status})` : ''}; order ${short(p.orderId)} ${o.status}; payment.failed event ${failedEvent}; paid event ${paidEvent}; sync job ${job?.status ?? 'none'}; Orders row ${inSheet}`);
+}
+
+async function flowExpiry() {
+  log(`FLOW 4c approval expiry: a new order left undecided for ${APPROVAL_EXPIRY_MS / 60_000} minutes plus the 30 s sweep`);
+  const call = await simulatedCall('agt_pizza_01', PIZZA, 'propose_order', pizzaLines('Expira Fakename'));
+  const a = await approvalFor(PIZZA, call.approvalId);
+  check(a.state === 'PENDING', 'pending approval');
+  // There is no owner route that expires an approval early, so the flow waits out the window.
+  const waitMs = Math.max(0, Date.parse(String(a.expiresAt)) - Date.now()) + 90_000;
+  log(`  waiting up to ${Math.round(waitMs / 1000)} s for the expiry sweep`);
+  const done = await waitFor('APPROVAL_EXPIRED', waitMs, async () => {
+    const o = await order(call.proposalId);
+    if (o.status !== 'AWAITING_OWNER_APPROVAL' && o.status !== 'APPROVAL_EXPIRED') throw new Error(`order reached ${o.status}`);
+    return o.status === 'APPROVAL_EXPIRED' ? o : undefined;
+  }, 15_000).catch(() => undefined);
+  const after = await approvalFor(PIZZA, call.approvalId);
+  const late = await decide(PIZZA, call.approvalId, 'approve', a.payloadHash);
+  await sleep(3000);
+  const st = await steps(call.approvalId);
+  const o = await order(call.proposalId);
+  const ev = await q<{ type: string }>("select type from public.activity_events where business_id = $1 and ((type = 'approval.expired' and payload->>'approvalId' = $2) or (type = 'order.status_changed' and payload->>'orderId' = $3 and payload->>'to' = 'APPROVAL_EXPIRED'))", [PIZZA, call.approvalId, call.proposalId]);
+  const evOk = ev.filter((e) => e.type === 'approval.expired').length === 1 && ev.filter((e) => e.type === 'order.status_changed').length === 1;
+  const lateOk = late.body.code === 'APPROVAL_EXPIRED';
+  record('4c approval expiry', !!done && after.state === 'EXPIRED' && st.length === 0 && !o.squareOrderId && evOk && lateOk,
+    `order ${short(call.proposalId)} ${o.status}, approval ${after.state}; late approve HTTP ${late.status} ${late.body.code ?? ''}; ${st.length} steps; Square order ${o.squareOrderId ? 'present' : 'none'}; approval.expired and status events ${evOk}`);
+}
+
 async function flowPay() {
   await loadPizzaState();
   check(state.pizza, 'a pizza order from flow 1 or --order <id>');
@@ -239,32 +361,14 @@ async function flowPay() {
     return;
   }
   const p = state.pizza;
-  const sqHeaders = { Authorization: `Bearer ${env('SQUARE_ACCESS_TOKEN')}`, 'Content-Type': 'application/json', 'Square-Version': '2025-01-23' };
-  const errs = (b: Json) => (b.errors as Json[] | undefined)?.map((e) => `${e.code} ${e.field ?? ''} ${String(e.detail ?? '').slice(0, 160)}`).join(' | ') ?? '';
-  const sqOrder = (await (await fetch(`${SQUARE_SANDBOX}/v2/orders/${p.squareOrderId}`, { headers: sqHeaders, redirect: 'error' })).json() as Json).order as Json;
-  sim(`Square order ${short(p.squareOrderId)} state ${sqOrder?.state} version ${sqOrder?.version} total ${sqOrder?.total_money?.amount}`);
-  // Stable keys per order (and attempt): a rerun cannot open or pay twice. --pay-attempt N only after a declined attempt.
   const ai = args.indexOf('--pay-attempt');
-  const attempt = ai >= 0 ? args[ai + 1] : '1';
-  if (sqOrder?.state === 'DRAFT') {
-    const up = await fetch(`${SQUARE_SANDBOX}/v2/orders/${p.squareOrderId}`, { method: 'PUT', redirect: 'error', headers: sqHeaders,
-      body: JSON.stringify({ idempotency_key: `open-${p.orderId.slice(-24)}-${attempt}`, order: { location_id: env('SQUARE_LOCATION_ID'), version: sqOrder.version, state: 'OPEN' } }) });
-    const upBody = (await up.json()) as Json;
-    sim(`UpdateOrder state OPEN: HTTP ${up.status} ${up.ok ? `state ${upBody.order?.state} version ${upBody.order?.version}` : errs(upBody)}`);
-    if (!up.ok || upBody.order?.state !== 'OPEN') { record('2 sandbox payment', false, `SIMULATED UpdateOrder refused: HTTP ${up.status} ${errs(upBody)}`); return; }
-  } else if (sqOrder?.state !== 'OPEN') { record('2 sandbox payment', false, `SIMULATED Square order is ${sqOrder?.state}, not payable`); return; }
-  const payKey = `pay-${p.orderId.slice(-24)}-${attempt}`;
-  const tPay = Date.now();
-  const payRes = await fetch(`${SQUARE_SANDBOX}/v2/payments`, { method: 'POST', redirect: 'error', headers: sqHeaders,
-    body: JSON.stringify({ source_id: 'cnon:card-nonce-ok', idempotency_key: payKey.slice(0, 45), order_id: p.squareOrderId,
-      amount_money: { amount: p.totalMinor, currency: p.currency }, location_id: env('SQUARE_LOCATION_ID'), autocomplete: true }) });
-  const payBody = (await payRes.json()) as Json;
-  const payment = payBody.payment as Json | undefined;
-  sim(`CreatePayment: HTTP ${payRes.status} ${payRes.ok ? `payment ${short(payment?.id)} ${payment?.status} ${payment?.amount_money?.amount} ${payment?.amount_money?.currency}` : errs(payBody)}`);
-  record('2 sandbox payment', payRes.ok && payment?.status === 'COMPLETED',
-    payRes.ok ? `SIMULATED UpdateOrder OPEN + CreatePayment ${short(payment?.id)} ${payment?.status} ${payment?.amount_money?.amount} ${payment?.amount_money?.currency}, order ${short(payment?.order_id)}`
-      : `SIMULATED HTTP ${payRes.status} ${errs(payBody)}`);
-  if (!payRes.ok) return;
+  const paid0 = await sandboxPay(p, 'cnon:card-nonce-ok', ai >= 0 ? args[ai + 1]! : '1');
+  const payment = paid0.payment;
+  const tPay = paid0.at;
+  record('2 sandbox payment', paid0.httpOk && payment?.status === 'COMPLETED',
+    paid0.httpOk ? `SIMULATED UpdateOrder OPEN + CreatePayment ${short(payment?.id)} ${payment?.status} ${payment?.amount_money?.amount} ${payment?.amount_money?.currency}, order ${short(payment?.order_id)}`
+      : `SIMULATED ${paid0.detail}`);
+  if (!paid0.httpOk) return;
 
   // ----- FLOW 3: reconciliation (poll or the owner's recovery route) -----
   log('FLOW 3 reconciliation: waiting for the reconcile poll (every 30 s)');
@@ -374,8 +478,11 @@ async function flowBooking() {
   const onCal = ev ? await calendarEvent(ev).catch(() => undefined) : undefined;
   const calOk = onCal?.status === 'confirmed' && Date.parse(String(onCal.start)) === Date.parse(String(a.payload.startUtc));
   log(`calendar read back: ${onCal ? `${onCal.status} ${onCal.start} to ${onCal.end}` : 'not found'}`);
-  record('5 barbershop booking', !!ev && calOk && inSheet,
-    `booking ${short(call.proposalId)} ${[...seen].join(' -> ')}; calendar event ${short(ev)} read back ${calOk ? 'at the approved slot' : 'FAILED'}; approve->BOOKED_VERIFIED ${done.ms} ms after the decision returned (decision ${tDecided - tApprove} ms); sync job ${job?.status ?? 'absent'} (attempts ${job?.attempts ?? '-'}), sheet row ${inSheet}`);
+  // Clean up: delete only the event this run created, for this run's booking.
+  const cleanup = ev ? await deleteBookingEvent(call.proposalId, ev).catch((e: unknown) => ({ ok: false, detail: e instanceof Error ? e.message : 'error' })) : { ok: false, detail: 'no event to delete' };
+  log(`calendar cleanup: ${cleanup.detail}`);
+  record('5 barbershop booking', !!ev && calOk && inSheet && cleanup.ok,
+    `booking ${short(call.proposalId)} ${[...seen].join(' -> ')}; calendar event ${short(ev)} read back ${calOk ? 'at the approved slot' : 'FAILED'}; approve->BOOKED_VERIFIED ${done.ms} ms after the decision returned (decision ${tDecided - tApprove} ms); sync job ${job?.status ?? 'absent'} (attempts ${job?.attempts ?? '-'}), sheet row ${inSheet}; cleanup ${cleanup.detail}`);
 }
 
 async function flowHours() {
@@ -422,14 +529,14 @@ async function flowHealth() {
   record('7 integration health', r.body.square?.environment === 'sandbox', s.join('; '));
 }
 
-const FLOWS: Record<string, () => Promise<void>> = { pizza: flowPizza, pay: flowPay, negative: flowNegative, booking: flowBooking, hours: flowHours, health: flowHealth };
+const FLOWS: Record<string, () => Promise<void>> = { pizza: flowPizza, pay: flowPay, negative: flowNegative, declined: flowDeclined, expiry: flowExpiry, booking: flowBooking, hours: flowHours, health: flowHealth };
 
 async function main() {
   const health = await (await fetch(new URL('/health', BASE))).json() as Json;
   check(health.squareEnvironment === 'sandbox', 'server reports Square sandbox');
   await signIn();
   await loadPizzaState();
-  const order = which === 'all' ? ['pizza', 'pay', 'negative', 'booking', 'hours', 'health'] : which.split(',');
+  const order = which === 'all' ? ['pizza', 'pay', 'negative', 'declined', 'booking', 'hours', 'health'] : which.split(',');
   for (const name of order) {
     const fn = FLOWS[name];
     if (!fn) throw new Error(`unknown flow ${name}`);

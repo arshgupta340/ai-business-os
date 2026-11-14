@@ -4,7 +4,7 @@ import {Banner} from '@astryxdesign/core/Banner';
 import {Button} from '@astryxdesign/core/Button';
 
 export type ErrorStateProps = {
-  /** Safe text for the owner, for example ApiError.message. */
+  /** Safe text for the owner, for example errorText(error) from @/lib/error-text. Never the server message. */
   message: string;
   title?: string;
   /** When set, a retry button is shown. */

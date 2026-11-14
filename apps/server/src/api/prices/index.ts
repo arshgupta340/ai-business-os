@@ -9,6 +9,7 @@ import { AppError } from '../../errors';
 import { SquareAdapterError } from '../../adapters/square/types';
 import { SquarePriceError } from '../../adapters/square/price-types';
 import { CATALOG_PRICE_MAX } from '../../adapters/square';
+import { PolicyError } from '../../policy/types';
 import type { CatalogSyncPort, PricesDependencies, PriceExecutionPorts, PriceReconciliationPorts, PriceStepResult } from './types';
 export * from './types';
 
@@ -59,6 +60,13 @@ export const pricesPlugin: FastifyPluginAsync<PricesDependencies> = async (app, 
           !(await verifyPayloadHash('price_edit', response.approval.payload, hash))) throw apiFailure('INTERNAL', 'The price approval could not be confirmed.');
       return reply.code(endpoint.successStatus).send(response);
     } catch (error) {
+      // The approval routine refuses a payload whose Square price or version no longer matches the
+      // catalog row (SUBJECT, mapped to INVALID_STATE): Square changed since the last sync. Retrying
+      // cannot help, so answer a plain refusal that tells the owner what to do.
+      if (error instanceof PolicyError && error.code === 'INVALID_STATE') {
+        return reply.code(ERROR_CODE_INFO.INVALID_STATE.httpStatus).send(makeApiError('INVALID_STATE',
+          'This item changed in Square since the last sync. Sync the catalog, then try the price change again.', correlationId));
+      }
       const code: ErrorCode = error instanceof SquareAdapterError ? error.code :
         error instanceof AppError && ErrorCodeSchema.safeParse(error.code).success ? error.code as ErrorCode : 'INTERNAL';
       // Fixed messages keep arbitrary port failures and provider bodies out of responses and logs.

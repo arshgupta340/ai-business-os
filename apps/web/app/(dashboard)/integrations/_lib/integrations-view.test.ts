@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {ApiError, type ActivityEvent, type IntegrationProvider} from '@/lib/api';
 import {statusView} from '@/lib/status';
-import {PROVIDER_LABELS} from '@/components/shell/ConnectionHealth';
+import {HEALTH_PROVIDERS} from '@/components/shell/ConnectionHealth';
 import {
   PROVIDER_PURPOSE,
   canRetry,
@@ -11,7 +11,7 @@ import {
   errorText,
 } from './integrations-view';
 
-const PROVIDERS = Object.keys(PROVIDER_LABELS) as IntegrationProvider[];
+const PROVIDERS: readonly IntegrationProvider[] = HEALTH_PROVIDERS;
 
 function event(type: ActivityEvent['type'], payload: Record<string, unknown>): ActivityEvent {
   return {
@@ -91,7 +91,7 @@ describe('channelText', () => {
 describe('describeIntegrationEvent', () => {
   it('describes a rejected webhook and marks a Square one as payment data', () => {
     const line = describeIntegrationEvent(event('webhook.rejected', {provider: 'square', reason: 'signature_invalid'}));
-    expect(line.title).toBe('Rejected a Square webhook because its signature did not match. Nothing changed.');
+    expect(line.title).toBe('Rejected a webhook from Square because its signature did not match. Nothing changed.');
     expect(line.payment).toBe(true);
   });
 

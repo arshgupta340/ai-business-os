@@ -152,7 +152,8 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
   // When it is off, the voice webhook answers 503 (Twilio retries later) and /ws/phone does not exist.
   // D-12: with TELEPHONY_PROVIDER=agentphone, calls arrive at /webhooks/agentphone instead, so the Twilio
   // voice webhook answers 503 like an unconfigured one. With twilio (the default) nothing here changed.
-  if (composed.voice.ok && composed.telephony.name === 'twilio') await app.register(voicePlugin, composed.voice.options);
+  // The voice logger is wrapped so each call's connect-to-first-audio time is also a first_audio sample (B-30).
+  if (composed.voice.ok && composed.telephony.name === 'twilio') await app.register(voicePlugin, { ...composed.voice.options, logger: composed.firstAudio.logger(composed.voice.options.logger ?? app.log) });
   else {
     if (!composed.voice.ok) app.log.warn({ missing: composed.voice.missing }, 'phone voice is off: missing settings');
     if (composed.telephony.name !== 'twilio') app.log.info({ provider: composed.telephony.name }, 'Twilio phone voice is off: another telephony provider is selected');

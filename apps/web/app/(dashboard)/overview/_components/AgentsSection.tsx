@@ -15,7 +15,8 @@ import {lastFour} from '@/lib/format';
 import {useBusiness} from '@/lib/session';
 import {statusView} from '@/lib/status';
 import {BlockError} from './BlockError';
-import {sortAgents, templateLabel, versionLabel} from './overview-logic';
+import {agentTemplateLabel} from '@/lib/labels';
+import {sortAgents, versionLabel} from './overview-logic';
 
 function AgentCard({agent, liveAgent}: {agent: Agent; liveAgent?: LiveAgent}) {
   const state = statusView('agent', agent.state);
@@ -31,7 +32,7 @@ function AgentCard({agent, liveAgent}: {agent: Agent; liveAgent?: LiveAgent}) {
           <StatusBadge label={state.label} tone={state.tone} />
         </HStack>
         <Text type="supporting">
-          {templateLabel(agent.template)}, {versionLabel(agent)}
+          {agentTemplateLabel(agent.template)}, {versionLabel(agent)}
         </Text>
         {answering ? (
           <Text type="body">

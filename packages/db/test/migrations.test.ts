@@ -1,6 +1,6 @@
 import type { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { applyMigrations, readMigrations, type MigrationPool, type PooledSession } from '../src/migrate';
+import { applyMigrations, checksums, readMigrations, type MigrationPool, type PooledSession } from '../src/migrate';
 import { createApproval, createEmptyDb, createOrder, createOwner, insert, migrationDb } from './helpers';
 
 // SPEC 2.7: the PRD's seventeen tables plus the four added ones.
@@ -53,6 +53,27 @@ describe('migrations', () => {
     const files = readMigrations();
     const edited = files.map((f, i) => (i === 0 ? { ...f, checksum: 'different' } : f));
     await expect(applyMigrations(migrationDb(db), edited)).rejects.toThrow(/content has changed/);
+  });
+
+  it('a migration recorded from a CRLF checkout is the same migration in an LF checkout, and a real edit still stops the run', async () => {
+    const lf = 'create table public.eol_probe (id int);\nselect 1;\n';
+    expect(checksums(lf.replace(/\n/g, '\r\n'))).toEqual(checksums(lf));
+    expect(checksums(lf).checksum).not.toBe(checksums(lf).alsoAccepted[0]);
+
+    const files = readMigrations();
+    const first = files[0]!;
+    // Record the first file the way a Windows checkout did before this change: the CRLF checksum.
+    await db.query('update public.schema_migrations set checksum = $1 where name = $2', [first.alsoAccepted![0], first.name]);
+    try {
+      const again = await applyMigrations(migrationDb(db), files);
+      expect(again.applied).toEqual([]);
+      expect(again.skipped).toContain(first.name);
+      // A changed file is still refused, whichever form was recorded.
+      const edited = files.map((f, i) => (i === 0 ? { ...f, ...checksums(`${f.sql}\n-- edited\n`) } : f));
+      await expect(applyMigrations(migrationDb(db), edited)).rejects.toThrow(/content has changed/);
+    } finally {
+      await db.query('update public.schema_migrations set checksum = $1 where name = $2', [first.checksum, first.name]);
+    }
   });
 
   it('roll back a failing file and record nothing for it', async () => {

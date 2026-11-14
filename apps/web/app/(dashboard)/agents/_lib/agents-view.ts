@@ -3,6 +3,8 @@
  * here, so each rule is unit tested on its own (agents-view.test.ts).
  */
 import {isApiError, type Agent, type AgentSpec, type LiveAgent} from '@/lib/api';
+import {errorText} from '@/lib/error-text';
+import {providerLabel} from '@/lib/labels';
 
 type BusinessName = {id: string; name: string};
 
@@ -139,7 +141,8 @@ export function errorView(err: unknown, context: ErrorContext): ErrorView {
   if (!isApiError(err)) return base;
   const view: ErrorView = {
     ...base,
-    message: err.message || base.message,
+    // The server message can carry an error code. The owner reads the sentence for the code.
+    message: errorText(err),
     canRetry: err.retryable,
     ...(err.correlationId ? {correlationId: err.correlationId} : {}),
   };
@@ -171,7 +174,7 @@ export function errorView(err: unknown, context: ErrorContext): ErrorView {
     case 'RATE_LIMITED':
       return {...view, message: 'Too many requests. Wait a moment, then try again.', canRetry: true};
     case 'INTEGRATION_UNAVAILABLE': {
-      const provider = typeof err.details?.provider === 'string' ? err.details.provider : 'A provider';
+      const provider = typeof err.details?.provider === 'string' ? providerLabel(err.details.provider) : 'A provider';
       return {...view, message: `${provider} is not responding.`, canRetry: true};
     }
     default:

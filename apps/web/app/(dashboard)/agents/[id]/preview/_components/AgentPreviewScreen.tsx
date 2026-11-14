@@ -28,6 +28,7 @@ import {
   type Agent,
   type PublishResponse,
 } from '@/lib/api';
+import {errorText} from '@/lib/error-text';
 import {useBusiness} from '@/lib/session';
 import {rememberedSession} from '../../../../build/_lib/memory';
 import {blockingConflicts, draftProblems, simCallGate} from '../_lib/preview';
@@ -177,7 +178,7 @@ function Ready({businessId, agent, timeZone}: {businessId: string; agent: Agent;
               message={
                 preview.error.code === 'CAPABILITY_NOT_ALLOWED'
                   ? 'A write tool cannot be given to the caller agent, and every capability must be in the registry. Change the draft in the builder.'
-                  : preview.error.message
+                  : errorText(preview.error)
               }
               onRetry={preview.error.retryable ? () => runPreview() : undefined}
             />
@@ -229,7 +230,7 @@ export function AgentPreviewScreen({agentId}: {agentId: string}) {
     return (
       <ErrorState
         title="The agent did not load"
-        message={agent.error.message}
+        message={errorText(agent.error)}
         onRetry={!isApiError(agent.error) || agent.error.retryable ? () => void agent.refetch() : undefined}
       />
     );

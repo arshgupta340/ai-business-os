@@ -131,16 +131,16 @@ describe("catalog and prices", () => {
     await api.decideApproval(PIZZA, approval.id, { decision: "reject", payloadHash: approval.payloadHash });
   });
 
-  // Mismatch (server): when Square's version differs from the cached row, the engine throws a PolicyError
-  // INVALID_STATE, and apps/server/src/api/prices/index.ts maps every error that is not an AppError to
-  // INTERNAL (500, retryable), so the Prices editor offers "Try again" for a proposal that cannot succeed.
-  it.fails("proposePrice on a stale Square version answers INVALID_STATE, not a retryable INTERNAL", async () => {
+  // When Square's version differs from the cached row, the engine refuses with INVALID_STATE and the
+  // route answers it as a plain refusal (409, not retryable) that tells the owner to sync first.
+  it("proposePrice on a stale Square version answers INVALID_STATE, not a retryable INTERNAL", async () => {
     const prices = s.world.app.composed.providers.prices!;
     const read = prices.readVariationPrice;
     prices.readVariationPrice = async (variationId) => ({ ...(await read(variationId)), version: 999 });
     try {
       const err = (await rejection(api.proposePrice(PIZZA, { variationId: "SQ_VAR_MARG_LG", newPriceMinor: 2200, currency: "USD" }))) as ApiError;
       expect(err.code).toBe("INVALID_STATE");
+      expect(err.retryable).toBe(false);
     } finally {
       prices.readVariationPrice = read;
     }

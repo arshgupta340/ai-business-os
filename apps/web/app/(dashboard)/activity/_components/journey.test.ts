@@ -1,5 +1,8 @@
 import {describe, expect, it} from 'vitest';
+import {ActionTypeSchema, ErrorCodeSchema, GuardrailRuleSchema, MessageChannelSchema} from '@abos/contracts';
 import type {ActivityEvent, Booking, Call, Order} from '@/lib/api';
+import {expectOwnerLabel} from '@/lib/owner-label.test-helpers';
+import {describeEvent} from './describe';
 import {deriveJourney, groupByCall, mergeEvents, rejectedWebhooks, syncFromEvents, syncStatusView, waitingOn} from './journey';
 import {messageCopy} from './CheckoutPanel';
 import {qrPath} from './QrCode';
@@ -226,7 +229,8 @@ describe('failure states', () => {
     const events = [...approved(), ev('payment.failed', {orderId: 'ord_1', reason: 'card_declined', sandbox: true})];
     const j = deriveJourney({callId: 'call_1', events, call: call(), order: order('PAYMENT_FAILED')});
     expect(j.steps[4].view).toEqual({label: 'Payment failed (sandbox)', tone: 'danger'});
-    expect(j.notices.find((x) => x.key === 'payment_failed')?.description).toContain('card_declined');
+    expect(j.notices.find((x) => x.key === 'payment_failed')?.description).toContain('failed: card declined.');
+    expect(j.notices.find((x) => x.key === 'payment_failed')?.description).not.toContain('card_declined');
     expect(j.paidVerified).toBe(false);
     expect(j.finished).toBe(true);
   });
@@ -386,7 +390,7 @@ describe('messageCopy', () => {
       expect(copy.description).not.toMatch(/accepted|confirmed delivery/);
       expect(copy.tone).not.toBe('success');
     }
-    expect(messageCopy({status: 'SENT', channel: 'surge'}, false).title).toBe('Message sent (surge)');
+    expect(messageCopy({status: 'SENT', channel: 'surge'}, false).title).toBe('Message sent through Surge');
     expect(messageCopy({status: 'SENT'}, false).description).toContain('not paid');
   });
 });
@@ -436,5 +440,69 @@ describe('waitingOn, the large line for the back of the room', () => {
     expect(waitingOn(taken).who).toBe('You');
     const checking = deriveJourney({callId: 'call_1', events: [], call: call(), booking: booking('RECHECKING_SLOT')});
     expect(waitingOn(checking).who).toBe('Google Calendar');
+  });
+});
+
+/**
+ * Issue #122: no message channel, error code, guardrail rule or action type
+ * reaches the owner raw. Each list is read from the contract.
+ */
+describe('owner text on Live operations', () => {
+  /** expectOwnerLabel, plus no dotted identifier such as "square.checkout.create". */
+  const expectPlain = (text: unknown, raw: string) => {
+    expectOwnerLabel(text, raw);
+    expect(text as string, `text for ${raw} has a dotted identifier`).not.toMatch(/\w\.\w/);
+  };
+  const line = (type: ActivityEvent['type'], payload: Record<string, unknown>) => describeEvent(ev(type, payload), 'America/Los_Angeles')?.title;
+
+  it('names every message channel in the event log and on the checkout panel', () => {
+    for (const channel of MessageChannelSchema.options) {
+      expectPlain(line('message.sent', {subjectId: 'ord_1', channel, recipientLast4: '0123'}), channel);
+      for (const status of ['QUEUED', 'SENT', 'DELIVERED'] as const) expectPlain(messageCopy({status, channel}, false).title, channel);
+    }
+  });
+
+  it('says what happened for every error code, in the log and in each notice', () => {
+    for (const errorCode of ErrorCodeSchema.options) {
+      expectPlain(line('execution.failed', {executionId: 'exe_1', actionType: 'square.checkout.create', errorCode, retryable: false, nextStatus: 'FAILED'}), errorCode);
+      const proposed = proposal();
+      const decided = ev('approval.decided', {approvalId: 'apv_1', subjectId: 'ord_1', decision: 'APPROVED', decidedBy: 'usr'});
+      const started = ev('execution.started', {executionId: 'exe_1', approvalId: 'apv_1', actionType: 'square.checkout.create', stepIndex: 0, attempt: 1});
+      const failed = ev('execution.failed', {executionId: 'exe_1', actionType: 'square.checkout.create', errorCode, retryable: false, nextStatus: 'NEEDS_REVIEW'});
+      const recovery = deriveJourney({callId: 'call_1', events: [...proposed, decided, started, failed], call: call(), order: order('RECOVERY_REQUIRED')});
+      const notices = recovery.notices.filter((x) => x.key === 'recovery' || x.key.startsWith('review_'));
+      expect(notices).toHaveLength(2);
+      for (const notice of notices) {
+        expectPlain(notice.title, errorCode);
+        expectPlain(notice.description, errorCode);
+      }
+      const calendar = ev('execution.failed', {executionId: 'exe_c', actionType: 'calendar.event.create', errorCode, retryable: false, nextStatus: 'FAILED'});
+      const events = [
+        ev('approval.requested', {approvalId: 'apv_b', bundleType: 'booking_bundle', subjectId: 'bkg_1', actionBundle: ['calendar.event.create'], expiresAt: new Date(T0 + 600_000).toISOString()}),
+        ev('approval.decided', {approvalId: 'apv_b', subjectId: 'bkg_1', decision: 'APPROVED', decidedBy: 'usr'}),
+        calendar,
+      ];
+      const retry = deriveJourney({callId: 'call_1', events, call: call(), booking: booking('RETRY_REQUIRED')}).notices.find((x) => x.key === 'retry');
+      expectPlain(retry?.description, errorCode);
+    }
+  });
+
+  it('gives the sentence for every guardrail rule, once per rule', () => {
+    for (const rule of GuardrailRuleSchema.options) expectPlain(line('guardrail.refused', {callId: 'call_1', rule, utterance: 'x'}), rule);
+    const refusals = [...GuardrailRuleSchema.options, ...GuardrailRuleSchema.options].map((rule) => ev('guardrail.refused', {callId: 'call_1', rule}));
+    const notice = deriveJourney({callId: 'call_1', events: refusals, call: call()}).notices.find((x) => x.key === 'guardrail');
+    for (const rule of GuardrailRuleSchema.options) expectPlain(notice?.description, rule);
+    expect(notice?.description.match(/cannot skip your approval/g)).toHaveLength(1);
+  });
+
+  it('names every action type in the log', () => {
+    for (const actionType of ActionTypeSchema.options) {
+      expectPlain(line('execution.started', {executionId: 'exe_1', approvalId: 'apv_1', actionType, stepIndex: 0, attempt: 1}), actionType);
+      expectPlain(line('execution.succeeded', {executionId: 'exe_1', actionType}), actionType);
+    }
+  });
+
+  it('shows a payment failure reason in words', () => {
+    expectPlain(line('payment.failed', {orderId: 'ord_1', reason: 'CARD_DECLINED', sandbox: true}), 'CARD_DECLINED');
   });
 });

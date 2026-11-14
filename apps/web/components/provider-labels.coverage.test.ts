@@ -19,7 +19,7 @@ import {
 import {expectOwnerLabel, FUTURE_VALUES, NOT_TEXT} from '@/lib/owner-label.test-helpers';
 import {TONES, statusView} from '@/lib/status';
 import {providerProblems, providersForSteps} from './ProviderHealthNotice';
-import {PROVIDER_LABELS, providerLabel, summarizeHealth} from './shell/ConnectionHealth';
+import {HEALTH_PROVIDERS, PROVIDER_LABELS, providerLabel, summarizeHealth} from './shell/ConnectionHealth';
 
 const PROVIDERS = IntegrationProviderSchema.options;
 const STATES = IntegrationStateSchema.options;
@@ -41,8 +41,10 @@ const withState = (provider: string, state: string): IntegrationHealth =>
   health({[provider]: {...health()[provider as IntegrationProvider], state}});
 
 describe('provider labels', () => {
-  it('has one health card label for every integration provider, and no others', () => {
-    expect(Object.keys(PROVIDER_LABELS).sort()).toEqual([...PROVIDERS].sort());
+  it('has one health card for every integration provider, and no others', () => {
+    expect([...HEALTH_PROVIDERS].sort()).toEqual([...PROVIDERS].sort());
+    // One provider map for the app: every health card and every webhook provider, and nothing else.
+    expect(Object.keys(PROVIDER_LABELS).sort()).toEqual([...new Set([...PROVIDERS, ...WebhookProviderSchema.options])].sort());
     // The health record has one entry for every provider key.
     expect(Object.keys(IntegrationHealthSchema.shape).sort()).toEqual([...PROVIDERS].sort());
   });
