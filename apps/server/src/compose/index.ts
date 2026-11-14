@@ -40,6 +40,7 @@ import type { PricesDependencies } from '../api/prices/index';
 import type { RecoveryPorts } from '../api/recovery/index';
 import { createDbRecoveryPorts } from './recovery';
 import { createDbFallback, type FallbackDeps } from './fallback';
+import { createCallDecisions, type CallDecisionsBus } from './decisions';
 import { createProposeFactFromChat, dbAgentDraftStore, dbBuilderSessionStore, dbBusinessKnowledge, dbDraftFactStore, dbLiveAgentReader, type ProposeFactFromChat } from './builder';
 import { notWiredExecutor, notWiredWebhooks, type Executor, type ExecutorFactory, type SeamDeps, type WebhooksFactory } from './seams';
 
@@ -91,6 +92,10 @@ export interface ComposedServer {
   webhooksPlugin: FastifyPluginAsync;
   /** The database webhooks wiring, when it is the one in use (jobs, recovery, reconciliation). */
   webhooks: DbWebhooks | undefined;
+  /** select 1 against the database, for GET /health?refresh=1. Absent without a database. */
+  databaseProbe: (() => Promise<boolean>) | undefined;
+  /** Owner decisions to the live call they belong to (FLOWS 3.1). */
+  decisions: CallDecisionsBus;
   /** Human fallback router (B-28) and the relay hook it serves. */
   fallback: ReturnType<typeof createDbFallback>;
   /** POST /api/orders/:id/cancel and /api/executions/:id/resolve (B-32), on the 0005 routines. */
@@ -139,6 +144,9 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   };
   // One pinned snapshot per call (AC-16, review finding 4): the toolset's own fact reads, availability
   // and the booking proposal all read the same facts, taken once, however the owner edits them mid-call.
+  // Telemetry (B-30): one in-memory recorder. tool_latency is timed here around each tool call and
+  // webhook_delay in webhooks.ts; the voice relay and the executor take no telemetry port.
+  const telemetry = createTelemetry({ now: () => now().getTime() });
   const toolsetFor: ComposedServer['toolsetFor'] = (ctx) => {
     let snapshot: Promise<FactsSnapshot> | undefined = ctx.facts ? Promise.resolve(ctx.facts) : undefined;
     const pinned = (businessId: string) => {
@@ -148,16 +156,23 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     };
     const ports: RealToolsetPorts = { ...toolsetPorts, facts: { readVerified: ({ businessId }) => pinned(businessId) },
       proposals: engineProposalPort(engine, pinned, providers, now), availability: calendarAvailabilityPort(providers, pinned) };
-    return createRealToolset({ businessId: ctx.businessId, messageChannel, ports, capabilities: ctx.capabilities, now, ...(ctx.facts ? { factsSnapshot: ctx.facts } : {}) });
+    const ts = createRealToolset({ businessId: ctx.businessId, messageChannel, ports, capabilities: ctx.capabilities, now, ...(ctx.facts ? { factsSnapshot: ctx.facts } : {}) });
+    // The fourth argument (the relay's cancellation and deadline) is passed through unchanged (voice NOTES 7).
+    const call: RealToolset['handler']['call'] = (name, input, c, control) => {
+      const stop = telemetry.time('tool_latency', { businessId: ctx.businessId, correlationId: ctx.callId });
+      return ts.handler.call(name, input, c, control).finally(stop);
+    };
+    return { businessId: ts.businessId, handler: { ...ts.handler, call }, tools: ts.tools, trace: () => ts.trace(), clearTrace: () => ts.clearTrace(), dispose: () => ts.dispose() };
   };
   const calls = dbCallsPort(db, newId);
 
+  const decisions = createCallDecisions();
   const seamDeps: SeamDeps = { env, db, engine, providers, now, newId, log };
   const defaultExecutor: ExecutorFactory = hasDb ? (deps) => createDbExecutor(deps) : notWiredExecutor;
   const executor = (options.executor ?? defaultExecutor)(seamDeps);
   // Provider webhooks and payment reconciliation (B-13). Without a database or the signature settings
   // the routes keep the 503 default, which reads and stores nothing.
-  const webhooks = !options.webhooks && hasDb ? createDbWebhooks(seamDeps, notWiredWebhooks(seamDeps), { afterJob: () => executor.kick('') }) : undefined;
+  const webhooks = !options.webhooks && hasDb ? createDbWebhooks(seamDeps, notWiredWebhooks(seamDeps), { afterJob: () => executor.kick(''), telemetry }) : undefined;
   const webhooksPlugin = options.webhooks ? options.webhooks(seamDeps) : webhooks?.plugin ?? notWiredWebhooks(seamDeps);
 
   // Routes' engine port. After an approval the executor is told to look for work.
@@ -165,6 +180,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     async decide(input) {
       const result = await engine.decide(input);
       if (result.approval.state === 'APPROVED') executor.kick(result.approval.businessId);
+      await decisions.publish(db, { businessId: result.approval.businessId, approvalId: result.approval.id, state: result.approval.state }).catch(() => undefined);
       return result;
     },
     proposeFactEdit: (input) => engine.proposeFactEdit(input),
@@ -235,10 +251,10 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     ? { ok: true, options: {
       publicServerUrl: env.PUBLIC_SERVER_URL, liveAgent: dbLiveAgentPort(db), calls,
       facts: { snapshot: (businessId) => facts.readVerified({ businessId, signal: NO_SIGNAL }) },
-      events: dbVoiceEventsPort(db, newId, now),
+      events: dbVoiceEventsPort(db, newId, now, env.TWILIO_PHONE_NUMBER),
       toolsetFactory: (ctx) => { const ts = toolsetFor(ctx); return { handler: ts.handler, dispose: () => ts.dispose() }; },
       twilioValidator: providers.twilioValidator,
-      openaiSocketFactory: providers.openaiSocketFactory, messageChannel, fallback: fallback.relay,
+      openaiSocketFactory: providers.openaiSocketFactory, messageChannel, fallback: fallback.relay, decisions,
       ...(env.OPENAI_REALTIME_MODEL ? { model: env.OPENAI_REALTIME_MODEL } : {}),
       redactSecrets: [env.OPENAI_API_KEY, env.TWILIO_AUTH_TOKEN].filter((s): s is string => typeof s === 'string'),
     } }
@@ -248,8 +264,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
 
   const health = createHealthMonitor({ status: providers.status, probes: providers.probes ?? {}, now, ...(options.healthProbeTimeoutMs ? { timeoutMs: options.healthProbeTimeoutMs } : {}) });
 
-  // Telemetry (B-30): one in-memory recorder; approval_time is derived from activity events.
-  const telemetry = createTelemetry({ now: () => now().getTime() });
+  // Telemetry (B-30): one in-memory recorder (created above); approval_time is derived from activity events.
   const telemetryOptions: TelemetryPluginOptions = {
     recorder: telemetry,
     async guard(request, businessId) {
@@ -269,12 +284,15 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
 
   let sweep: ReturnType<typeof setInterval> | undefined;
   return {
-    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, prices, recovery, fallback, telemetry: telemetryOptions, health, now, newId,
+    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, prices, recovery, fallback, decisions,
+    databaseProbe: hasDb ? async () => (await db.query('select 1 as ok', [])).rows.length === 1 : undefined, telemetry: telemetryOptions, health, now, newId,
     async close() { if (pool) await pool.end(); },
     startJobs() {
       if (!hasDb || sweep) return;
       // API 3.7: a background job moves past-due approvals to EXPIRED. The routine writes the events.
-      sweep = setInterval(() => { engine.expireDue().catch((error: unknown) => log.error({ job: 'expiry', code: error instanceof Error ? error.name : 'unknown' }, 'approval expiry sweep failed')); }, 30_000);
+      sweep = setInterval(() => { engine.expireDue().then(async (expired) => {
+        for (const e of expired) await decisions.publish(db, { businessId: e.business_id, approvalId: e.id, state: 'EXPIRED' }).catch(() => undefined);
+      }).catch((error: unknown) => log.error({ job: 'expiry', code: error instanceof Error ? error.name : 'unknown' }, 'approval expiry sweep failed')); }, 30_000);
       sweep.unref();
       executor.start();
       webhooks?.start();

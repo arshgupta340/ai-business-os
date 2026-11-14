@@ -335,11 +335,19 @@ export function dbCallsPort(db: Db, newId: (prefix: string) => string): CallsSto
 }
 
 /** webhook.rejected and guardrail.refused from the voice worker. Payloads are fixed codes. */
-export function dbVoiceEventsPort(db: Db, newId: (prefix: string) => string, now: () => Date): VoiceEventsPort {
+export function dbVoiceEventsPort(db: Db, newId: (prefix: string) => string, now: () => Date, twilioNumber?: string): VoiceEventsPort {
+  // SPEC 2.9: a rejected webhook is written against the business that owns the integration the URL
+  // belongs to. The voice webhook belongs to the Twilio number, so its owner is that number's business.
+  const twilioOwner = async () => twilioNumber
+    ? ((await rows(db, 'select business_id from public.live_agent where phone_number = $1', [twilioNumber]))[0]?.business_id as string | undefined)
+    : undefined;
   const write = (businessId: string, type: 'webhook.rejected' | 'guardrail.refused', payload: unknown, correlationId: string) =>
     emitActivity(db, { id: newId('evt_'), businessId, correlationId, type, actorType: type === 'webhook.rejected' ? 'provider' : 'system', occurredAt: now().toISOString(), payload });
   return {
-    async webhookRejected({ businessId, payload }) { if (businessId) await write(businessId, 'webhook.rejected', payload, newId('req_')); },
+    async webhookRejected({ businessId, payload }) {
+      const owner = businessId ?? await twilioOwner();
+      if (owner) await write(owner, 'webhook.rejected', payload, newId('req_'));
+    },
     async guardrailRefused({ businessId, payload }) { await write(businessId, 'guardrail.refused', payload, payload.callId ?? newId('req_')); },
   };
 }

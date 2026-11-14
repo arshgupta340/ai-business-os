@@ -78,11 +78,13 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
     prices = createPriceAdapter({ client, locationId: env.SQUARE_LOCATION_ID, environment: env.SQUARE_ENVIRONMENT });
     squarePaymentStatus = async (paymentId) => (await client.payments.get({ paymentId })).payment?.status ?? undefined;
     const locationId = env.SQUARE_LOCATION_ID;
+    // ListLocations: the cheapest read that proves the token and that the configured location exists.
+    // The sandbox factory's narrow type predates it; the SDK instance it returns provides it.
+    const locations = (client as unknown as { locations: { list(): Promise<{ locations?: { id?: string | null }[] | null }> } }).locations;
     probes.square = async () => {
       try {
-        const page = await client.payments.list({ locationId, beginTime: new Date(now().getTime() - 60_000).toISOString(), sortOrder: 'DESC', limit: 1 });
-        for await (const _ of page) break;
-        return fixed(true, 'sandbox reachable');
+        const r = await locations.list();
+        return (r.locations ?? []).some((l) => l.id === locationId) ? fixed(true, 'sandbox reachable') : fixed(false, 'configured Square location not found');
       } catch { return fixed(false, 'Square sandbox refused the read'); }
     };
     status.square = ok('sandbox');

@@ -102,7 +102,7 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
   // Authenticates every contract route Arsh owns. Builder routes use their own BuilderAuth seam.
   app.addHook('preHandler', createAuthGuard(composed.db, composed.verifier));
 
-  await app.register(healthRoutes, { env });
+  await app.register(healthRoutes, { env, ...(composed.databaseProbe ? { database: composed.databaseProbe } : {}) });
   await app.register(withAuthPolicy('owner', apiRoutes), { db: composed.db, ports: composed.enginePorts, env, catalog: composed.catalogSync, providerStatus: composed.providers.status, health: composed.health });
   await app.register(withAuthPolicy('owner', async (scope) => {
     registerSimCall(scope, { db: composed.db, calls: composed.calls, toolsetFor: composed.toolsetFor, model: composed.agentModel, now: composed.now, newId: composed.newId });

@@ -18,6 +18,7 @@ import { processTwilioStatus } from '../webhooks/twilio-status';
 import type { PaymentOrder, PaymentVerification, StoredWebhook, WebhookDependencies } from '../webhooks/types';
 import { orderFromDbRow } from './executor';
 import type { SeamDeps } from './seams';
+import type { TelemetryPort } from '../telemetry/index';
 
 type Row = Record<string, unknown>;
 const one = async (q: QueryDb, text: string, params: unknown[]) => (await q.query(text, params)).rows[0] as Row | undefined;
@@ -65,7 +66,7 @@ export type DbWebhooks = {
   recoverNow(): Promise<number>;
 };
 
-export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, hooks: { afterJob?(): void } = {}): DbWebhooks {
+export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, hooks: { afterJob?(): void; telemetry?: TelemetryPort } = {}): DbWebhooks {
   const { env, db, providers, log } = deps;
   const base = env.PUBLIC_SERVER_URL?.replace(/\/+$/, '');
   const missing = [
@@ -90,6 +91,7 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
   // The routines refuse anything but sandbox; the server passes the configured environment as is.
   const squareEnvironment = () => env.SQUARE_ENVIRONMENT ?? 'unset';
 
+  const storedAt = new Map<string, { businessId: string; at: number }>();
   const pending = new Set<string>();
   const done = new Set<string>();
   let flights: Promise<void> = Promise.resolve();
@@ -106,6 +108,9 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
           await new Promise((r) => setTimeout(r, 200 * attempt));
         }
       }
+      // webhook_delay: from the verified row being stored to its job finishing (rows stored in this process).
+      const stored = storedAt.get(webhookId);
+      if (stored) { storedAt.delete(webhookId); hooks.telemetry?.record('webhook_delay', { businessId: stored.businessId, correlationId: webhookId, ms: Math.max(0, deps.now().getTime() - stored.at) }); }
       // No routine records webhook_events.processed_at for abos_app (needs private.mark_webhook_processed),
       // so the processed marker stays in this process; recovery re-runs rows after a restart (idempotent).
       done.add(webhookId);
@@ -146,6 +151,7 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
         const row = await one(db, `insert into public.webhook_events (source, provider_event_id, event_type, business_id, payload)
           values ($1,$2,$3,$4,$5::jsonb) on conflict (source, provider_event_id) do nothing returning id`,
         [input.source, input.providerEventId, input.eventType, input.businessId, JSON.stringify(input.payload)]);
+        if (row && input.businessId) storedAt.set(String(row.id), { businessId: input.businessId, at: deps.now().getTime() });
         return row ? { ...input, id: String(row.id) } : undefined;
       },
     },
