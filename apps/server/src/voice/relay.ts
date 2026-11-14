@@ -33,10 +33,11 @@ import {
   type ToolInput,
   type ToolName,
 } from '@abos/contracts';
-import { AUDIO_FORMAT, OAI_CLIENT, OAI_ITEM, OAI_SERVER, OPENAI_REALTIME_URL, STREAM_TOKEN_PARAM, TRANSCRIBE_MODEL, TURN_DETECTION, TWILIO_EVENT, VOICE } from './constants';
+import { AUDIO_FORMAT, DEFAULT_VOICE_TUNING, OAI_CLIENT, OAI_ITEM, OAI_SERVER, OPENAI_REALTIME_URL, STREAM_TOKEN_PARAM, TRANSCRIBE_MODEL, TWILIO_EVENT, VOICE, noiseReductionFor, turnDetectionFor, type TurnDetection, type VoiceTuning } from './constants';
+import { InterruptionGate } from './interruption';
 import { matchSpokenAnswer, offerLineSpoken, textOfferAllowed, type SpokenAnswer } from './consent';
 import { PlaybackTracker, StreamTokenStore, TimingTracker, errorInfo, safeLogger, spokenText, ulawBase64DurationMs } from './logic';
-import { buildInstructions, consentOfferInstruction, consentOfferSentence, consentResultInstruction, decisionInstruction, pendingGoodbyeInstruction, proposalLimitInstruction, toolLimitGoodbyeInstruction } from './prompt';
+import { buildInstructions, consentOfferInstruction, greetingCutInstruction, consentOfferSentence, consentResultInstruction, decisionInstruction, pendingGoodbyeInstruction, proposalLimitInstruction, toolLimitGoodbyeInstruction } from './prompt';
 import type {
   CallDecision,
   CallDecisionsPort,
@@ -136,7 +137,7 @@ export type SessionUpdateEvent = {
     output_modalities: ['audio'];
     instructions: string;
     audio: {
-      input: { format: typeof AUDIO_FORMAT; turn_detection: typeof TURN_DETECTION };
+      input: { format: typeof AUDIO_FORMAT; turn_detection: TurnDetection; noise_reduction: { type: 'near_field' | 'far_field' } | null };
       output: { format: typeof AUDIO_FORMAT; voice: string };
     };
     tools: ToolDefinition[];
@@ -152,8 +153,13 @@ export function phoneToolDefinitions(tools: readonly ToolName[]): ToolDefinition
   return toolDefinitionsFor(tools).map((d) => ({ ...d, description: `${d.description} ${SILENT_TOOL_NOTE}` }));
 }
 
-/** The spike's session shape, proven against gpt-realtime-2.1, with only the allowed tools. */
-export function buildSessionUpdate(args: { model: string; voice: string; instructions: string; tools: readonly ToolName[] }): SessionUpdateEvent {
+/**
+ * The spike's session shape, proven against gpt-realtime-2.1, with only the allowed tools. Turn
+ * detection and noise reduction come from the voice tuning (constants.ts); those settings were read
+ * from OpenAI's docs on 2026-11-14 and not yet tested on a real call.
+ */
+export function buildSessionUpdate(args: { model: string; voice: string; instructions: string; tools: readonly ToolName[]; tuning?: VoiceTuning | undefined }): SessionUpdateEvent {
+  const tuning = args.tuning ?? DEFAULT_VOICE_TUNING;
   return {
     type: OAI_CLIENT.sessionUpdate,
     session: {
@@ -162,7 +168,7 @@ export function buildSessionUpdate(args: { model: string; voice: string; instruc
       output_modalities: ['audio'],
       instructions: args.instructions,
       audio: {
-        input: { format: AUDIO_FORMAT, turn_detection: TURN_DETECTION },
+        input: { format: AUDIO_FORMAT, turn_detection: turnDetectionFor(tuning), noise_reduction: noiseReductionFor(tuning) },
         output: { format: AUDIO_FORMAT, voice: args.voice },
       },
       tools: phoneToolDefinitions(args.tools),
@@ -298,6 +304,8 @@ export type PhoneRelayDeps = {
   limits?: Partial<RelayLimits> | undefined;
   /** Human fallback (B-28 hook points). Resolves true only when the call was handed to a person. */
   fallback?: RelayFallback | undefined;
+  /** Turn detection, noise reduction and the interruption gate. Defaults: DEFAULT_VOICE_TUNING. */
+  tuning?: Partial<VoiceTuning> | undefined;
 };
 
 /** Trusted relay outcomes only (B-28 NOTES, voice wiring 3). Never caller text. */
@@ -362,6 +370,24 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const playback = new PlaybackTracker();
   const timing = new TimingTracker();
+
+  // ---------- Interruptions and background noise (NOTES.md "Interruptions and background noise") ----------
+  // The session runs with create_response and interrupt_response off. One detected sound never stops
+  // the agent: the gate (interruption.ts) decides whether caller speech is an interruption, a turn to
+  // answer, or a short sound to leave out of the conversation, and the relay asks for every reply.
+  const tuning: VoiceTuning = { ...DEFAULT_VOICE_TUNING, ...deps.tuning };
+  const turnDetection = turnDetectionFor(tuning);
+  const gate = new InterruptionGate(tuning);
+  let gateTimer: ReturnType<typeof setTimeout> | undefined;
+  let gateSeq = 0;
+  /** A response is being generated: from response.created to response.done. */
+  let responseActive = false;
+  /** A caller turn waits for the response being generated to end before it is answered. */
+  let replyDue = false;
+  /** The first response, whose first sentence is the AI disclosure, has not finished playing. */
+  let greeting = true;
+  let audioSent = false;
+  let ignoredSounds = 0;
 
   // ---------- PROPOSED text step (SPEC 2.9 "Consent evidence on a phone call") ----------
   // The server offers one message once per call, at a fixed moment, and reads the caller's answer
@@ -453,7 +479,7 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     if (pinned !== undefined) deps.tokens.end(pinned.providerCallId);
     const s = timing.summary();
     logger.info(
-      { ...tag(), why, endReason, durationMs: now() - startedAt, connectToFirstAudioMs: s.connectToFirstAudioMs, turnsMs: s.turns, p50Ms: s.p50, p95Ms: s.p95, maxMs: s.max, toolCalls, bargeIns, droppedEarlyChunks },
+      { ...tag(), why, endReason, durationMs: now() - startedAt, connectToFirstAudioMs: s.connectToFirstAudioMs, turnsMs: s.turns, p50Ms: s.p50, p95Ms: s.p95, maxMs: s.max, toolCalls, bargeIns, ignoredSounds, droppedEarlyChunks },
       'voice: call ended',
     );
     openai?.close();
@@ -518,9 +544,13 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     const eventId = `voice_consent_window_${++windowSeq}`;
     windowEventIds.set(eventId, open);
     windowUnconfirmed++;
+    // Open: no reply unless the server asks (create_response stays off, as on the whole call) and the
+    // provider cancels the offer the moment the caller talks over it (interrupt_response on, as before
+    // the gate existed). Closed: the call's normal settings.
     sendOpenAI({ type: OAI_CLIENT.sessionUpdate, event_id: eventId, session: { type: 'realtime', audio: { input: {
       format: AUDIO_FORMAT,
-      turn_detection: { ...TURN_DETECTION, create_response: !open },
+      turn_detection: open ? { ...turnDetection, interrupt_response: true } : turnDetection,
+      noise_reduction: noiseReductionFor(tuning),
       transcription: open ? { model: TRANSCRIBE_MODEL } : null,
     } } } });
     if (!open) {
@@ -873,7 +903,81 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     });
   };
 
+  const gateEvent = () => `voice_gate_${++gateSeq}`;
+  /** The caller can still hear the agent, or a response is being generated. */
+  const agentSpeaking = () => playback.hasPendingAudio || responseActive;
+  /** A short sound the gate left out: its caller item is removed so the model never answers it. */
+  const dropItem = (itemId: string | undefined) => {
+    if (itemId === undefined || itemId === '' || closed) return;
+    ignoredSounds++;
+    sendOpenAI({ type: OAI_CLIENT.itemDelete, event_id: gateEvent(), item_id: itemId });
+    logger.info({ ...tag() }, 'voice: short sound ignored');
+  };
+  /** Answers a caller turn the gate accepted. create_response is off, so the relay asks for every reply. */
+  const requestReply = () => {
+    if (closed || !sessionReady || consentWaiting()) return;
+    // Tool work is running: its own response.create follows, with this turn already in the conversation.
+    if (pendingResponses > 0) return;
+    if (responseActive) { replyDue = true; return; }
+    sendOpenAI({ type: OAI_CLIENT.responseCreate });
+  };
+  /**
+   * Barge-in (SPEC 4): clear Twilio's buffer, cut the item being heard where the caller last heard it,
+   * and cut every later item the caller has not heard at all.
+   */
+  const cutPlayback = () => {
+    const cut = playback.interrupt();
+    if (cut !== null && streamSid !== undefined) {
+      bargeIns++;
+      sendTwilio({ event: TWILIO_EVENT.clear, streamSid });
+      sendOpenAI({ type: OAI_CLIENT.itemTruncate, item_id: cut.heard.itemId, content_index: 0, audio_end_ms: cut.heard.audioEndMs });
+      for (const itemId of cut.unheard) sendOpenAI({ type: OAI_CLIENT.itemTruncate, item_id: itemId, content_index: 0, audio_end_ms: 0 });
+      logger.info({ ...tag(), audioEndMs: cut.heard.audioEndMs, unheardItems: cut.unheard.length }, 'voice: barge-in');
+    }
+    return cut;
+  };
+  /** The text question's own handling of caller speech, unchanged by the gate. */
+  const windowSpeechStarted = (itemId: string | undefined, bindAnswer: boolean) => {
+    // A caller who talks over the offer has not heard it: it is spoken again in full.
+    if (consent.kind === 'offering') notDelivered('barge_in');
+    // The first caller turn that starts while listening is the one answer the server reads.
+    else if (bindAnswer && consent.kind === 'listening' && consent.itemId === undefined && itemId !== undefined) consent.itemId = itemId;
+    timing.onSpeechStarted();
+    cutPlayback();
+  };
+  /** The gate confirmed an interruption: stop the generation (interrupt_response is off) and the playback. */
+  const confirmBargeIn = (itemId: string | undefined) => {
+    if (closed) return;
+    // A candidate that began before the text question opened is handled the way the question handles any speech.
+    if (consentWaiting()) { windowSpeechStarted(itemId, false); return; }
+    const wasGreeting = greeting;
+    greeting = false;
+    timing.onSpeechStarted();
+    if (responseActive) sendOpenAI({ type: OAI_CLIENT.responseCancel, event_id: gateEvent() });
+    const stop = () => {
+      if (closed) return;
+      const cut = cutPlayback();
+      // The greeting carries the AI disclosure. The model's copy of it now holds only what was heard,
+      // so a fixed server line tells it to say the disclosure first if that part was cut.
+      if (cut !== null && wasGreeting) sendOpenAI({ type: OAI_CLIENT.itemCreate, item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: spokenText(greetingCutInstruction()) }] } });
+    };
+    if (tuning.bargeInTailMs > 0) later(Math.min(150, tuning.bargeInTailMs), stop);
+    else stop();
+  };
+  /** The agent's audio has all played and nothing is being generated: a held short sound is decided. */
+  const checkDrained = () => {
+    if (closed || playback.hasPendingAudio || responseActive) return;
+    if (audioSent) greeting = false;
+    const d = gate.drained(now());
+    if (d.drop !== undefined) dropItem(d.drop);
+    if (d.reply !== undefined) {
+      if (consentWaiting()) dropItem(d.reply);
+      else requestReply();
+    }
+  };
+
   const onResponseDone = (ev: JsonObject) => {
+    responseActive = false;
     const response = asObject(ev.response);
     const output = Array.isArray(response?.output) ? response.output : [];
     const status = code(response?.status);
@@ -883,6 +987,12 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     const raw = typeof response?.status === 'string' ? response.status : undefined;
     const incomplete = raw !== undefined && raw !== 'completed';
     const calls = incomplete ? [] : output.map(asObject).filter((o): o is JsonObject => o !== undefined && o.type === OAI_ITEM.functionCall);
+    // A caller turn that came while this response was generated is answered now. A response with tool
+    // calls is answered after the tool results instead, with the turn already in the conversation.
+    if (replyDue) {
+      replyDue = false;
+      if (calls.length === 0) requestReply();
+    }
     if (consent.kind === 'offering' && consent.responseId !== undefined && consent.responseId === str(response, 'id')) {
       // An offer cut off, silent, or with a tool call was not delivered as written.
       if (incomplete) notDelivered('offer_cut');
@@ -936,6 +1046,9 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     if (ev === undefined) return;
     switch (ev.type) {
       case 'response.created': {
+        responseActive = true;
+        // A short sound still undecided when a new response starts stays out of the conversation.
+        dropItem(gate.responseStarted());
         const response = asObject(ev.response);
         const createdId = str(response, 'id');
         if (consent.kind === 'offering' && consent.responseId === undefined && str(asObject(response?.metadata), 'voiceConsentOffer') === consent.tag && createdId !== undefined) {
@@ -984,6 +1097,7 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
           break;
         }
         sendTwilio({ event: TWILIO_EVENT.media, streamSid, media: { payload: delta } });
+        audioSent = true;
         const mark = playback.onAudioSent(itemId, ulawBase64DurationMs(delta));
         if (isOfferAudio && consent.kind === 'offering') { consent.audioSent = true; consent.marks.add(mark); }
         sendTwilio({ event: TWILIO_EVENT.mark, streamSid, mark: { name: mark } });
@@ -993,31 +1107,44 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
         break;
       }
       case OAI_SERVER.speechStarted: {
-        // A caller who talks over the offer has not heard it: it is spoken again in full.
-        if (consent.kind === 'offering') notDelivered('barge_in');
-        // The first caller turn that starts while listening is the one answer the server reads.
-        else if (consent.kind === 'listening' && consent.itemId === undefined) {
-          const id = str(ev, 'item_id');
-          if (id !== undefined) consent.itemId = id;
-        }
-        // Barge-in (SPEC 4): clear Twilio's buffer, cut the item being heard where the caller last
-        // heard it, and cut every later item the caller has not heard at all.
-        timing.onSpeechStarted();
-        const cut = playback.interrupt();
-        if (cut !== null && streamSid !== undefined) {
-          bargeIns++;
-          sendTwilio({ event: TWILIO_EVENT.clear, streamSid });
-          sendOpenAI({ type: OAI_CLIENT.itemTruncate, item_id: cut.heard.itemId, content_index: 0, audio_end_ms: cut.heard.audioEndMs });
-          for (const itemId of cut.unheard) sendOpenAI({ type: OAI_CLIENT.itemTruncate, item_id: itemId, content_index: 0, audio_end_ms: 0 });
-          logger.info({ ...tag(), audioEndMs: cut.heard.audioEndMs, unheardItems: cut.unheard.length }, 'voice: barge-in');
-        }
+        const itemId = str(ev, 'item_id');
+        cancel(gateTimer); gateTimer = undefined;
+        // While the text question is open its own turn handling runs, exactly as before the gate.
+        if (consentWaiting()) { windowSpeechStarted(itemId, true); break; }
+        const start = gate.speechStarted(now(), itemId, agentSpeaking(), greeting);
+        if (start.kind === 'turn') { timing.onSpeechStarted(); break; }
+        // The agent is speaking: it is stopped only if this speech is still going after the minimum.
+        const fire = () => {
+          gateTimer = undefined;
+          const c = gate.confirm(itemId);
+          dropItem(c.drop);
+          if (c.confirmed) confirmBargeIn(itemId);
+        };
+        if (start.confirmInMs === 0) fire();
+        else gateTimer = later(start.confirmInMs, fire);
         break;
       }
-      case OAI_SERVER.speechStopped:
+      case OAI_SERVER.speechStopped: {
+        if (!consentWaiting() && gate.speechStopped(now(), str(ev, 'item_id')) === 'short') {
+          // Too short to be an interruption: the agent keeps talking.
+          cancel(gateTimer); gateTimer = undefined;
+          if (agentSpeaking()) break;
+        }
         timing.onSpeechStopped(now());
         break;
+      }
+      case OAI_SERVER.audioCommitted: {
+        // The text question reads its own answer turn, and nothing else is answered while it is open.
+        if (consentWaiting()) break;
+        const d = gate.committed(str(ev, 'item_id'), agentSpeaking());
+        dropItem(d.drop);
+        if (d.kind === 'reply') requestReply();
+        else if (d.kind === 'ignore') { ignoredSounds++; logger.info({ ...tag() }, 'voice: short sound ignored'); }
+        break;
+      }
       case OAI_SERVER.responseDone:
         onResponseDone(ev);
+        checkDrained();
         break;
       case OAI_SERVER.outputTranscriptDone: {
         // The model's own words for the offer response only: checked in memory against the fixed line, never logged.
@@ -1037,6 +1164,12 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
       case OAI_SERVER.error: {
         // Only the error's type and code are logged; its message can echo input or a key.
         const e = asObject(ev.error);
+        // A refused gate step (a cancel with nothing to cancel, a delete of an item already gone) leaves
+        // the session as it was; it is logged and never counted as a model error.
+        if ((str(e, 'event_id') ?? '').startsWith('voice_gate_')) {
+          logger.warn({ ...tag(), errorType: code(e?.type), errorCode: code(e?.code) }, 'voice: interruption step refused');
+          break;
+        }
         logger.error({ ...tag(), errorType: code(e?.type), errorCode: code(e?.code) }, 'voice: OpenAI error');
         const failedWindow = windowEventIds.get(str(e, 'event_id') ?? '');
         if (sessionReady && failedWindow !== undefined) {
@@ -1091,7 +1224,7 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     setStage(initialStage(call.spec.template));
     const instructions = buildInstructions(call.spec, { businessName: call.businessName, messageChannel: deps.messageChannel, facts: call.facts, menu: call.menu, nowMs: now(),
       ...(consent.kind === 'ready' ? { textOffer: { last4: last4Of(call) } } : {}) });
-    const session = buildSessionUpdate({ model, voice: deps.voice ?? VOICE, instructions, tools: allowedTools });
+    const session = buildSessionUpdate({ model, voice: deps.voice ?? VOICE, instructions, tools: allowedTools, tuning });
     const socket = openai;
     socket.onOpen(() => {
       logger.info({ ...tag(), model, tools: allowedTools }, 'voice: OpenAI socket open');
@@ -1198,6 +1331,7 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
         if (name !== undefined && consent.kind === 'offering') consent.marks.delete(name);
         finishWhenPlayed();
         checkOfferPlayed();
+        checkDrained();
         break;
       }
       case TWILIO_EVENT.dtmf: {

@@ -199,9 +199,14 @@ export function stepErrorSentence(errorCode: string | undefined): string {
  * The reason Square gave for a failed payment, in lower case for use inside a
  * sentence. The contract types it as free text, so a code such as
  * "card_declined" shows as "card declined".
+ *
+ * Undefined when there is nothing to add: no reason, or a reason that only
+ * says "failed". The real server passes on Square's status text, which is
+ * often just FAILED, and "Payment failed: failed" tells the owner nothing.
  */
-export function paymentFailureReason(reason: string): string {
-  return readableLabel(reason, 'no reason given').toLowerCase();
+export function paymentFailureReason(reason: string | undefined): string | undefined {
+  const words = readableLabel(reason, '').toLowerCase();
+  return words && words !== 'failed' ? words : undefined;
 }
 
 function approvalFromEvents(events: ActivityEvent[]): ApprovalView | undefined {
@@ -424,7 +429,7 @@ function deriveOrder(input: JourneyInput, order: Order, base: Partial<Journey>):
           key: 'payment_failed',
           tone: statusView('order', 'PAYMENT_FAILED').tone,
           title: 'Payment failed (sandbox)',
-          description: `Square reported the payment as failed${failedEvent?.reason ? `: ${paymentFailureReason(failedEvent.reason)}` : ''}. The order is not paid and will not go to the kitchen. You can call the customer back.`,
+          description: `Square reported the payment as failed${paymentFailureReason(failedEvent?.reason) ? `: ${paymentFailureReason(failedEvent?.reason)}` : ''}. The order is not paid and will not go to the kitchen. You can call the customer back.`,
         });
       } else if (status === 'CANCELLED') {
         steps[4].view = statusView('order', 'CANCELLED');

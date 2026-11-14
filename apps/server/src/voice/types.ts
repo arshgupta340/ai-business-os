@@ -223,6 +223,8 @@ export type VoicePluginOptions = {
    * for that call. The number is never logged and never reaches the model.
    */
   demo?: { listedCaller(from: string | undefined): string | undefined; pin(callId: string, number: string): void } | undefined;
+  /** Turn detection, noise reduction and the interruption gate (constants.ts VoiceTuning). Unset fields use the defaults. */
+  tuning?: Partial<import('./constants').VoiceTuning> | undefined;
   /** Tests only: receives the plugin's stream credential store, so a test can inspect what stays pinned. */
   inspectTokens?: ((store: import('./logic').StreamTokenStore<PinnedCall>) => void) | undefined;
 };

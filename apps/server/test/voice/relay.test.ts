@@ -6,6 +6,7 @@ import { barberSpecV1, pizzaSpecV2 } from '@abos/contracts/fixtures';
 import { StreamTokenStore } from '../../src/voice/logic';
 import { DEFAULT_LIMITS, adaptWs, buildSessionUpdate, checkSessionCapabilities, nextStage, runPhoneRelay } from '../../src/voice/relay';
 import type { CallDecision, PinnedCall, RelayLimits } from '../../src/voice/types';
+import type { VoiceTuning } from '../../src/voice/constants';
 import { FakeSocket, PIZZA_SNAPSHOT, fakeCalls, fakeEvents, fakeLogger, fakeToolset, specWith, ulaw, type Json } from './helpers';
 
 const SECRET = 'sk-test-SECRETKEY1234567890';
@@ -14,7 +15,10 @@ function pinnedFor(spec: AgentSpec): PinnedCall {
   return { callId: 'call_test_01', providerCallId: 'CA123', businessId: spec.businessId, businessName: 'Demo Pizza Co.', agentId: spec.id, agentVersionId: 'agv_pizza_01_v2', spec, facts: PIZZA_SNAPSHOT };
 }
 
-type SetupOpts = { spec?: AgentSpec; result?: unknown; status?: 'IN_PROGRESS' | 'COMPLETED'; limits?: Partial<RelayLimits>; withDecisions?: boolean; credential?: string };
+type SetupOpts = { spec?: AgentSpec; result?: unknown; status?: 'IN_PROGRESS' | 'COMPLETED'; limits?: Partial<RelayLimits>; withDecisions?: boolean; credential?: string; tuning?: Partial<VoiceTuning> };
+
+/** The gate confirms at once: for tests that pin truncate offsets rather than the gate (relay-interruptions.test.ts). */
+const IMMEDIATE_BARGE_IN: Partial<VoiceTuning> = { bargeInMinMs: 0, greetingBargeInMinMs: 0 };
 
 function setup(opts: SetupOpts = {}) {
   const spec = opts.spec ?? pizzaSpecV2;
@@ -37,7 +41,7 @@ function setup(opts: SetupOpts = {}) {
   const decisions = opts.withDecisions
     ? { subscribe: vi.fn((_callId: string, fn: (d: CallDecision) => void) => ((decide = fn), unsubscribe)) }
     : undefined;
-  const relay = runPhoneRelay({ phone, tokens, calls, events, decisions, toolsetFactory, openaiSocketFactory, messageChannel: 'surge', logger, redactSecrets: [SECRET], limits: opts.limits });
+  const relay = runPhoneRelay({ phone, tokens, calls, events, decisions, toolsetFactory, openaiSocketFactory, messageChannel: 'surge', logger, redactSecrets: [SECRET], limits: opts.limits, tuning: opts.tuning });
   const start = (t: string = token, callSid: string | undefined = 'CA123', streamSid: string | undefined = 'MZ1') =>
     phone.emit({ event: 'start', start: { callSid, streamSid, customParameters: { streamToken: t } } });
   const openai = () => {
@@ -68,7 +72,7 @@ describe('voice relay: session start', () => {
     const update = s.openai().ofType('session.update')[0] as { session: Json & { tools: { name: string }[] } };
     expect(update.session).toMatchObject({
       type: 'realtime', output_modalities: ['audio'], tool_choice: 'auto',
-      audio: { input: { format: { type: 'audio/pcmu' }, turn_detection: { type: 'server_vad' } }, output: { format: { type: 'audio/pcmu' }, voice: 'alloy' } },
+      audio: { input: { format: { type: 'audio/pcmu' }, turn_detection: { type: 'server_vad', create_response: false, interrupt_response: false }, noise_reduction: { type: 'near_field' } }, output: { format: { type: 'audio/pcmu' }, voice: 'alloy' } },
     });
     expect(update.session.tools.map((t) => t.name).sort()).toEqual(['get_order_status', 'propose_order', 'quote_order', 'read_business_facts', 'read_catalog']);
     expect(String(update.session.instructions)).toContain('You are speaking with an AI assistant');
@@ -507,7 +511,7 @@ describe('voice relay: audio and barge-in', () => {
   });
 
   it('on caller speech clears Twilio and truncates at the played offset', async () => {
-    const s = setup();
+    const s = setup({ tuning: IMMEDIATE_BARGE_IN });
     await s.connect();
     for (let i = 0; i < 3; i++) s.openai().emit({ type: 'response.output_audio.delta', item_id: 'item_1', delta: ulaw(20) });
     s.phone.emit({ event: 'mark', mark: { name: 'p2' } });
@@ -519,7 +523,7 @@ describe('voice relay: audio and barge-in', () => {
   });
 
   it('S7: truncates the item being heard and the unheard item behind it, and drops late audio for them', async () => {
-    const s = setup();
+    const s = setup({ tuning: IMMEDIATE_BARGE_IN });
     await s.connect();
     s.openai().emit({ type: 'response.output_audio.delta', item_id: 'item_A', delta: ulaw(20) });
     s.openai().emit({ type: 'response.output_audio.delta', item_id: 'item_A', delta: ulaw(20) });

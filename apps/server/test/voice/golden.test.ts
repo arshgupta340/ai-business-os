@@ -1,5 +1,7 @@
-// The qr_only default path is unchanged from origin/main: the golden file holds main's own output for
-// these inputs (see golden/cases.ts). This branch's prompt, session.update and server lines must match it.
+// The qr_only default path is pinned: the golden file holds the expected output for these inputs (see
+// golden/cases.ts). It was main's own output until the interruption gate (2026-11-14), which changed only
+// the session's turn detection and noise reduction and added three prompt lines; the file was regenerated
+// from that change's output. The prompt, session.update and server lines must match it.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { barberFacts, barberSpecV1, pizzaCatalog, pizzaSpecV2, pizzaVerifiedFacts } from '@abos/contracts/fixtures';
@@ -13,7 +15,7 @@ import { FakeSocket, fakeCalls, fakeEvents, fakeLogger, fakeToolset } from './he
 const golden = JSON.parse(readFileSync(new URL('./golden/qr-only-origin-main.json', import.meta.url), 'utf8')) as Record<string, { instructions: string; sessionUpdate: unknown; decisions: string[]; pendingGoodbye: string }>;
 const cases = GOLDEN_CASES({ barberFacts, barberSpecV1, pizzaCatalog, pizzaSpecV2, pizzaVerifiedFacts });
 
-describe('qr_only default path equals origin/main', () => {
+describe('qr_only default path equals the pinned golden', () => {
   it.each(cases.map((c) => [c.name, c] as const))('%s: prompt, session.update and server lines', (name, c) => {
     const want = golden[name]!;
     const instructions = buildInstructions(c.spec, c.facts);
@@ -32,7 +34,7 @@ describe('qr_only default path equals origin/main', () => {
     expect(pendingGoodbyeInstruction(c.spec.template, 'qr_only', c.facts.businessName)).toBe(want.pendingGoodbye);
   });
 
-  it('the relay sends main\'s exact initial session.update under qr_only, even with a caller number pinned', async () => {
+  it('the relay sends the pinned initial session.update under qr_only, even with a caller number pinned', async () => {
     const c = cases.find((x) => x.name === 'pizza_full')!;
     const tokens = new StreamTokenStore<PinnedCall>();
     const token = tokens.mint({ callId: 'call_g', providerCallId: 'CAg', businessId: 'biz_pizza_01', businessName: 'Demo Pizza Co.', agentId: pizzaSpecV2.id, agentVersionId: 'agv_g', spec: pizzaSpecV2, facts: c.facts.facts, menu: pizzaCatalog, callerNumber: '+15555553716' }) ?? '';
