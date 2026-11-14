@@ -1,0 +1,21 @@
+{
+  "name": "message-channel-spike",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Spike B-04: try Surge, an Android SMS gateway and the Twilio WhatsApp sandbox for sending a Square checkout link.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "send": "tsx send.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}
