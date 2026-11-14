@@ -216,7 +216,8 @@ export function createCalendarAdapter(deps: CalendarDependencies): CalendarAdapt
           // Error, timeout, 409 (id exists) or a malformed response: the outcome
           // is unknown, so the follow-up lookup decides. Never insert again here.
           const recovered = await findExisting(input.bookingId, input.calendarId, eventId);
-          return recovered ? { ok: true, ...toReference(recovered) } : unavailable();
+          // Not found is not proof of absence while the insert may still land: unknown goes to review.
+          return recovered ? { ok: true, ...toReference(recovered) } : { ...unavailable(), outcome: 'unknown' };
         }
       } catch { return unavailable(); }
     },

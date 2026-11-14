@@ -19,7 +19,8 @@ export type AvailabilityQuery = Pick<Booking, 'calendarId' | 'timezone' | 'servi
 
 export type BusyBlock = { start: string; end: string };
 
-export type AdapterFailure = ToolFailure & { retryable: boolean };
+/** `outcome: 'unknown'`: an insert was sent and the follow-up lookup could not establish whether it landed (SPEC 2.9). */
+export type AdapterFailure = ToolFailure & { retryable: boolean; outcome?: 'unknown' };
 export type AdapterResult<T> = ({ ok: true } & T) | AdapterFailure;
 
 export type CreateEventInput = Pick<Booking, 'calendarId' | 'startUtc' | 'endUtc'> & {
