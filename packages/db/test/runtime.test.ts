@@ -141,6 +141,9 @@ for(const type of types) describe(type, () => {
           const sent=await runtime.updateDispatch(db,{businessId:biz,dispatchId:d.id,workerId:'worker',attempt:1,status:'SENT',providerMessageId:'msg-'+uniq()});
           expect(sent.status).toBe('SENT');
           expect((await runtime.updateDispatch(db,{businessId:biz,dispatchId:d.id,workerId:'worker',attempt:1,status:'DELIVERED',providerMessageId:sent.provider_message_id})).status).toBe('DELIVERED');
+          // A message step succeeds with its dispatch's provider message ID as the reference.
+          expect((await runtime.finishExecution(db,{businessId:biz,executionId:e.id,workerId:'worker',attempt:1,status:'SUCCEEDED',externalRef:sent.provider_message_id})).status).toBe('SUCCEEDED');
+          return;
         }
         expect((await finish(biz,e.id)).status).toBe('SUCCEEDED');
       });

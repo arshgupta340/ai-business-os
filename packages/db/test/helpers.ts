@@ -31,10 +31,25 @@ export async function createEmptyDb(): Promise<PGlite> {
   return db;
 }
 
-/** A new database with the prelude and every migration applied. */
-export async function createMigratedDb(): Promise<PGlite> {
+export const SUPABASE_OWNER_SQL = readFileSync(join(here, 'supabase-owner.sql'), 'utf8');
+
+/** The prelude plus a non-superuser migration owner shaped like Supabase's "postgres" role. */
+export async function createSupabaseLikeDb(): Promise<PGlite> {
   const db = await createEmptyDb();
-  await applyMigrations(migrationDb(db));
+  await db.exec(SUPABASE_OWNER_SQL);
+  return db;
+}
+
+/** Applies every migration as the non-superuser owner, then returns to the test superuser. */
+export async function migrateAsSupabaseOwner(db: PGlite): Promise<void> {
+  await db.exec('set role supabase_postgres');
+  try { await applyMigrations(migrationDb(db)); } finally { await db.exec('reset role'); }
+}
+
+/** A new database with every migration applied by the Supabase-like non-superuser owner. */
+export async function createMigratedDb(): Promise<PGlite> {
+  const db = await createSupabaseLikeDb();
+  await migrateAsSupabaseOwner(db);
   return db;
 }
 
