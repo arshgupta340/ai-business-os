@@ -106,7 +106,7 @@ function satisfiedBy(field: string, spec: DraftAgentSpec, context: BusinessConte
 // contract's StopCondition is `{ code }`; `conflictIds` is an extra field the
 // builder sends with `open_conflict` (see docs/notes-saina.md).
 export interface BuilderStopCondition extends StopCondition {
-  code: 'missing_timezone' | 'open_conflict' | 'missing_message_consent_policy';
+  code: 'missing_timezone' | 'open_conflict' | 'missing_message_consent_policy' | 'missing_price';
   conflictIds?: string[];
 }
 
@@ -116,6 +116,20 @@ export function stopConditions(spec: DraftAgentSpec, context: BusinessContext, s
   if (context.openRequiredConflictIds.length > 0) out.push({ code: 'open_conflict', conflictIds: [...context.openRequiredConflictIds] });
   const sendsMessages = (spec.capabilities ?? []).some((c) => c === 'message.checkout.send' || c === 'message.booking.confirm');
   if (sendsMessages && status.missing.includes('policy.message_consent')) out.push({ code: 'missing_message_consent_policy' });
+  return out;
+}
+
+// The stop conditions publish checks on missing facts (FLOWS.md, Builder stop
+// conditions 1, 3 and 6). Only verified facts count: a deployed agent reads
+// verified facts only, so an unconfirmed chat draft does not fill a field
+// here. The draft's own existence never stops a publish. An open conflict is
+// left out: publish reports it as CONFLICT_UNRESOLVED instead.
+// `missing_price` is used only here. The builder sees only the catalog's item
+// count, so it fires when the spec needs a catalog and the catalog is empty.
+export function publishStopConditions(spec: DraftAgentSpec, context: BusinessContext): BuilderStopCondition[] {
+  const status = computeFieldStatus(spec, context, []);
+  const out = stopConditions(spec, context, status).filter((c) => c.code !== 'open_conflict');
+  if (status.missing.includes('catalog.items')) out.push({ code: 'missing_price' });
   return out;
 }
 
