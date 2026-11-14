@@ -8,6 +8,10 @@ export interface PriceSquareClient {
     upsert(request: Square.catalog.UpsertCatalogObjectRequest, options?: { maxRetries?: number }): Promise<Square.UpsertCatalogObjectResponse>;
   } };
 }
+/** A plain in-memory client used only by unit tests. It cannot be an SDK client. */
+export interface PriceAdapterTestFakeClient extends PriceSquareClient {
+  readonly __priceAdapterTestFake: true;
+}
 export interface UpdateVariationPriceInput {
   variationId: string;
   expectedOldPriceMinor: PriceEditApprovalPayload['fromPriceMinor'];

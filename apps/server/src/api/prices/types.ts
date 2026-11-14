@@ -15,15 +15,15 @@ export interface CatalogLookupPort {
   } | null>;
 }
 export interface ApprovalPort {
-  /** Persists a PENDING owner price_edit approval and approval.requested atomically. No provider writes. */
-  createPriceEdit(input: {
+  /** Calls the checked database routine that atomically creates or returns a PENDING price_edit approval. */
+  createPendingPriceEditApproval(input: {
     ownerUserId: string;
     actorType: PriceEditApprovalRequest['actorType'];
     bundleType: PriceEditApprovalRequest['bundleType'];
     payload: PriceEditApprovalPayload;
     payloadHash: PriceEditApprovalRequest['payloadHash'];
     createdAt: string;
-  }): Promise<PriceEditApprovalRequest>;
+  }): Promise<{ kind: 'created' | 'existing'; approval: PriceEditApprovalRequest } | { kind: 'conflict' }>;
 }
 export interface CatalogSyncPort {
   sync(businessId: string): Promise<void>;
@@ -36,9 +36,10 @@ export interface PricesDependencies {
   now(): Date;
 }
 export interface PriceExecutionPorts {
+  /** The executor persists this result through its checked lease/result routine, never direct DML. */
   square: Pick<PriceAdapter, 'updateVariationPrice'>;
-  catalogSync: CatalogSyncPort;
 }
+export interface PriceReconciliationPorts { square: Pick<PriceAdapter, 'readVariationPrice'> }
 export type PriceStepResult =
   | { state: Extract<ExecutionStatus, 'SUCCEEDED'>; squareVersion: number }
-  | { state: Extract<ExecutionStatus, 'FAILED' | 'NEEDS_REVIEW'>; code: ErrorCode; outcome?: PriceOutcome };
+  | { state: Extract<ExecutionStatus, 'QUEUED' | 'FAILED' | 'NEEDS_REVIEW'>; code: ErrorCode; outcome?: PriceOutcome };

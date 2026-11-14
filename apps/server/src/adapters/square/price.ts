@@ -3,7 +3,7 @@ import { CurrencySchema, MinorAmountSchema } from '@abos/contracts';
 import { assertSandboxEnvironment, CATALOG_PRICE_MAX } from './index';
 import { isSandboxSquareClient } from './client';
 import type { SandboxSquareClient } from './types';
-import { SquarePriceError, type PriceAdapter, type PriceSquareClient, type UpdateVariationPriceInput, type VariationPrice } from './price-types';
+import { SquarePriceError, type PriceAdapter, type PriceAdapterTestFakeClient, type PriceSquareClient, type UpdateVariationPriceInput, type VariationPrice } from './price-types';
 export * from './price-types';
 
 interface Dependencies { client: PriceSquareClient; locationId: string; environment: string }
@@ -16,8 +16,19 @@ export function createPriceAdapter(deps: Omit<Dependencies, 'client'> & { client
   return buildPriceAdapter({ ...deps, client: deps.client as unknown as PriceSquareClient });
 }
 
-/** Test seam. Production composition must use createPriceAdapter. */
-export function createPriceAdapterForTest(deps: Dependencies): PriceAdapter {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function isPriceAdapterTestFake(client: unknown): client is PriceAdapterTestFakeClient {
+  if (!isPlainObject(client) || client.__priceAdapterTestFake !== true || !isPlainObject(client.catalog)) return false;
+  const object = client.catalog.object;
+  return isPlainObject(object) && typeof object.get === 'function' && typeof object.upsert === 'function';
+}
+
+/** Unit-test seam. It accepts only a marked, plain-object fake and rejects every SDK client. */
+export function createPriceAdapterForTest(deps: Omit<Dependencies, 'client'> & { client: PriceAdapterTestFakeClient }): PriceAdapter {
+  if (!isPriceAdapterTestFake(deps.client)) throw new SquarePriceError('ENVIRONMENT_MISMATCH', 'A plain test fake is required.', 'not_updated');
   return buildPriceAdapter(deps);
 }
 
@@ -64,24 +75,23 @@ function buildPriceAdapter({ client, locationId, environment }: Dependencies): P
       if (current.value.priceMinor !== input.expectedOldPriceMinor) return fail('INVALID_STATE', 'The Square price changed. Create a new proposal.', 'not_updated');
       const data = current.object.itemVariationData!;
       const money: Square.Money = { amount: BigInt(input.newPriceMinor), currency: input.currency };
-      // Preserve all fields because Square upsert replaces the complete variation object.
-      const override = data.locationOverrides?.find((o) => o.locationId === locationId);
+      // Preserve the global price and other locations. This approval changes only the configured location.
+      const existingOverrides = data.locationOverrides ?? [];
+      const hasLocationOverride = existingOverrides.some((override) => override.locationId === locationId);
       const object: Square.CatalogObject.ItemVariation = { ...current.object, itemVariationData: {
         ...data,
-        ...(override?.priceMoney ? { locationOverrides: data.locationOverrides?.map((o) => o.locationId === locationId ? { ...o, priceMoney: money } : o) } : { priceMoney: money }),
+        locationOverrides: hasLocationOverride
+          ? existingOverrides.map((override) => override.locationId === locationId ? { ...override, priceMoney: money } : override)
+          : [...existingOverrides, { locationId, priceMoney: money }],
       } };
       let response: Square.UpsertCatalogObjectResponse;
       try { response = await client.catalog.object.upsert({ object, idempotencyKey: input.idempotencyKey }, { maxRetries: 0 }); }
       catch (error) {
-        const body: unknown = error instanceof SquareError ? error.body : undefined;
-        const errors = typeof body === 'object' && body !== null && 'errors' in body ? body.errors : undefined;
-        if ((error instanceof SquareError && error.statusCode === 409) || (Array.isArray(errors) && errors.some((e: unknown) => typeof e === 'object' && e !== null && 'code' in e && (e.code === 'VERSION_MISMATCH' || e.code === 'CONFLICT')))) return fail('INVALID_STATE', 'The Square variation version changed. Create a new proposal.', 'stale_version');
         const status = error instanceof SquareError ? error.statusCode : undefined;
-        return fail('INTEGRATION_UNAVAILABLE', 'The Square price write could not be confirmed.', status !== undefined && status >= 400 && status < 500 && status !== 408 ? 'not_updated' : 'unknown');
+        return fail('INTEGRATION_UNAVAILABLE', 'The Square price write could not be confirmed.', status === 429 ? 'not_updated' : 'unknown');
       }
       if (response.errors?.length) {
-        if (response.errors.some((e) => String(e.code) === 'VERSION_MISMATCH' || e.code === 'CONFLICT')) return fail('INVALID_STATE', 'The Square variation version changed. Create a new proposal.', 'stale_version');
-        return fail('INTEGRATION_UNAVAILABLE', 'Square refused the price update.', 'not_updated');
+        return fail('INTEGRATION_UNAVAILABLE', 'The Square price write could not be confirmed.', 'unknown');
       }
       let verified: VariationPrice;
       try { verified = (await read(input.variationId)).value; }
