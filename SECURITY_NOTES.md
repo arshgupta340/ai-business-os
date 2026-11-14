@@ -1,12 +1,8 @@
 # Security notes
 
-**Task:** S-06. **Written:** 2026-11-14. **Describes:** the code on branch `arsh/integration` at commit `73ac456`, merged into this branch (`arsh/S-06-docs`).
+**Task:** S-06. **Written:** 2026-11-14. **Describes:** the code on branch `arsh/integration` at commit `18c30a4`, merged into this branch (`arsh/S-06-docs`).
 
-The integration branch moved twice while this file was being written: 20 commits after `1588eaa`, then 21 more after `7486c7e`. This version was checked against `73ac456`. If the branch has moved again, check the statements below against the newer code before relying on them.
-
-## Changes on the base after `73ac456`
-
-The integration branch moved a third time, to `18c30a4` (20 more commits), and that commit is merged into this branch. I did not check this whole file against it. The list of what changed, and which statements here it makes out of date, is in `IMPLEMENTATION_NOTES.md` under the same heading. Read that list before relying on this file.
+The integration branch moved three times while this file was being written: 20 commits after `1588eaa`, 21 more after `7486c7e`, and 20 more after `73ac456`. This version was checked against `18c30a4`. If the branch has moved again, check the statements below against the newer code before relying on them.
 
 This file lists the eight rules from `AGENTS.md` that are never broken. For each rule it says where the code enforces it, which tests cover it, and what is not yet enforced or not yet tested. It then describes the restricted database role, webhook handling, idempotency keys, secrets, and the known limits.
 
@@ -37,26 +33,24 @@ Not verified with any real service: a phone call through Twilio to the voice wor
 
 The migration 0005 file on this branch was rewritten after that list was made, and migration 0006 was added. I do not know whether either has been applied since.
 
+The branch now also has `scripts/live/run-demo.ts`, a script that drives both demo flows against the real backend, and three code comments refer to a "live run 2026-11-14". I found no recorded result of a live run in the repository, so the list above is unchanged. It may be out of date, and only the lead can say what has been verified since.
+
 ## 3. Test results from this checkout
 
-**Newest results, at `18c30a4`.** Typecheck passed. `CI=1 npm test` and `npm test` each ran 119 test files and 2144 tests: 2142 passed and 2 are marked as expected failures. `npm test -w @abos/web` passed 516 of 516. The base branch changed `vitest.config.ts` (2 workers when `CI` is set, longer time limits), which removes the timeouts described below. CI has not yet reported on this merge.
-
-The rest of this section is the record for `73ac456`, the commit this file describes. I ran these on 2026-11-14 in a cloud container with 4 cores and Node 22.23.4, at commit `73ac456` plus the four documents. The spec and CI name Node 24.
+I ran these on 2026-11-14 in a cloud container with 4 cores and Node 22.23.4, at commit `18c30a4` plus the four documents. The spec and CI name Node 24.
 
 | Command | Result |
 |---|---|
 | `npm run typecheck` | Passed for all four workspaces (`@abos/server`, `@abos/web`, `@abos/contracts`, `@abos/db`). |
-| `npx vitest run --maxWorkers=2` | 104 test files, 1938 tests. All 1938 passed. |
-| `npm test` (the default, 6 workers) | 104 test files, 1938 tests. 1930 passed and 8 failed. |
-| `npm test -w @abos/web` | 43 test files, 515 tests. 514 passed and 1 failed. |
+| `npm test` (the default settings) | 119 test files, 2144 tests. 2142 passed. 2 are marked as expected failures. |
+| `CI=1 npm test` (the settings CI uses) | The same: 2142 passed, 2 expected failures. |
+| `npm test -w @abos/web` | 43 test files, 516 tests. All 516 passed. |
 
-**The 8 failures in the default run.** Seven were "Test timed out in 5000ms" in database tests under `packages/db/test/` (`constraints.test.ts`, `guarded-updates.test.ts`, `migrations.test.ts`, `runtime-hardening.test.ts`). `vitest.config.ts` allows 6 workers and each database test file starts its own in-process Postgres, so on 4 cores some tests pass their time limit. The eighth was an assertion failure in `apps/server/test/voice/fallback/review-regressions.test.ts`, the test "returns safely and aborts a nonsettling dispatch fence before any call update". That test sets a 10 millisecond deadline. It passed with two workers and failed under the default load, so it looks like a timing problem in the test. I did not investigate further.
+**The 2 expected failures.** The adversarial suite marks two known open defects with `it.fails`, so the run passes while they stay open. One: `GET /api/builder/ping` answers without a token (`apps/server/test/adversarial/access.test.ts`, issue #96). Two: after crash recovery a message dispatch stays `QUEUED` where `docs/FLOWS.md` says `UNKNOWN` (`apps/server/test/adversarial/idempotency.test.ts`). The second fails closed: nothing resends a queued dispatch, and the checkout view shows it as unknown.
 
-The same pattern held on the two earlier commits I tested. On `1588eaa` the default run failed 4 and then 5 of 1558 tests, all timeouts, and all 1558 passed with two workers. On `7486c7e` the default run failed 5 of 1866, all timeouts, and all 1866 passed with two workers.
+**CI is green.** The `check` job passed on this branch at `03b5507`, which contains `18c30a4` and the four documents.
 
-**The web failure.** `app/(dashboard)/build/voice/VoiceControl.test.tsx`, the test "after RATE_LIMITED it explains in one sentence and releases the microphone". It failed on all three commits, and on `1588eaa` it also failed when run alone. I did not investigate the cause.
-
-**CI is red.** GitHub Actions ran the `check` job on `1588eaa`, `7486c7e` and `73ac456` (through draft pull request #97) and on this branch's earlier commits, which add only Markdown. Every run failed. I read the job logs for all but the run on `73ac456`. They failed at the `npm test` step, so CI never reached the web tests. The errors were "Hook timed out in 10000ms" in the setup hooks that start and migrate the in-process Postgres, and "Test timed out in 5000ms", in `packages/db/test/`. When a setup hook times out, every test in that file fails. The run on `7486c7e` also had the fallback assertion failure described above.
+**Earlier commits.** On `1588eaa`, `7486c7e` and `73ac456` the default `npm test` failed between 4 and 8 tests in each run, and CI was red. Almost all were time limits passed in database tests under `packages/db/test/`, because 6 workers each started an in-process Postgres on a small machine. All tests passed with two workers. The base branch then changed `vitest.config.ts` to use 2 workers when `CI` is set, a 30 second test limit and a 120 second hook limit. Two other commits changed timing-sensitive tests (`3597541`, `85e7124`). I saw no failure after those changes.
 
 ## 4. The eight rules
 
@@ -80,7 +74,7 @@ The same pattern held on the two earlier commits I tested. On `1588eaa` the defa
 - **The server cannot change what was proposed or who owns a business.** Migration `0006_ownership_material_and_receipts.sql` freezes an order's cart, quote, total, contact and pickup, and a booking's material columns, for `abos_app` from the moment the row is inserted. It also stops `abos_app` from creating a user or a business, from changing a user, and from changing a business's owner. The decision routine trusts that owner.
 - **Unwired pieces fail closed.** Without a database, `notWiredExecutor` in `apps/server/src/compose/seams.ts` leaves approved steps `QUEUED` and runs nothing.
 
-**Tests:** `packages/db/test/direct-dml.test.ts`, `packages/db/test/guarded-updates.test.ts`, `packages/db/test/constraints.test.ts`, `packages/db/test/runtime.test.ts`, `packages/db/test/runtime-hardening.test.ts`, `apps/server/test/policy/engine.test.ts`, `apps/server/test/executor/executor.test.ts`, `apps/server/test/executor/review.test.ts`, `apps/server/test/api/prices/index.test.ts`, `apps/server/test/e2e/main-flow.test.ts` (reject leaves no steps, a wrong hash is refused, an expired approval is refused, another owner cannot decide), `apps/server/test/e2e/flows.test.ts`, where every test counts the external writes that ran, and `apps/server/test/e2e/routines.test.ts` (the price change runs once after approval).
+**Tests:** `packages/db/test/direct-dml.test.ts`, `packages/db/test/guarded-updates.test.ts`, `packages/db/test/constraints.test.ts`, `packages/db/test/runtime.test.ts`, `packages/db/test/runtime-hardening.test.ts`, `apps/server/test/policy/engine.test.ts`, `apps/server/test/executor/executor.test.ts`, `apps/server/test/executor/review.test.ts`, `apps/server/test/api/prices/index.test.ts`, `apps/server/test/e2e/main-flow.test.ts` (reject leaves no steps, a wrong hash is refused, an expired approval is refused, another owner cannot decide), `apps/server/test/e2e/flows.test.ts`, where every test counts the external writes that ran, `apps/server/test/e2e/routines.test.ts` (the price change runs once after approval), and the adversarial files `apps/server/test/adversarial/no-write-before-approval.test.ts` and `apps/server/test/adversarial/approvals.test.ts`.
 
 **Not yet enforced or tested**
 
@@ -101,9 +95,10 @@ The same pattern held on the two earlier commits I tested. On `1588eaa` the defa
 - **Twilio voice.** `apps/server/src/voice/plugin.ts` validates `X-Twilio-Signature` and answers 403 on failure. A rejected request writes `webhook.rejected` against the business that holds the Twilio number in `live_agent` (`dbVoiceEventsPort` in `compose/ports.ts`). A repeated webhook for the same call gets the same pending stream token or a 409. `calls.provider_call_id` is unique, so there is never a second call row.
 - **A stored event is marked when its job is done.** `private.mark_webhook_processed` (0006) sets `processed_at`. After a restart every stored row without it is run again, whatever its age (`recoverNow` in `compose/webhooks.ts`). Processing is safe to repeat.
 - **Delivery receipts.** A verified WhatsApp receipt moves a sent dispatch forward through `private.update_dispatch_status` (0006). A receipt that arrives while the send step is still running is deferred and applied later.
+- **Malformed input stops at the edge.** A malformed ID or a NUL byte in a request is answered 400 before any query uses it (`apps/server/src/auth/verify.ts`, `apps/server/src/api/routes.ts`).
 - **Missing settings.** Without `PUBLIC_SERVER_URL`, `SQUARE_WEBHOOK_SIGNATURE_KEY` or a database, `/webhooks/square` and `/webhooks/twilio/status` answer 503 without reading the body (`notWiredWebhooks`). Without the voice settings, `/webhooks/twilio/voice` answers 503 and `/ws/phone` does not exist (`apps/server/src/app.ts`).
 
-**Tests:** `apps/server/test/webhooks/plugin.test.ts`, `apps/server/test/webhooks/review.test.ts`, `apps/server/test/adapters/square/square.test.ts`, `apps/server/test/voice/plugin.test.ts`, `apps/server/test/e2e/voice-wiring.test.ts`, and in `apps/server/test/e2e/flows.test.ts` the tests "a duplicate webhook delivery changes nothing" and "a bad signature is rejected with 401, writes webhook.rejected and stores nothing".
+**Tests:** `apps/server/test/webhooks/plugin.test.ts`, `apps/server/test/webhooks/review.test.ts`, `apps/server/test/adapters/square/square.test.ts`, `apps/server/test/voice/plugin.test.ts`, `apps/server/test/e2e/voice-wiring.test.ts`, `apps/server/test/adversarial/webhooks.test.ts` (signature, duplicate delivery, events out of order, a signed event that does not match the order, huge and malformed bodies), and in `apps/server/test/e2e/flows.test.ts` the tests "a duplicate webhook delivery changes nothing" and "a bad signature is rejected with 401, writes webhook.rejected and stores nothing".
 
 **Not yet enforced or tested**
 
@@ -125,11 +120,12 @@ The same pattern held on the two earlier commits I tested. On `1588eaa` the defa
 - **A timeout is never retried blindly.** `classifyFailure` in `executor/index.ts` sends a timeout or an unknown result to `NEEDS_REVIEW`. A claim gives the worker a 15 minute lease (`lease_deadline`, 0005). A step still `RUNNING` after its lease goes to `NEEDS_REVIEW` through `private.recover_stale_executions`, never back to `QUEUED`.
 - **Review keeps the key.** `POST /api/executions/:id/resolve` goes through `private.resolve_execution`. It completes the step when a provider read proves the effect exists, requeues it only when a read proves nothing was written, and refuses when the read is unsure (`apps/server/src/api/recovery/index.ts`).
 
-**Tests:** `packages/contracts/src/hash.test.ts`, `packages/db/test/guarded-updates.test.ts`, `packages/db/test/payments-and-recovery.test.ts`, `packages/db/test/review-0005.test.ts`, `apps/server/test/executor/executor.test.ts`, `apps/server/test/api/recovery/recovery.test.ts`, `apps/server/test/adapters/message/message.test.ts`, `apps/server/test/adapters/calendar/index.test.ts`, `apps/server/test/adapters/sheets/index.test.ts`, `apps/server/test/adapters/square/price.test.ts`, in `apps/server/test/e2e/flows.test.ts` the paid path (checkout with the database key), "Square create timeout: NEEDS_REVIEW, order RECOVERY_REQUIRED, no link sent, no second create", "approving twice runs the steps once" and the crash recovery test, and in `apps/server/test/e2e/routines.test.ts` the recovery of a `NEEDS_REVIEW` checkout.
+**Tests:** `packages/contracts/src/hash.test.ts`, `packages/db/test/guarded-updates.test.ts`, `packages/db/test/payments-and-recovery.test.ts`, `packages/db/test/review-0005.test.ts`, `apps/server/test/executor/executor.test.ts`, `apps/server/test/api/recovery/recovery.test.ts`, `apps/server/test/adapters/message/message.test.ts`, `apps/server/test/adapters/calendar/index.test.ts`, `apps/server/test/adapters/sheets/index.test.ts`, `apps/server/test/adapters/square/price.test.ts`, in `apps/server/test/e2e/flows.test.ts` the paid path (checkout with the database key), "Square create timeout: NEEDS_REVIEW, order RECOVERY_REQUIRED, no link sent, no second create", "approving twice runs the steps once" and the crash recovery test, in `apps/server/test/e2e/routines.test.ts` the recovery of a `NEEDS_REVIEW` checkout, and `apps/server/test/adversarial/idempotency.test.ts` (a worker that dies between claim and finish, provider timeouts and ambiguous replies).
 
 **Not yet enforced or tested**
 
 - No message provider accepts an idempotency key. The dispatch row is the only guard against a second message.
+- After a worker dies during a send, the dispatch row stays `QUEUED` although the outcome is unknown. No routine can correct it. Nothing resends it, and `GET /api/orders/:id/checkout` shows it as unknown. The adversarial suite records this as an open defect.
 - The Calendar event ID, the Sheets record ID check and the Square price write are not verified against the real services. `apps/server/src/api/prices/NOTES.md` says the key length limit for the Square catalog write is not established.
 - The routines `renew_execution_lease` and `renew_sync_lease` exist in 0005. I found no call to them in `apps/server/src`. A step that runs longer than 15 minutes would be sent to review.
 - The decision endpoint's `Idempotency-Key` replay cache is in server memory (`apps/server/src/api/routes.ts`). It is lost on restart. The database one-use rule still holds.
@@ -147,7 +143,7 @@ The same pattern held on the two earlier commits I tested. On `1588eaa` the defa
 - `/health` returns `squareEnvironment`. `GET /api/orders/:id/checkout` returns `environment: "sandbox"`. The `checkout.created`, `payment.verified` and `payment.failed` events carry `sandbox: true`. The checkout message text in `apps/server/src/adapters/message/templates.ts` says "Sandbox test payment."
 - The reset script and the webhook registration command refuse to run unless `SQUARE_ENVIRONMENT` is `sandbox`.
 
-**Tests:** `apps/server/test/app.test.ts` ("refuses any Square environment other than sandbox (AC-19)"), `apps/server/test/adapters/square/square.test.ts`, `apps/server/test/policy/engine.test.ts`, `packages/db/test/seed.test.ts`, `packages/db/test/payments-and-recovery.test.ts`, `apps/server/test/scripts/register-webhooks.test.ts`.
+**Tests:** `apps/server/test/app.test.ts` ("refuses any Square environment other than sandbox (AC-19)"), `apps/server/test/adapters/square/square.test.ts`, `apps/server/test/policy/engine.test.ts`, `packages/db/test/seed.test.ts`, `packages/db/test/payments-and-recovery.test.ts`, `apps/server/test/scripts/register-webhooks.test.ts`, `apps/server/test/adversarial/sandbox.test.ts`.
 
 **Not yet enforced or tested**
 
@@ -190,7 +186,7 @@ The same pattern held on the two earlier commits I tested. On `1588eaa` the defa
 - The simulated call uses the same toolset factory as the phone worker (`toolsetFor` in `apps/server/src/compose/index.ts`). The mock test runner refuses any toolset that is not the mock one (`apps/server/src/builder/runner/text-runner.ts`).
 - The human fallback is not a model tool. The model cannot transfer a call.
 
-**Tests:** `apps/server/test/tools/real-toolset.test.ts`, `apps/server/test/mock-toolset.test.ts`, `apps/server/test/voice/relay.test.ts`, `apps/server/test/e2e/voice-wiring.test.ts` ("the toolset given to the voice worker has no write or external_message tool"), `apps/server/test/e2e/main-flow.test.ts` ("the model cannot reach a write capability"), `packages/contracts/src/registry.test.ts`, `apps/server/src/builder/registry.test.ts`.
+**Tests:** `apps/server/test/tools/real-toolset.test.ts`, `apps/server/test/mock-toolset.test.ts`, `apps/server/test/voice/relay.test.ts`, `apps/server/test/e2e/voice-wiring.test.ts` ("the toolset given to the voice worker has no write or external_message tool"), `apps/server/test/e2e/main-flow.test.ts` ("the model cannot reach a write capability"), `packages/contracts/src/registry.test.ts`, `apps/server/src/builder/registry.test.ts`, `apps/server/test/adversarial/toolset.test.ts`.
 
 ### Rule 7. Text from callers, uploaded files, menus and third-party APIs is data, never an instruction
 
@@ -205,7 +201,7 @@ The same pattern held on the two earlier commits I tested. On `1588eaa` the defa
 - **Uploads become drafts.** Extraction saves draft facts only and never changes a verified fact (`apps/server/src/builder/extraction/service.ts`, `sanitize.ts`). `file-check.ts` checks the declared type against the content and the size cap.
 - **Webhook bodies.** Only routing IDs are read (rule 2).
 
-**Tests:** `apps/server/src/builder/extraction/service.test.ts` ("keeps an injection document to draft facts only"), `apps/server/src/builder/extraction/routes.test.ts`, `apps/server/src/builder/extraction/sanitize.test.ts`, `apps/server/src/builder/extraction/file-check.test.ts`, `apps/server/src/builder/runner/text-runner.test.ts`, `apps/server/test/tools/real-toolset.test.ts`, `apps/server/test/voice/prompt.test.ts`, and in `apps/server/test/e2e/main-flow.test.ts` "a bypass attempt is refused with no tool run and no approval".
+**Tests:** `apps/server/src/builder/extraction/service.test.ts` ("keeps an injection document to draft facts only"), `apps/server/src/builder/extraction/routes.test.ts`, `apps/server/src/builder/extraction/sanitize.test.ts`, `apps/server/src/builder/extraction/file-check.test.ts`, `apps/server/src/builder/runner/text-runner.test.ts`, `apps/server/test/tools/real-toolset.test.ts`, `apps/server/test/voice/prompt.test.ts`, `apps/server/test/adversarial/untrusted-text.test.ts` (caller text, menu item names, third-party API strings, uploaded file text, text the owner approves), and in `apps/server/test/e2e/main-flow.test.ts` "a bypass attempt is refused with no tool run and no approval".
 
 **Not yet enforced or tested**
 
@@ -227,7 +223,7 @@ The same pattern held on the two earlier commits I tested. On `1588eaa` the defa
 - The seed and reset commands print only an error message, because a database error object can echo connection details (`runCli` in `packages/db/src/seed/cli.ts`).
 - `npm run register-webhooks -- --apply` writes the Square signature key into `.env.local` and does not print it (`scripts/register-webhooks-lib.ts`).
 
-**Tests:** `apps/server/test/voice/logic.test.ts` (redaction and the safe logger), `apps/server/test/voice/relay.test.ts`, `apps/server/src/builder/voice/routes.test.ts`, `apps/server/test/scripts/register-webhooks.test.ts`. The other items in this list have no test that I found.
+**Tests:** `apps/server/test/voice/logic.test.ts` (redaction and the safe logger), `apps/server/test/voice/relay.test.ts`, `apps/server/src/builder/voice/routes.test.ts`, `apps/server/test/scripts/register-webhooks.test.ts`, and `apps/server/test/adversarial/secrets.test.ts`, which runs the scenarios with marker secrets and then looks for them. I did not read that file line by line.
 
 **What I checked by hand:** on commit `1588eaa`, a pattern search of tracked files for strings shaped like OpenAI keys, Square tokens, Twilio account SIDs and private key headers found only test placeholders and a README template. This is a simple search, not a full scan.
 
@@ -314,7 +310,7 @@ A server that is compromised or wrong could therefore record a payment that Squa
 5. **Publish refuses when a provider the agent needs is not connected.** Publish runs the read-only health checks itself. A phone agent needs Twilio and OpenAI, the pizza template needs Square, the booking template needs Google Calendar, and each capability adds its provider (`apps/server/src/builder/publish/integrations.ts`). So the pizza agent cannot be published while Google Sheets has no credentials. A message channel other than `qr_only` has no health check in `compose/providers.ts`, so it reads as disconnected and also stops a publish.
 6. **Uploads keep their state in server memory.** `compose/index.ts` passes no `extraction` option to the builder plugin. Uploaded files, extracted facts and conflicts are lost on a restart. A conflict stored in Postgres cannot be resolved through `POST /api/conflicts/:id/resolve`: `apps/server/src/app.ts` answers that it is resolved through `facts/propose` with `resolvesConflictId`.
 7. **No customer message can be sent from a call.** The agent always proposes `qr_only` (rule 7). The message adapter and the message step are built and tested, but only through proposals that tests create directly in the engine.
-8. **No re-check of item availability at checkout.** `docs/FLOWS.md` step B18 describes it. `createCheckout` does not do it. Availability is checked when the order is quoted.
+8. **The availability re-check at checkout reads our cache, not Square.** Before the Square call the executor checks that each cart line's item and variation is still available in `catalog_items` (`cartAvailable` in `compose/executor.ts`). It does not check modifiers, and it does not ask Square. An item that sold out in Square since the last catalog sync is not caught here.
 9. **The agent cannot end a call on its own goodbye.** The relay supports a trusted finish signal (`finishes` in `voice/relay.ts`), but `compose/index.ts` does not pass that port. Calls end on hang-up, on the idle limit, or on the session limit.
 10. **Human fallback keeps its reservation in server memory** and has no checked routine (`compose/fallback.ts`). It is refused for every version today.
 11. **Rate limiting.** Only the realtime client secret route has a rate limit (`apps/server/src/builder/voice/rate-limit.ts`). The REST API, the webhooks and the phone path have none.

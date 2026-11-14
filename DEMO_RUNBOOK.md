@@ -2,17 +2,15 @@ DRAFT
 
 # Demo runbook
 
-**Task:** S-06. **Written:** 2026-11-14. **Describes:** the code on branch `arsh/integration` at commit `73ac456`.
+**Task:** S-06. **Written:** 2026-11-14. **Describes:** the code on branch `arsh/integration` at commit `18c30a4`.
 
-The integration branch moved twice while this file was being written: 20 commits after `1588eaa`, then 21 more after `7486c7e`. This version was checked against `73ac456`. If the branch has moved again, check the steps below against the newer code before a rehearsal.
-
-## Changes on the base after `73ac456`
-
-The integration branch moved a third time, to `18c30a4` (20 more commits), and that commit is merged into this branch. I did not check this whole file against it. The list of what changed, and which statements here it makes out of date, is in `IMPLEMENTATION_NOTES.md` under the same heading. Read that list before relying on this file.
+The integration branch moved three times while this file was being written: 20 commits after `1588eaa`, 21 more after `7486c7e`, and 20 more after `73ac456`. This version was checked against `18c30a4`. If the branch has moved again, check the steps below against the newer code before a rehearsal.
 
 This is a draft script. It is not a record of a demo that happened. No step in it has been rehearsed against the deployed integration server, and every step is marked "Not rehearsed". Where one part of a step was checked against a real service, the step says which part. The complete list of real checks is in `SECURITY_NOTES.md` section 2.
 
 Keep this file marked DRAFT until three full rehearsals have been run and their results written into it (PRD section 17).
+
+Two other files on this branch help with setup. `docs/DEMO-LAPTOP.md` explains how to run the web app on a laptop against the deployed server. `scripts/live/run-demo.ts` drives both demo flows against a running server and the real backend, and prints steps and results without secrets. I did not run it, and I found no recorded result of a run. If it has been run, its results should replace the "Not rehearsed" marks on the steps it covers.
 
 ## 1. What must be true before any live segment
 
@@ -150,7 +148,7 @@ If a signed request is refused with 401 or 403, the address the provider signed 
 
    It exits with an error if `DATABASE_ADMIN_URL` is set on the host.
 
-3. **Not rehearsed** on the integration server. Sign in to the web app as the seeded owner and open Integrations. Ask for a fresh check (the route is `GET /api/integrations/health?businessId=biz_pizza_01&refresh=1`). Every provider the demo needs must say connected, and Square must say sandbox. A provider that is not configured names the missing variable.
+3. **Not rehearsed** on the integration server. Sign in to the web app as the seeded owner and open Integrations. Ask for a fresh check (the route is `GET /api/integrations/health?businessId=biz_pizza_01&refresh=1`). Every provider the demo needs must say connected, and Square must say sandbox. Google Sheets says connected only when the sheet has tabs named `Orders` and `Bookings`. A provider that is not configured names the missing variable.
 4. **Not rehearsed.** Place one short test call. The Render log must show `POST /webhooks/twilio/voice`.
 5. **Not rehearsed.** Put one busy event in the demo Google calendar at a time you will ask for in the booking segment.
 
@@ -173,10 +171,10 @@ The screen labels quoted in the tables below come from `docs/FLOWS.md` section 3
 | P9 | **Not rehearsed.** The caller gives a name and a pickup time inside opening hours. | The agent does not ask for a phone number. It says the payment link will be shown at the counter. | If the agent promises a message, note it as a defect. Nothing will be sent. |
 | P10 | **Not rehearsed.** The caller confirms the order. | An approval card appears on Approvals with items, total, the QR code route, steps and a 10 minute countdown. The agent says the order is not placed until the shop approves and the customer pays. | If no card appears, open Activity and read the trace. Do not insert a row by hand. |
 | P11 | **Not rehearsed.** The owner reads the card and clicks Approve. | The approval becomes approved and the step list starts. If the caller is still on the line, the agent says the shop approved the order. | If the card expired, the order is closed and nothing was sent. Place a new order. A double click is safe. The agent does not hang up on its own goodbye. The caller hangs up. |
-| P12 | **Not rehearsed.** Watch step 1, "Creating checkout". | The order shows a link and a QR code on Live operations. | Verified in a spike: a payment link was created on the Square sandbox and read back with the right total. Through the executor it is not verified. If the step ends in "Needs your review", the owner can resolve it with `POST /api/executions/:id/resolve` and action `retry`. The server reads Square. If the link exists, the order continues with that same link. If Square cannot say, the request is refused. `POST /api/orders/:id/cancel` cancels an order that has no Square link. An order that already has a link cannot be cancelled by that route, so leave it and place a new order. I did not check whether the web app has buttons for these two routes. Never approve again to force a second link. |
+| P12 | **Not rehearsed.** Watch step 1, "Creating checkout". | The order shows a link and a QR code on Live operations. | Verified in a spike: a payment link was created on the Square sandbox and read back with the right total. Through the executor it is not verified. If an item in the order has become unavailable in our catalog since the quote, the step fails before Square is called and the order closes as unavailable: place a new order. If the step ends in "Needs your review", the owner can resolve it with `POST /api/executions/:id/resolve` and action `retry`. The server reads Square. If the link exists, the order continues with that same link. If Square cannot say, the request is refused. `POST /api/orders/:id/cancel` cancels an order that has no Square link. An order that already has a link cannot be cancelled by that route, so leave it and place a new order. I did not check whether the web app has buttons for these two routes. Never approve again to force a second link. |
 | P13 | **Not rehearsed.** Watch step 2, the message. | The step is skipped. Nothing is sent. | Nothing to fall back to. The customer scans the QR code on the owner's screen. |
 | P14 | **Not rehearsed.** On the second device, scan the code and pay with the Square sandbox test card `4111 1111 1111 1111`, CVV `111`, any future expiry. | Square's sandbox page accepts the payment. | Not verified: no sandbox link has been paid. SPEC section 4 warns that links may not be payable in sandbox. The fallback in the SPEC (CreateOrder plus CreatePayment) is not built. If the page will not take the card, stop at "Link sent, not paid (sandbox)" and say that is as far as the live demo goes. |
-| P15 | **Not rehearsed.** Wait. | Within about 30 seconds the order turns "Paid (sandbox), verified" and then "Ready to make". | If the webhook does not arrive, the poll reads Square every 30 seconds for 15 minutes after the link was ready. If the order stays unpaid, leave it unpaid on screen. Never mark it paid by hand. The database would refuse it anyway. |
+| P15 | **Not rehearsed.** Wait. | Within about 30 seconds the order turns "Paid (sandbox), verified" and then "Ready to make". | If the webhook does not arrive, the poll reads Square every 30 seconds for 15 minutes after the link was ready. The poll runs even when the webhook is not registered. If the order stays unpaid, leave it unpaid on screen. Never mark it paid by hand. The database would refuse it anyway. |
 | P16 | **Not rehearsed.** Open the demo sheet. | One row for the order on the `Orders` tab, and a "Reported to Sheets" tick. | Needs Google credentials, which do not exist yet. Without them the screen shows the report as pending and then failed after 5 tries. The order stays paid. Say the report is pending. |
 
 ## 4. Demo script: the barbershop booking
@@ -190,7 +188,7 @@ This whole segment needs Google credentials and a shared demo calendar. Without 
 | K3 | **Not rehearsed.** Call the same number. Ask what services there are. | The agent says it is an AI assistant for Demo Barbershop and lists only seeded services. | Simulated call, as in P7. |
 | K4 | **Not rehearsed.** Ask for the time you blocked in the calendar in 2.6 step 5. | The agent says the slot is taken and offers up to three other times. No event is created. | If it offers the blocked time, stop the segment and note it. Google Calendar is not verified. |
 | K5 | **Not rehearsed.** Pick a free time and give a name. Confirm. | A booking approval card appears with the service, the local time and time zone, and the customer. The agent does not ask for a number. | If the proposal is refused, pick another time on a quarter hour inside opening hours. |
-| K6 | **Not rehearsed.** The owner approves. | The booking shows "Checking the calendar", then "Booked" with a Google event ID. | If the slot was taken since the proposal, the card turns red with alternatives and no event is created. Propose again. If the booking ends in "Needs your review", use the resolve route as in P12. |
+| K6 | **Not rehearsed.** The owner approves. | The booking shows "Checking the calendar", then "Booked" with a Google event ID. | If the slot was taken since the proposal, the card turns red and no event is created. Propose again. If the booking ends in "Needs your review", use the resolve route as in P12. |
 | K7 | **Not rehearsed.** Open Google Calendar. | Exactly one event, with no guests invited. | If there are two events, stop and record it. That would be a defect. |
 | K8 | **Not rehearsed.** Check the `Bookings` tab of the sheet. | One row. The confirmation message step is skipped. | A pending sheet row does not undo the booking. Say the report is pending. |
 

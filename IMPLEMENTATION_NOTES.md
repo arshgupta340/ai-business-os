@@ -1,28 +1,8 @@
 # Implementation notes
 
-**Task:** S-06. **Written:** 2026-11-14. **Describes:** the code on branch `arsh/integration` at commit `73ac456`.
+**Task:** S-06. **Written:** 2026-11-14. **Describes:** the code on branch `arsh/integration` at commit `18c30a4`.
 
-The integration branch moved twice while this file was being written: 20 commits after `1588eaa`, then 21 more after `7486c7e`. This version was checked against `73ac456`. If the branch has moved again, check the statements below against the newer code before relying on them.
-
-## Changes on the base after `73ac456`
-
-The integration branch moved a third time, to `18c30a4` (20 more commits), and that commit is merged into this branch. I did not check the four documents as a whole against it. I re-ran the tests, and I read the commit list and the diffs named below. These statements in the four documents are out of date at `18c30a4`:
-
-| Statement in the documents | What changed | Where I saw it |
-|---|---|---|
-| The executor does not re-check item availability before the Square call (FLOWS B18) | It does now. A missing or unavailable item fails the step with no request to Square, and the order becomes `UNAVAILABLE` | `apps/server/src/compose/executor.ts`, commit `8dcde16` |
-| `npm test` times out with the default settings, and CI is red | `vitest.config.ts` now uses 2 workers when `CI` is set, a 30 second test limit and a 120 second hook limit. At `18c30a4` I ran typecheck (passed), `CI=1 npm test` and `npm test` (each 119 files, 2142 passed and 2 expected failures out of 2144), and the web tests (516 of 516 passed). CI has not yet reported on this merge | `vitest.config.ts`, my own runs |
-| The web test `VoiceControl.test.tsx` fails | It passes at `18c30a4` | My own run |
-| The feature matrix names every test file that covers a rule | An adversarial suite was added under `apps/server/test/adversarial/` (task B-23). The matrix does not cite it | The directory listing |
-| The payment poll needs the webhook settings | The poll now runs without `PUBLIC_SERVER_URL` | `apps/server/src/compose/webhooks.ts` |
-| The Sheets health check reads the sheet's ID | It now reads the tab titles and wants `Orders` and `Bookings` | `apps/server/src/compose/providers.ts` |
-| An approval that trips the booking overlap rule only answers `SLOT_CONFLICT` | The booking now also moves to `SLOT_CONFLICT`. The approval stays pending and later expires | `apps/server/src/policy/engine.ts` |
-
-The two expected failures are tests the adversarial suite marks as known open defects: `GET /api/builder/ping` answers without a token (`apps/server/test/adversarial/access.test.ts`), and after crash recovery a message dispatch stays `QUEUED` when FLOWS says `UNKNOWN` (`apps/server/test/adversarial/idempotency.test.ts`). The second one fails closed: nothing resends a queued dispatch.
-
-Other commits in that range that I did not read: malformed IDs answer 400 at the edge, activity events take the database clock, an unknown message send is recorded `UNKNOWN`, the simulated call remembers a proposal it already sent and records a refused tool, and the docs under `docs/` were brought in line with the database routines.
-
-New files in that range that a reader of the runbook should know about: `docs/DEMO-LAPTOP.md` (how to run the web app on a laptop against the deployed server), `docs/notes-web-real-mode.md`, and `scripts/live/run-demo.ts`, a script that drives both demo flows against the real backend. A code comment in `compose/providers.ts` refers to a "live run 2026-11-14". I found no recorded result of a live run in the repository, so the list of real checks in `SECURITY_NOTES.md` section 2 is unchanged. It may now be out of date, and only the lead can say what has been verified since.
+The integration branch moved three times while this file was being written: 20 commits after `1588eaa`, 21 more after `7486c7e`, and 20 more after `73ac456`. This version was checked against `18c30a4`. If the branch has moved again, check the statements below against the newer code before relying on them.
 
 This file describes the server as it is built on this branch, how the database is designed, how an approval becomes executed steps, where the build differs from `docs/PRD.md`, and what is still open. The PRD asks for unverified assumptions and blockers to be written here. They are in sections 6 and 7.
 
@@ -33,8 +13,9 @@ Status words are used as in `SECURITY_NOTES.md` section 1: built and tested with
 - The wired server is on `arsh/integration` (draft pull request #97). It is not deployed.
 - `main` is deployed on Render as `abos-server` and serves only the health route and the builder.
 - The real database has migrations 0001 to 0004. This branch needs 0005 and 0006 as well. Without 0006 the server refuses to start.
-- `npm run typecheck` passes. All 1938 server and package tests pass with two workers. The default `npm test` run failed 8 of 1938 on a 4-core container: seven timeouts in database tests and one timing-sensitive fallback test.
-- CI is red on `arsh/integration` and on this branch, at the `npm test` step. Details are in `SECURITY_NOTES.md` section 3.
+- `npm run typecheck` passes. `npm test` passes: 2142 of 2144 tests, with 2 marked as expected failures for two known open defects. The web tests pass, 516 of 516.
+- CI is green on this branch at `03b5507`, which contains `18c30a4`. Details are in `SECURITY_NOTES.md` section 3.
+- The branch has `scripts/live/run-demo.ts`, which drives both demo flows against the real backend, and code comments that mention a live run on 2026-11-14. No result of a live run is recorded in the repository, so the list of real checks is still the one from 03:00 Pacific.
 - No phone call, paid payment link, webhook, message, price change, Calendar event or Sheets row has gone through this code against a real service.
 
 ## 2. Architecture as built
@@ -102,7 +83,7 @@ Jobs are timers inside the server process. The work they pick up is stored in Po
 |---|---|---|
 | Executor steps and Sheets jobs | Every 2 seconds, and at once after an approval or a verified payment | `createDbExecutor` in `compose/executor.ts` |
 | Approval expiry sweep | Every 30 seconds | `startJobs` in `compose/index.ts`, routine `private.expire_approvals` |
-| Payment reconciliation poll | Every 30 seconds, for 15 minutes after a link is ready | `pollPendingPayments` in `reconcile/index.ts` |
+| Payment reconciliation poll | Every 30 seconds, for 15 minutes after a link is ready. It runs even when the webhook routes are off | `pollPendingPayments` in `reconcile/index.ts` |
 | Stored webhook recovery | At start and every 2 minutes, for every stored row not yet marked processed | `recoverNow` in `compose/webhooks.ts` |
 | Integration health check | Once at start, in the background, and again on each publish | `startJobs` in `compose/index.ts` |
 | Stale step and stale Sheets job recovery | With the executor, for a step or job whose 15 minute lease ran out | routines `private.recover_stale_executions` and `private.recover_stale_sync_jobs` |
@@ -145,7 +126,7 @@ This is the pizza order. The booking follows the same path with its own steps.
 4. **Tell the call and kick.** The route tells the executor to look for work, and publishes the decision to the call if it is still live. The agent then says the order was approved. It never says a message was sent.
 5. **Claim.** `private.claim_execution` gives one `QUEUED` step to one worker with a 15 minute lease, only if the earlier steps are finished and the subject still matches the approval. Claiming the checkout step moves the order to `CREATING_CHECKOUT`.
 6. **Authorize.** `authorizeStep` re-reads the approval, checks its state, its hash, the step's position, the capability's effect in the registry table, the sandbox setting and the idempotency key. A refusal writes `guardrail.refused`.
-7. **`square.checkout.create`.** The handler authorizes again and calls Square CreatePaymentLink once with the row's key and automatic taxes. The adapter reads the Square order and compares its total with the approved total. On a match `private.save_checkout` stores the references and moves the order to `PAYMENT_LINK_READY`. On a mismatch the step fails and the order becomes `RECOVERY_REQUIRED`. On a timeout the step becomes `NEEDS_REVIEW` and nothing is created again.
+7. **`square.checkout.create`.** The step first checks in `catalog_items` that every item and variation in the cart is still available. If one is not, the step fails with no request to Square and the order becomes `UNAVAILABLE`. Otherwise the handler authorizes again and calls Square CreatePaymentLink once with the row's key and automatic taxes. The adapter reads the Square order and compares its total with the approved total. On a match `private.save_checkout` stores the references and moves the order to `PAYMENT_LINK_READY`. On a mismatch the step fails and the order becomes `RECOVERY_REQUIRED`. On a timeout the step becomes `NEEDS_REVIEW` and nothing is created again.
 8. **`message.checkout.send`.** For an order from a call this step is already `SKIPPED`. When an approval does name a channel, `private.record_dispatch` inserts the one dispatch row with the recipient and channel from the approval, and the adapter sends once. A failed, unknown or unavailable send never stops the bundle.
 9. **`local.order.record`.** The order becomes `PAYMENT_PENDING`.
 10. **Payment.** A verified Square webhook, or the poll, reads the payment from Square. If it is `COMPLETED`, not refunded, and matches the order ID, amount, currency and location, `private.mark_order_paid` checks the observation again, writes the receipt, sets `PAID_VERIFIED`, and creates the Sheets sync job. `private.fulfill_order` then moves the order to `FULFILLMENT_READY`.
@@ -155,7 +136,7 @@ A retryable step failure goes back to `QUEUED` up to 3 attempts with a delay tha
 
 **When a step needs review.** The owner can call `POST /api/executions/:id/resolve` with `retry` or `abandon`. The server reads the provider first. If the read proves the effect exists, the step is completed with what was found. If it proves nothing was written, the step is requeued or abandoned. If the read is unsure, the request is refused. `POST /api/orders/:id/cancel` cancels an order that has no step running and no Square link. An order that already has a Square link is never cancelled by this route, because nothing deactivates the link (`compose/recovery.ts`).
 
-**The booking bundle.** `calendar.event.create` re-reads free/busy, looks for an event whose ID is the step's key, and inserts one event with no attendees and no notifications. `private.verify_booking` then stores the event ID, moves the booking to `BOOKED_VERIFIED` and creates the Sheets job, in that same step. `message.booking.confirm` and `local.booking.record` follow. A busy slot ends in `SLOT_CONFLICT` with up to 3 alternatives and no event.
+**The booking bundle.** `calendar.event.create` re-reads free/busy, looks for an event whose ID is the step's key, and inserts one event with no attendees and no notifications. `private.verify_booking` then stores the event ID, moves the booking to `BOOKED_VERIFIED` and creates the Sheets job, in that same step. `message.booking.confirm` and `local.booking.record` follow. A busy slot ends in `SLOT_CONFLICT` with up to 3 alternatives and no event. If the owner approves a booking whose slot overlaps one already approved, the decision is refused, the booking moves to `SLOT_CONFLICT`, and the approval stays pending until it expires.
 
 **The fact edit.** `decide` runs `local.fact.update` in the same request through `private.apply_fact_update`. It supersedes the old verified fact and inserts the next version, or promotes a new-key draft to verified version 1.
 
@@ -200,7 +181,6 @@ Differences from the SPEC and `docs/FLOWS.md` themselves that no ratified decisi
 | Publish stops when a required integration is unreachable (FLOWS, builder stop condition 4) | Publish runs the read-only health checks itself. A phone agent needs Twilio and OpenAI, the pizza template Square, the booking template Google Calendar, and each capability its provider. A message channel other than `qr_only` has no check at all, so with `surge` or `whatsapp_sandbox` set, an agent with a message capability cannot be published |
 | A conflict is resolved through `POST /api/conflicts/:id/resolve` (API.md) | That route serves only conflicts from an upload held in server memory. For a conflict stored in Postgres the server answers that it is resolved through `facts/propose` with `resolvesConflictId` |
 | Uploads save files, draft facts and conflicts (FLOWS A8 to A10) | The extraction stores are in server memory, because `compose/index.ts` passes no `extraction` option |
-| The executor re-checks item availability before CreatePaymentLink (FLOWS B18) | Not built. Availability is checked at quote time |
 | The agent ends the call after its goodbye (FLOWS 3.1) | The relay needs a trusted finish signal that the composition root does not pass. Calls end on hang-up or on a time limit |
 | Human fallback is a SHOULD item with no stated approval rule | Built and switched off. The rule that it needs no per-call approval is a proposal waiting for the owner. SPEC 2.9 has four more rows marked "proposed, waiting for Arsh to ratify" that the code already follows |
 | `webhook.rejected` is written against the integration owner from `integrations` (SPEC 2.9) | Square: the business with the most catalog rows. Twilio: the business that holds the number in `live_agent` |
@@ -223,7 +203,7 @@ Each of these is built on what the vendor documentation or a spike says, and has
 - The Twilio Media Stream fields the relay reads, barge-in by voice, and that closing the stream ends the call. `apps/server/src/voice/NOTES.md` lists the OpenAI events that the probe did not cover.
 - A Twilio call update with inline TwiML can move a live Media Stream call to a person. `apps/server/src/voice/fallback/NOTES.md` lists what is unproven.
 - A Google Calendar event can be inserted with our key as its ID, and a 409 means it exists.
-- A Sheets append to tabs named `Orders` and `Bookings` works with the service account.
+- A Sheets append to tabs named `Orders` and `Bookings` works with the service account. The health check now reads the tab titles and reports the sheet as not connected without them.
 - The Square subscription calls in `npm run register-webhooks` match the real API. `docs/DEPLOY.md` says they were not run against a real account.
 - The variables `SURGE_BASE_URL` and `SURGE_LINK_SHORTENING` appear in adapter code. `apps/server/src/env.ts` does not read them, so setting them has no effect on the server.
 
@@ -241,9 +221,9 @@ In the order I would do them.
 8. **Decide the message question.** Either ratify "QR code only" for the demo, or build the trusted consent evidence the voice notes describe. A message channel also needs a health check before an agent that uses it can be published.
 9. **Rule on human fallback** and on the four SPEC 2.9 rows still marked proposed.
 10. **Wire the extraction stores to Postgres**, and pass the call finish signal to the voice plugin.
-11. **Freeze the integration branch** before the final check of these documents. It moved 41 commits while they were written.
-12. **Raise the test and hook timeouts or lower the worker count** for the database tests, so `npm test` is stable on small machines and CI can go green. Look at the fallback regression test with a 10 millisecond deadline, which failed in CI and in my default run.
-13. **Look at the one failing web test**, `VoiceControl.test.tsx`.
+11. **Freeze the integration branch.** It moved 61 commits while these documents were written, and they describe `18c30a4`.
+12. **Close the two defects the adversarial suite records as open**: `GET /api/builder/ping` answers without a token, and a dispatch stays `QUEUED` after crash recovery.
+13. **Record live results in the repository.** If `scripts/live/run-demo.ts` has been run against the real backend, write down what passed, so the status columns in these documents can be raised from "tested with fakes".
 14. **Run the three rehearsals and the outside owner test** (AC-20). Neither has happened.
 
 ## 8. Commands
@@ -260,3 +240,4 @@ In the order I would do them.
 | `npm run seed`, `npm run seed:square` | Seed the owner and demo data. Seed the Square sandbox catalog |
 | `npm run reset -- --yes` | Clear run data and reseed |
 | `npm run register-webhooks` | Dry run: show what would change on the Twilio number and the Square sandbox subscription. Add `-- --apply` to change them |
+| `npx tsx scripts/live/run-demo.ts` | Drive the demo flows against a running server and the real backend. I did not run it. It needs real credentials |
