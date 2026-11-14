@@ -344,6 +344,8 @@ Names only. Values live in `.env.local` and in the host's secret store. They are
 | `MESSAGE_CHANNEL` (`surge`, `android_gateway`, `whatsapp_sandbox`, `qr_only`), plus that channel's own keys | server |
 | `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_CALENDAR_ID`, `GOOGLE_SHEET_ID` | server |
 | `PUBLIC_SERVER_URL`, `PORT` | server |
+| `WEB_ORIGIN` (the web app address allowed by CORS), `NODE_ENV` (`production` on any deployed server) | server |
+| `BUILDER_DEV_AUTH` (local development only: `1` treats any bearer token as the seeded owner; refused when `NODE_ENV` is `production`) | server |
 
 The server refuses to start if `SQUARE_ENVIRONMENT` is not `sandbox` (AC-19).
 
