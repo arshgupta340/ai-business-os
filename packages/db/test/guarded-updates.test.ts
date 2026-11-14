@@ -1,8 +1,8 @@
 import type { PGlite } from '@electric-sql/pglite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import {
-  claimExecution, claimNextExecution, decideApproval, expireApprovals, recordWebhookEvent,
-} from '../src/guarded-updates';
+import { recordWebhookEvent } from '../src/guarded-updates';
+// Issue #93: the administrator-only SQL helpers moved out of the package into this test file.
+import { claimExecution, claimNextExecution, decideApproval, expireApprovals } from './legacy-admin-sql';
 import {
   BOOKING_BUNDLE, createApproval, createApprovedApproval, createBooking, createExecution, createMigratedDb,
   createOrder, createOwner, hash, hex64, uniq, type Owner,

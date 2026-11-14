@@ -146,7 +146,8 @@ describe('0007 on a database that already holds rows from 0001 to 0006', () => {
     before = await catalog(db);
     rowsBefore = await rowDigests(db);
     materialBefore = await materialDef(db);
-    const applied = await as(db, 'supabase_postgres', () => applyMigrations(migrationDb(db)));
+    // Exactly 0007 (later migrations have their own reviews).
+    const applied = await as(db, 'supabase_postgres', () => applyMigrations(migrationDb(db), files.filter((f) => f.name <= NAME)));
     expect(applied.applied).toEqual([NAME]);
     after = await catalog(db);
     rowsAfter = await rowDigests(db);

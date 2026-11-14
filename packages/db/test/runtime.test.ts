@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { PGlite } from '@electric-sql/pglite';
 import { BOOKING_BUNDLE, ORDER_BUNDLE, createMigratedDb, createOwner, createOrder, createBooking, insert, uniq } from './helpers';
 import * as runtime from '../src/runtime';
-import { decideApproval } from '../src/guarded-updates';
+import { decideApproval } from './legacy-admin-sql';
 
 let db: PGlite;
 beforeAll(async () => { db = await createMigratedDb(); });
@@ -123,13 +123,14 @@ it('exposes only the checked entry points and pins definer search paths', async 
     'update_dispatch','enqueue_sheets_sync','claim_sync_job','finish_sync_job','expire_approvals',
     'mark_order_paid','mark_order_payment_failed','recover_stale_executions',
     'save_checkout','fulfill_order','verify_booking','renew_execution_lease','resolve_execution','renew_sync_lease','recover_stale_sync_jobs','apply_fact_update',
-    'mark_webhook_processed','update_dispatch_status','runtime_role_check'];
+    'mark_webhook_processed','update_dispatch_status','runtime_role_check',
+    'mark_stale_dispatches_unknown','owner_resolve_execution'];
   for(const r of q.rows) {
     expect(r.runtime,r.proname).toBe(routines.includes(r.proname)); expect(r.browser).toBe(false); expect(r.pub).toBe(false);
     // runtime_role_check reports the caller's own role, so it is the one invoker entry point.
     if(r.runtime) { expect(r.prosecdef,r.proname).toBe(r.proname!=='runtime_role_check'); expect(r.proconfig).toContain('search_path=""'); }
   }
-  expect(q.rows.filter(r=>r.runtime)).toHaveLength(25);
+  expect(q.rows.filter(r=>r.runtime)).toHaveLength(27);
 });
 
 for(const type of types) describe(type, () => {

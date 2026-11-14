@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
 import { pgcrypto } from '@electric-sql/pglite/contrib/pgcrypto';
 import { btree_gist } from '@electric-sql/pglite/contrib/btree_gist';
-import { decideApproval } from '../src/guarded-updates';
+import { decideApproval } from './legacy-admin-sql';
 import { applyMigrations, type MigrationDb } from '../src/migrate';
 
 const here = dirname(fileURLToPath(import.meta.url));

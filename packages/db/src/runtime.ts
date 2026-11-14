@@ -213,6 +213,24 @@ export function resolveExecution(db: QueryExecutor, args: {
   return row(db, 'select * from private.resolve_execution($1,$2,$3,$4,$5,$6)',
     [args.businessId,args.executionId,args.status,args.externalRef ?? null,args.nothingWritten,args.checkout ? JSON.stringify(args.checkout) : null]);
 }
+/**
+ * 0008. The signed-in owner's retry or abandon of a NEEDS_REVIEW step. The database checks the owner,
+ * allows only contract moves, keeps the step's idempotency key, never resends a message whose delivery
+ * is unknown, and writes the audit event. `externalRef` is provider evidence of the approved effect;
+ * `nothingWritten` is proof that the provider holds nothing. A repeat returns the step unchanged.
+ */
+export function ownerResolveExecution(db: QueryExecutor, args: {
+  businessId: string; executionId: string; ownerUserId: string; action: 'retry' | 'abandon';
+  externalRef?: string | null; nothingWritten?: boolean; checkout?: CheckoutReferences;
+}): Promise<ExecutionRow> {
+  return row(db, 'select * from private.owner_resolve_execution($1,$2,$3,$4,$5,$6,$7)',
+    [args.businessId,args.executionId,args.ownerUserId,args.action,args.externalRef ?? null,args.nothingWritten === true,
+      args.checkout ? JSON.stringify(args.checkout) : null]);
+}
+/** 0008. A QUEUED dispatch of a message step in NEEDS_REVIEW (a crash during the send) becomes UNKNOWN. */
+export async function markStaleDispatchesUnknown(db: QueryExecutor, args: { businessId: string }): Promise<DispatchRow[]> {
+  return (await db.query('select * from private.mark_stale_dispatches_unknown($1)', [args.businessId])).rows as DispatchRow[];
+}
 export function renewSyncLease(db: QueryExecutor, args: {
   businessId: string; syncJobId: string; workerId: string; attempt: number; durationMs: number;
 }): Promise<SyncJobRow> {

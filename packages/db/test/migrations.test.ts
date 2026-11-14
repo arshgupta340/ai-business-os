@@ -35,7 +35,7 @@ describe('migrations', () => {
 
   it('apply cleanly to an empty database, in name order', async () => {
     const files = readMigrations();
-    expect(files.length).toBe(7);
+    expect(files.length).toBe(8);
     const result = await applyMigrations(migrationDb(db), files);
     expect(result.applied).toEqual(files.map((f) => f.name));
     expect(result.skipped).toEqual([]);
@@ -183,7 +183,8 @@ describe('function hardening', () => {
       select n.nspname || '.' || p.proname as fn, p.proconfig as config
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
       where n.nspname in ('public', 'private') and p.prokind = 'f'`);
-    expect(rows.length).toBe(51);
+    // 0008 adds mark_stale_dispatches_unknown and owner_resolve_execution.
+    expect(rows.length).toBe(53);
     for (const r of rows) expect(r.config, r.fn).toContain('search_path=""');
   });
 

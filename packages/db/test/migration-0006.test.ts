@@ -422,7 +422,7 @@ it('applies to a database populated under 0001 to 0005 and the existing data kee
     expect(before.f).toBeGreaterThanOrEqual(33); expect(before.c).toBeGreaterThanOrEqual(6); expect(before.v).toBeGreaterThan(0);
 
     await fresh.exec('set role supabase_postgres');
-    expect((await applyMigrations(migrationDb(fresh))).applied).toEqual(['0006_ownership_material_and_receipts.sql', '0007_agentphone_channel.sql']);
+    expect((await applyMigrations(migrationDb(fresh))).applied).toEqual(['0006_ownership_material_and_receipts.sql', '0007_agentphone_channel.sql', '0008_owner_recovery.sql']);
     await fresh.exec('reset role');
     expect((await fresh.query(counts)).rows[0]).toEqual(before);
 

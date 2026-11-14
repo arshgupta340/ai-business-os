@@ -38,7 +38,7 @@ describe('direct DML as service_role', () => {
 });
 import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
-import { decideAndEnqueue, type TransactionClient } from '../src/guarded-updates';
+import { decideAndEnqueue, type TransactionClient } from './legacy-admin-sql';
 import { BOOKING_BUNDLE, createBooking, createOrder, hex64, insert } from './helpers';
 
 // Type-level regression: a pool cannot masquerade as a transaction client.
