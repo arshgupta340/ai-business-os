@@ -8,6 +8,10 @@ export default defineConfig({
     exclude: ['**/node_modules/**', '.worktrees/**'],
     // Each database test file runs its own in-process Postgres. On Windows, forking one worker per
     // core intermittently fails with "spawn UNKNOWN"; a bounded pool is stable.
-    maxWorkers: 6,
+    // The CI runner has two cores: fewer workers and longer limits, or database setup
+    // (six migrations per in-process Postgres) times out under contention.
+    maxWorkers: process.env.CI ? 2 : 6,
+    testTimeout: 30_000,
+    hookTimeout: 120_000,
   },
 });

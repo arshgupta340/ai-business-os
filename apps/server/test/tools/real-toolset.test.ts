@@ -183,7 +183,7 @@ describe('real toolset: trace privacy and bounds (B2)', () => {
 
 describe('real toolset: deadlines (S5)', () => {
   it('S5: a hung port times out as INTEGRATION_UNAVAILABLE', async () => {
-    const s = setup({ toolTimeoutMs: 30 });
+    const s = setup({ toolTimeoutMs: 250 });
     s.ports.catalog.search.mockImplementationOnce(() => new Promise(() => undefined));
     expect(await s.ts.tools.read_catalog({}, pizzaCtx)).toMatchObject({ ok: false, reason: 'INTEGRATION_UNAVAILABLE' });
     expect((await s.ts.tools.read_catalog({}, pizzaCtx)).ok).toBe(true);
@@ -451,7 +451,7 @@ describe('real toolset: propose_booking', () => {
 
 describe('rereview real tool regressions', () => {
   it('R2: a timed-out proposal reserves its quote while the outcome is uncertain', async () => {
-    const s = setup({ toolTimeoutMs: 10 });
+    const s = setup({ toolTimeoutMs: 250 });
     const q = await quoted(s);
     let release: () => void = () => undefined;
     s.ports.proposals.createOrderProposal.mockImplementationOnce(() => new Promise((r) => { release = () => r({ ok: true, orderId: 'ord_test_01', approvalId: 'apv_test_01' }); }));
@@ -463,7 +463,7 @@ describe('rereview real tool regressions', () => {
   });
 
   it('R2: a late quote result cannot become proposable after timeout', async () => {
-    const s = setup({ toolTimeoutMs: 10 });
+    const s = setup({ toolTimeoutMs: 250 });
     const q = await quoted(s);
     let release: () => void = () => undefined;
     s.ports.quotes.quote.mockImplementationOnce(() => new Promise((r) => { release = () => r({ ok: true, quote: { ...q, quoteId: 'qte_late' } }); }));

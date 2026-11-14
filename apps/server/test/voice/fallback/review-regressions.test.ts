@@ -35,7 +35,7 @@ describe('B-28 review deadline regressions', () => {
     vi.mocked(p.fallback.reserve).mockImplementation(async (_input, signal) => new Promise((resolve) => {
       signal.addEventListener('abort', () => { aborted = true; resolve(null); });
     }));
-    const result = await createFallbackRouter(p, { routingDeadlineMs: 10 }).route({ ...request, mode: 'webhook' });
+    const result = await createFallbackRouter(p, { routingDeadlineMs: 250 }).route({ ...request, mode: 'webhook' });
     expect(result.kind).toBe('webhook');
     expect(aborted).toBe(true);
     expect(p.fallback.beginDispatch).not.toHaveBeenCalled();
@@ -48,7 +48,7 @@ describe('B-28 review deadline regressions', () => {
     vi.mocked(p.fallback.beginDispatch).mockImplementation(async (_input, signal) => new Promise((resolve) => {
       signal.addEventListener('abort', () => { aborted = true; resolve(false); });
     }));
-    const result = await createFallbackRouter(p, { routingDeadlineMs: 10 }).route({ ...request, mode: 'webhook' });
+    const result = await createFallbackRouter(p, { routingDeadlineMs: 250 }).route({ ...request, mode: 'webhook' });
     expect(result.kind).toBe('webhook');
     expect(aborted).toBe(true);
     expect(p.calls.update).not.toHaveBeenCalled();
@@ -63,7 +63,7 @@ describe('B-28 review deadline regressions', () => {
       if (!signal.aborted) sends += 1;
       signal.addEventListener('abort', () => { aborted = true; resolve(); });
     }));
-    const router = createFallbackRouter(p, { routingDeadlineMs: 10 });
+    const router = createFallbackRouter(p, { routingDeadlineMs: 250 });
     expect(await router.route(request)).toEqual({ kind: 'redirect_unknown', reason: 'caller_requested_person' });
     expect(aborted).toBe(true);
     expect(sends).toBe(1);
