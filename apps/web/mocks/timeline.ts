@@ -12,7 +12,7 @@
  * Screens import useMockControls from "@/lib/api", not from this file.
  */
 import type { MockControls } from "@/lib/api/mock-bridge";
-import { useMockControls as useMockControlsFromBridge } from "@/lib/api/mock-bridge";
+import { publishMockReset, useMockControls as useMockControlsFromBridge } from "@/lib/api/mock-bridge";
 import type { Call, CallStage } from "@/lib/api/pending-contracts";
 import * as db from "./db";
 import { BARBER, BARBER_AGENT_ID, BARBER_AGENT_V1, PIZZA, PIZZA_AGENT_ID } from "./fixtures";
@@ -125,12 +125,29 @@ export function simulateRejectedWebhook(): void {
   db.emit(PIZZA, "webhook.rejected", `whk_${Date.now().toString(36)}`, "provider", { provider: "square", reason: "signature_invalid" });
 }
 
+/** The next uploaded file ends in extractionState FAILED with no draft facts. */
+export function simulateExtractionFailed(): void {
+  db.setFlag("nextExtractionFails", true);
+}
+
+/** The next catalog sync ends with sync.failed (final) and leaves the catalog as it was. */
+export function simulateCatalogSyncFailed(): void {
+  db.setFlag("nextCatalogSyncFails", true);
+}
+
+/** The next pizza call uses messageChannel "qr_only", so its message step is SKIPPED after approval. */
+export function simulateQrOnlyChannel(): void {
+  db.setFlag("nextCallQrOnly", true);
+}
+
 export function reset(): void {
   if (inFlight) {
     inFlight.timers.forEach(cancel);
     inFlight = null;
   }
   db.resetDb();
+  // useActivityFeed drops the events it holds and refetches.
+  publishMockReset();
 }
 
 export const mockControls: MockControls = {
@@ -143,6 +160,9 @@ export const mockControls: MockControls = {
   simulatePayloadChanged: (approvalId) => db.tamperApproval(approvalId),
   simulateNoLiveAgent: () => db.clearLiveAgent(),
   reset,
+  simulateExtractionFailed,
+  simulateCatalogSyncFailed,
+  simulateQrOnlyChannel,
 };
 
 /** Returns mockControls in mock mode once the worker started, otherwise null. Same hook as "@/lib/api". */

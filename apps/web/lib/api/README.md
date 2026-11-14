@@ -21,7 +21,8 @@ Every business-scoped hook takes `businessId` as its first argument. Pass `useBu
 | `query-keys.ts` | Every query key. |
 | `invalidation.ts` | Which queries each activity event refreshes. |
 | `mock-bridge.ts` | Mock events and mock controls, with no MSW code in it. |
-| `provider.tsx` | `ApiProvider`. |
+| `provider.tsx` | `ApiProvider` and `createApiQueryClient()`. Its query and mutation caches send every failure to `session-errors.ts`. |
+| `session-errors.ts` | `subscribeApiErrors(listener)`: one central report of failed calls. `SessionErrorHandler` uses it for `UNAUTHENTICATED` and `FORBIDDEN_BUSINESS`. |
 
 ## Errors
 
@@ -45,7 +46,7 @@ Queries return the normal React Query result (`data`, `isPending`, `error`, `ref
 
 | Hook | Arguments | `data` or mutation variables |
 |---|---|---|
-| `useBusinesses()` | none | `Page<BusinessListItem>` |
+| `useBusinesses({ enabled? })` | optional `enabled` (default true) | `Page<BusinessListItem>`. `useBusiness()` from `@/lib/session` already uses it for the selector. |
 | `useBusiness(businessId)` | | `Business` (contact has `phone?`, `email?`, `address?`) |
 | `useUpdateBusiness(businessId)` | mutate `{ name?, contact?, settings? }` | `Business` |
 | `useFacts(businessId, { kind?, status? })` | `kind`: `hours`, `policy`, `service`, `contact`, `faq`, `menu_item`. Default status leaves out `superseded`. | `FactsListResponse` `{ items: BusinessFact[], conflicts: FactConflict[] }` (open conflicts) |
@@ -98,7 +99,7 @@ A price conflict (`kind: "menu_item"`) is never resolved by a fact edit. Keep Sq
 
 | Hook | Arguments | Result |
 |---|---|---|
-| `useApprovals(businessId, { state?, bundleType?, limit?, cursor? })` | `state` defaults to `PENDING` on the server | `Page<ApprovalRequest>` |
+| `useApprovals(businessId, { state?, bundleType?, limit?, cursor? })` | `state` defaults to `PENDING` on the server | `Page<ApprovalRequest>`. For the pending list pass `PENDING_APPROVALS_QUERY` (`{ state: "PENDING", limit: 200 }`), the same query the sidebar badge uses, so both read one cache entry. |
 | `useApproval(businessId, approvalId)` | | `ApprovalRequest` |
 | `useDecideApproval(businessId)` | mutate `{ approvalId, decision: "approve" \| "reject", payloadHash, reason? }` | `{ approval: { id, state, decidedBy?, decidedAt? } }` |
 
@@ -127,7 +128,7 @@ Green only for `PAID_VERIFIED`, `FULFILLMENT_READY` and `BOOKED_VERIFIED` (FLOWS
 | Hook | Arguments | Result |
 |---|---|---|
 | `useActivity(businessId, { types?, correlationId?, since?, limit?, cursor? })` | | `Page<ActivityEvent>`, newest first. Use `correlationId` (a `call_` id) for one call's timeline. |
-| `useActivityFeed(businessId, { limit? })` | | `{ events, status, source, lastEventAt? }`. `events` are the ones received since mount, newest first. `status` is `connecting`, `connected`, `disconnected`, `unavailable` (no Supabase settings) or `idle` (no business). `source` is `mock` or `realtime`. Each event also refetches the affected queries, so most screens only need to mount it once. |
+| `useActivityFeed(businessId, { limit? })` | | `{ events, status, source, lastEventAt? }`. `events` are the ones received since mount, newest first. In mock mode the mock `reset()` control empties `events` and refetches every query. Label `status` with `statusView('feed', status)`. `status` is `connecting`, `connected`, `disconnected`, `unavailable` (no Supabase settings) or `idle` (no business). `source` is `mock` or `realtime`. Each event also refetches the affected queries, so most screens only need to mount it once. |
 | `useIntegrationsHealth(businessId)` | | `IntegrationHealth`: one entry per provider (`square`, `twilio`, `openai`, `google_calendar`, `google_sheets`, `message_channel`) with `state` `connected`, `degraded` or `disconnected`. Refetches every minute. |
 | `useRefreshIntegrationsHealth(businessId)` | mutate with no argument | runs the live checks (`refresh=1`) |
 | `useTelemetry(businessId, { since? })` (SHOULD) | | `{ metrics: { name, p50Ms, p95Ms, count }[] }` |
@@ -138,7 +139,7 @@ Read an event payload with its CONTRACTS.md types through `payloadOf(event)`.
 
 ## Mock mode
 
-Run `npm run dev:mock` (or set `NEXT_PUBLIC_MOCK=1`). Requests go to MSW in the browser; the mock keeps state in memory until the page reloads.
+Run `npm run dev:mock` (or set `NEXT_PUBLIC_MOCK=1`). Requests go to MSW in the browser; the mock keeps state in memory until the page reloads. Builder sessions are the one exception: the browser mock keeps them in sessionStorage (`abos.mock.builderSessions`), so reloading /build resumes the session. The node test server does not persist them.
 
 ### Mock controls
 
@@ -154,7 +155,14 @@ Run `npm run dev:mock` (or set `NEXT_PUBLIC_MOCK=1`). Requests go to MSW in the 
 | `simulateRejectedWebhook()` | Emits `webhook.rejected` for the pizza business. |
 | `simulatePayloadChanged(approvalId)` | Changes a pending approval's stored payload, so the next decision gets `PAYLOAD_HASH_MISMATCH`. |
 | `simulateNoLiveAgent()` | Leaves the number unanswered: the live agent loses `agentId` and `agentVersionId`. |
-| `reset()` | Puts every fixture back. |
+| `reset()` | Puts every fixture back, clears stored builder sessions, and tells `useActivityFeed` to drop its events (`subscribeMockReset`). |
+| `simulateExtractionFailed?()` | The next uploaded file ends in `FAILED`: `extraction.completed` with `extractionState: "FAILED"` and no drafts or conflicts. |
+| `simulateCatalogSyncFailed?()` | The next catalog sync ends with `sync.failed` (`target: "catalog"`, `final: true`). The catalog and `syncedAt` stay as they were. |
+| `simulateQrOnlyChannel?()` | The next pizza call is proposed with `messageChannel: "qr_only"`. After approval the message step is `SKIPPED`: no dispatch, no message event, `checkout.message` is absent, and the order goes from `PAYMENT_LINK_READY` straight to `PAYMENT_PENDING`, then to a verified sandbox payment. |
+
+The last three are optional members of `MockControls`, so call them as `controls.simulateQrOnlyChannel?.()`.
+
+Approving a `price_edit` (from `useProposePrice`) runs `square.catalog.price.update` and `local.catalog.sync`; afterwards `useCatalog` shows the new price.
 
 Approving any pending approval runs its scripted follow-up, not only the ones from these controls. Pending approvals expire 10 minutes after creation, like the server.
 

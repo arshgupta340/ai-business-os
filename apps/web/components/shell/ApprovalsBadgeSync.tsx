@@ -1,13 +1,10 @@
 'use client';
 
 import {useEffect} from 'react';
-import {useActivityFeed, useApprovals} from '@/lib/api';
+import {PENDING_APPROVALS_QUERY, useActivityFeed, useApprovals} from '@/lib/api';
 import {useBusiness} from '@/lib/session';
 import {useAuth} from '@/lib/session/auth';
 import {useShellBadges} from './ShellBadgesContext';
-
-/** Same query as the Approvals inbox, so both read one cache entry. */
-const PENDING_QUERY = {state: 'PENDING', limit: 200} as const;
 
 /**
  * Keeps the sidebar Approvals count equal to the pending approvals of the
@@ -21,7 +18,7 @@ export function ApprovalsBadgeSync() {
   const {setPendingApprovalsCount} = useShellBadges();
 
   useActivityFeed(activeId);
-  const pending = useApprovals(activeId, PENDING_QUERY);
+  const pending = useApprovals(activeId, PENDING_APPROVALS_QUERY);
   const count = activeId && pending.data ? pending.data.items.filter((a) => a.state === 'PENDING').length : null;
 
   useEffect(() => {

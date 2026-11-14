@@ -28,6 +28,21 @@ export function subscribeMockActivity(businessId: string, listener: Listener): (
   };
 }
 
+const resetListeners = new Set<() => void>();
+
+/** The mock layer calls this after reset() put the fixtures back. */
+export function publishMockReset(): void {
+  for (const listener of resetListeners) listener();
+}
+
+/** Called after every mock reset(). useActivityFeed uses it to drop the events it holds. Returns the unsubscribe function. */
+export function subscribeMockReset(listener: () => void): () => void {
+  resetListeners.add(listener);
+  return () => {
+    resetListeners.delete(listener);
+  };
+}
+
 /** What a "Mock controls" panel can trigger. Every action changes only the in-memory mock db. */
 export interface MockControls {
   /** Start a scripted incoming pizza call (Flow B). Resolves with its call, order and approval IDs once the approval is pending. */
@@ -48,6 +63,16 @@ export interface MockControls {
   simulateNoLiveAgent(): void;
   /** Put every fixture back and cancel scripted timers. */
   reset(): void;
+  /** Mock only. The next uploaded file ends in extractionState FAILED with no draft facts. */
+  simulateExtractionFailed?(): void;
+  /** Mock only. The next catalog sync ends with sync.failed (target "catalog", final true) and leaves syncedAt unchanged. */
+  simulateCatalogSyncFailed?(): void;
+  /**
+   * Mock only. The next pizza call is proposed with messageChannel "qr_only".
+   * After approval the message step is SKIPPED: no dispatch, no message event,
+   * and the order goes from PAYMENT_LINK_READY straight to PAYMENT_PENDING.
+   */
+  simulateQrOnlyChannel?(): void;
 }
 
 let controls: MockControls | null = null;
