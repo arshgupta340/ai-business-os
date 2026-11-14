@@ -25,9 +25,22 @@ import { apiError, parseOrThrow } from './util';
 //
 // The server listens on all interfaces, so the stand-in also refuses every
 // request that does not come from the loopback address (127.0.0.1, ::1 or
-// ::ffff:127.0.0.1). It reads the socket's own remote address. It never reads
-// X-Forwarded-For or any other header, because a client can set those. The real fix is a `BuilderAuth` passed to the plugin once B-08
-// provides JWT verification and owner lookup.
+// ::ffff:127.0.0.1). It reads the socket's own remote address, never
+// X-Forwarded-For, because a client can set that header.
+//
+// A loopback socket is not enough on its own. A tunnel agent such as
+// cloudflared or ngrok (docs/DEPLOY.md Part 1) runs on this machine and
+// connects to the server from 127.0.0.1, so a request from anywhere on the
+// internet arrives on a loopback socket. The stand-in therefore also refuses,
+// with UNAUTHENTICATED, any request that:
+// - carries a forwarding header (Forwarded, X-Forwarded-For,
+//   X-Forwarded-Host, X-Forwarded-Proto, X-Real-IP, CF-Connecting-IP, CF-Ray,
+//   True-Client-IP), whatever its value, or
+// - has a Host whose hostname is not localhost, 127.0.0.1 or [::1] (any port
+//   is fine).
+// Both checks fail closed. A local client that sends one of these headers only
+// locks itself out. The real fix is a `BuilderAuth` passed to the plugin once
+// B-08 provides JWT verification and owner lookup.
 
 export interface Owner {
   userId: string; // usr_
@@ -50,6 +63,34 @@ export function isLoopbackAddress(address: string | undefined): boolean {
   return address !== undefined && LOOPBACK_ADDRESSES.has(address);
 }
 
+// Headers a proxy or tunnel adds. Their presence alone means the request did
+// not start on this machine, so the stand-in refuses it.
+export const FORWARDING_HEADERS = [
+  'forwarded',
+  'x-forwarded-for',
+  'x-forwarded-host',
+  'x-forwarded-proto',
+  'x-real-ip',
+  'cf-connecting-ip',
+  'cf-ray',
+  'true-client-ip',
+] as const;
+
+const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+// True only when the Host header names this machine: localhost, 127.0.0.1 or
+// [::1], with or without a port. An absent or malformed Host is not local.
+export function isLocalHost(host: string | undefined): boolean {
+  if (typeof host !== 'string' || host === '') return false;
+  const match = /^(\[[^\]]*\]|[^:\[\]]+)(?::(\d{1,5}))?$/.exec(host);
+  if (!match) return false;
+  return LOCAL_HOSTNAMES.has(match[1]!.toLowerCase());
+}
+
+function hasForwardingHeader(request: FastifyRequest): boolean {
+  return FORWARDING_HEADERS.some((name) => request.headers[name] !== undefined);
+}
+
 export class UnverifiedSeedOwnerAuth implements BuilderAuth {
   readonly verified = false;
 
@@ -57,6 +98,11 @@ export class UnverifiedSeedOwnerAuth implements BuilderAuth {
     // The TCP peer, not request.ip: request.ip would follow X-Forwarded-For if
     // trustProxy were ever turned on for the app.
     if (!isLoopbackAddress(request.raw.socket?.remoteAddress)) {
+      throw apiError('UNAUTHENTICATED', 'Development auth accepts requests from this machine only.');
+    }
+    // A tunnel or proxy on this machine also connects from loopback. Refuse
+    // anything that looks forwarded or names a host other than this machine.
+    if (hasForwardingHeader(request) || !isLocalHost(request.headers.host)) {
       throw apiError('UNAUTHENTICATED', 'Development auth accepts requests from this machine only.');
     }
     const header = request.headers.authorization;
@@ -86,7 +132,6 @@ export interface BusinessScope {
   owner: Owner;
   businessId: string;
 }
-
 
 export async function requireBusiness(auth: BuilderAuth, request: FastifyRequest): Promise<BusinessScope> {
   const owner = await auth.authenticate(request);
