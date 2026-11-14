@@ -408,12 +408,13 @@ describe('provider timeouts and ambiguous replies', () => {
       expect(w.messages.sent.filter((m) => m.to === '+15555550125')).toEqual([]);
       expect(delta(w, before)).toEqual({ square: 0, messages: 1, calendar: 1, sheets: 1 });
     });
-    // DEFECT (see the pull request): FLOWS X1 says an approval that hits the overlap rule moves the
-    // booking to SLOT_CONFLICT with a booking.slot_conflict event. The decision answers 500 INTERNAL
-    // (marked retryable) instead, and the approval stays PENDING until it expires.
-    it.fails('the second approval answers without a server error and the booking moves to SLOT_CONFLICT', async () => {
+    // Was DEFECT 2 in the pull request (the decision answered 500). Commit 815f430 mapped the overlap to
+    // SLOT_CONFLICT; the booking move and the booking.slot_conflict event (FLOWS X1) were added after the merge.
+    it('the second approval answers without a server error and the booking moves to SLOT_CONFLICT', async () => {
       expect(secondResponse.statusCode).toBeLessThan(500);
+      expect(JSON.parse(secondResponse.body)).toMatchObject({ code: 'SLOT_CONFLICT' });
       expect(await statusOf(w, 'bookings', second.bookingId)).toBe('SLOT_CONFLICT');
+      expect(await count(w, "activity_events where type = 'booking.slot_conflict' and payload->>'bookingId' = $1", [second.bookingId])).toBe(1);
     });
   });
 
