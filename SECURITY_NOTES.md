@@ -4,6 +4,10 @@
 
 The integration branch moved twice while this file was being written: 20 commits after `1588eaa`, then 21 more after `7486c7e`. This version was checked against `73ac456`. If the branch has moved again, check the statements below against the newer code before relying on them.
 
+## Changes on the base after `73ac456`
+
+The integration branch moved a third time, to `18c30a4` (20 more commits), and that commit is merged into this branch. I did not check this whole file against it. The list of what changed, and which statements here it makes out of date, is in `IMPLEMENTATION_NOTES.md` under the same heading. Read that list before relying on this file.
+
 This file lists the eight rules from `AGENTS.md` that are never broken. For each rule it says where the code enforces it, which tests cover it, and what is not yet enforced or not yet tested. It then describes the restricted database role, webhook handling, idempotency keys, secrets, and the known limits.
 
 ## 1. How to read the status words
@@ -35,7 +39,9 @@ The migration 0005 file on this branch was rewritten after that list was made, a
 
 ## 3. Test results from this checkout
 
-I ran these on 2026-11-14 in a cloud container with 4 cores and Node 22.23.4, at commit `73ac456` plus the four documents. The spec and CI name Node 24.
+**Newest results, at `18c30a4`.** Typecheck passed. `CI=1 npm test` and `npm test` each ran 119 test files and 2144 tests: 2142 passed and 2 are marked as expected failures. `npm test -w @abos/web` passed 516 of 516. The base branch changed `vitest.config.ts` (2 workers when `CI` is set, longer time limits), which removes the timeouts described below. CI has not yet reported on this merge.
+
+The rest of this section is the record for `73ac456`, the commit this file describes. I ran these on 2026-11-14 in a cloud container with 4 cores and Node 22.23.4, at commit `73ac456` plus the four documents. The spec and CI name Node 24.
 
 | Command | Result |
 |---|---|
@@ -287,7 +293,7 @@ See rule 3 for the detail. In short: the key for each step is computed inside `p
 - `DATABASE_ADMIN_URL`, the owner connection, must never be set on the host. `npm run check-env -- --for host` exits with an error when it is.
 - The server connects to Postgres with TLS and certificate checks on. `apps/server/src/db/index.ts` removes every TLS parameter from the connection string so a parameter there cannot turn checks off, and adds the Supabase root certificate in `apps/server/certs/`. Test: `apps/server/test/api/db.test.ts`.
 - The Supabase JWT is verified against the project's public keys with issuer and audience checks (`apps/server/src/auth/verify.ts`, test `apps/server/test/api/auth.test.ts`).
-- Every `/api` route needs the owner's token unless it declares the builder's own auth, which uses the same check. Tests: `apps/server/test/e2e/route-auth.test.ts`, `apps/server/src/builder/route-auth.test.ts`.
+- Every `/api` route needs the owner's token unless it declares the builder's own auth, which uses the same check. Tests: `apps/server/test/e2e/route-auth.test.ts`, `apps/server/src/builder/route-auth.test.ts`. One exception: `GET /api/builder/ping` has no auth check and answers 200 to anyone. It returns only `{ ok, lane }` and nothing about a business. `apps/server/test/adversarial/access.test.ts` records this as an open defect, tracked in issue #96.
 - Provider credentials are not stored in our tables. They are not encrypted by this code. They rely on the host's secret store.
 - Only the last four digits of a recipient are written to activity events and logs.
 

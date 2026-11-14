@@ -4,6 +4,26 @@
 
 The integration branch moved twice while this file was being written: 20 commits after `1588eaa`, then 21 more after `7486c7e`. This version was checked against `73ac456`. If the branch has moved again, check the statements below against the newer code before relying on them.
 
+## Changes on the base after `73ac456`
+
+The integration branch moved a third time, to `18c30a4` (20 more commits), and that commit is merged into this branch. I did not check the four documents as a whole against it. I re-ran the tests, and I read the commit list and the diffs named below. These statements in the four documents are out of date at `18c30a4`:
+
+| Statement in the documents | What changed | Where I saw it |
+|---|---|---|
+| The executor does not re-check item availability before the Square call (FLOWS B18) | It does now. A missing or unavailable item fails the step with no request to Square, and the order becomes `UNAVAILABLE` | `apps/server/src/compose/executor.ts`, commit `8dcde16` |
+| `npm test` times out with the default settings, and CI is red | `vitest.config.ts` now uses 2 workers when `CI` is set, a 30 second test limit and a 120 second hook limit. At `18c30a4` I ran typecheck (passed), `CI=1 npm test` and `npm test` (each 119 files, 2142 passed and 2 expected failures out of 2144), and the web tests (516 of 516 passed). CI has not yet reported on this merge | `vitest.config.ts`, my own runs |
+| The web test `VoiceControl.test.tsx` fails | It passes at `18c30a4` | My own run |
+| The feature matrix names every test file that covers a rule | An adversarial suite was added under `apps/server/test/adversarial/` (task B-23). The matrix does not cite it | The directory listing |
+| The payment poll needs the webhook settings | The poll now runs without `PUBLIC_SERVER_URL` | `apps/server/src/compose/webhooks.ts` |
+| The Sheets health check reads the sheet's ID | It now reads the tab titles and wants `Orders` and `Bookings` | `apps/server/src/compose/providers.ts` |
+| An approval that trips the booking overlap rule only answers `SLOT_CONFLICT` | The booking now also moves to `SLOT_CONFLICT`. The approval stays pending and later expires | `apps/server/src/policy/engine.ts` |
+
+The two expected failures are tests the adversarial suite marks as known open defects: `GET /api/builder/ping` answers without a token (`apps/server/test/adversarial/access.test.ts`), and after crash recovery a message dispatch stays `QUEUED` when FLOWS says `UNKNOWN` (`apps/server/test/adversarial/idempotency.test.ts`). The second one fails closed: nothing resends a queued dispatch.
+
+Other commits in that range that I did not read: malformed IDs answer 400 at the edge, activity events take the database clock, an unknown message send is recorded `UNKNOWN`, the simulated call remembers a proposal it already sent and records a refused tool, and the docs under `docs/` were brought in line with the database routines.
+
+New files in that range that a reader of the runbook should know about: `docs/DEMO-LAPTOP.md` (how to run the web app on a laptop against the deployed server), `docs/notes-web-real-mode.md`, and `scripts/live/run-demo.ts`, a script that drives both demo flows against the real backend. A code comment in `compose/providers.ts` refers to a "live run 2026-11-14". I found no recorded result of a live run in the repository, so the list of real checks in `SECURITY_NOTES.md` section 2 is unchanged. It may now be out of date, and only the lead can say what has been verified since.
+
 This file describes the server as it is built on this branch, how the database is designed, how an approval becomes executed steps, where the build differs from `docs/PRD.md`, and what is still open. The PRD asks for unverified assumptions and blockers to be written here. They are in sections 6 and 7.
 
 Status words are used as in `SECURITY_NOTES.md` section 1: built and tested with fakes, verified against the real service, or not built. The complete list of what has been verified against real services is in `SECURITY_NOTES.md` section 2. Test totals are in section 3 of that file.
@@ -72,7 +92,7 @@ Read from the running app with an empty environment. The auth column is the poli
 | None | `GET /health` (with `?refresh=1` it also checks the database) |
 | Provider signature | `POST /webhooks/square`, `POST /webhooks/twilio/status`, `POST /webhooks/twilio/voice`. The socket `/ws/phone` exists only when voice is configured and needs a valid stream token |
 | Owner (Supabase JWT, business ownership checked) | `GET /api/businesses`, `GET` and `PATCH /api/businesses/:id`, `GET /api/businesses/:id/facts`, `POST /api/businesses/:id/facts/propose`, `GET /api/businesses/:id/catalog`, `POST /api/businesses/:id/catalog/sync`, `POST /api/businesses/:id/catalog/prices/propose`, `GET /api/approvals`, `GET /api/approvals/:id`, `POST /api/approvals/:id/decision`, `GET /api/orders`, `GET /api/orders/:id`, `GET /api/orders/:id/checkout`, `POST /api/orders/:id/cancel`, `POST /api/executions/:id/resolve`, `GET /api/bookings`, `GET /api/bookings/:id`, `GET /api/calls`, `GET /api/calls/:id`, `GET /api/activity`, `GET /api/integrations/health`, `GET` and `PUT /api/live-agent`, `POST /api/agents/:id/sim-call`, `GET /api/telemetry` |
-| Builder (the builder's own auth seam, filled with the same JWT check) | `POST /api/builder/sessions`, `GET /api/builder/sessions/:id`, `POST /api/builder/sessions/:id/messages`, `GET` and `POST /api/agents`, `GET /api/agents/:id`, `POST /api/agents/:id/preview`, `POST /api/agents/:id/test`, `POST /api/agents/:id/publish`, `POST /api/agents/:id/pause`, `GET /api/agents/:id/versions`, `POST /api/agents/:id/rollback`, `POST /api/businesses/:id/files`, `GET /api/files/:id`, `POST /api/conflicts/:id/resolve`, `POST /api/realtime/client-secret`, `GET /api/builder/ping` |
+| Builder (the builder's own auth seam, filled with the same JWT check) | `POST /api/builder/sessions`, `GET /api/builder/sessions/:id`, `POST /api/builder/sessions/:id/messages`, `GET` and `POST /api/agents`, `GET /api/agents/:id`, `POST /api/agents/:id/preview`, `POST /api/agents/:id/test`, `POST /api/agents/:id/publish`, `POST /api/agents/:id/pause`, `GET /api/agents/:id/versions`, `POST /api/agents/:id/rollback`, `POST /api/businesses/:id/files`, `GET /api/files/:id`, `POST /api/conflicts/:id/resolve`, `POST /api/realtime/client-secret`. `GET /api/builder/ping` is registered in this group but has no auth check and answers anyone |
 
 ### 2.5 Background jobs
 

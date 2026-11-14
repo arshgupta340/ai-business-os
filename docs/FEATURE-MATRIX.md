@@ -4,6 +4,10 @@
 
 The integration branch moved twice while this file was being written: 20 commits after `1588eaa`, then 21 more after `7486c7e`. This version was checked against `73ac456`.
 
+## Changes on the base after `73ac456`
+
+The integration branch moved a third time, to `18c30a4` (20 more commits), and that commit is merged into this branch. I did not check this whole file against it. The list of what changed, and which statements here it makes out of date, is in `IMPLEMENTATION_NOTES.md` under the same heading. Read that list before relying on this file.
+
 One row for each acceptance criterion AC-01 to AC-20 and for each P0 item in `docs/PRD.md` section 4. Task IDs come from `scripts/tasks.json`. Where the PRD and `docs/SPEC.md` use different names, the row uses the SPEC name.
 
 ## Status words

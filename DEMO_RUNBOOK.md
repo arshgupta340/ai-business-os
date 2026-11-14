@@ -6,6 +6,10 @@ DRAFT
 
 The integration branch moved twice while this file was being written: 20 commits after `1588eaa`, then 21 more after `7486c7e`. This version was checked against `73ac456`. If the branch has moved again, check the steps below against the newer code before a rehearsal.
 
+## Changes on the base after `73ac456`
+
+The integration branch moved a third time, to `18c30a4` (20 more commits), and that commit is merged into this branch. I did not check this whole file against it. The list of what changed, and which statements here it makes out of date, is in `IMPLEMENTATION_NOTES.md` under the same heading. Read that list before relying on this file.
+
 This is a draft script. It is not a record of a demo that happened. No step in it has been rehearsed against the deployed integration server, and every step is marked "Not rehearsed". Where one part of a step was checked against a real service, the step says which part. The complete list of real checks is in `SECURITY_NOTES.md` section 2.
 
 Keep this file marked DRAFT until three full rehearsals have been run and their results written into it (PRD section 17).
