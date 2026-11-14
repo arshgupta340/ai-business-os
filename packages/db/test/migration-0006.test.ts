@@ -267,22 +267,86 @@ describe('update_dispatch_status', () => {
       await runtime.finishExecution(db, { ...checkout, status: 'SUCCEEDED', externalRef: 'sq-' + q.subjectId });
       await runtime.runtimeClaimExecution(db, message);
       const d = await runtime.recordDispatch(db, { ...message, bodyHash: hash('body') });
+      await expect(runtime.updateDispatchStatus(db, { businessId: q.businessId, dispatchId: d.id, status: 'DELIVERED' })).rejects.toThrow(/^RETRY: receipt deferred/);
+      await runtime.finishExecution(db, { ...message, status: 'FAILED', error: 'provider refused' });
       await expect(runtime.updateDispatchStatus(db, { businessId: q.businessId, dispatchId: d.id, status: 'DELIVERED' })).rejects.toThrow(/provider message ID/);
     });
   });
 });
 
+describe('receipt during the send', () => {
+  it('defers a FAILED receipt that arrives between the SENT commit and the finish, then applies it after', async () => {
+    const p = await approvedOn(db);
+    const checkout = { businessId: p.businessId, executionId: p.executions[0]!.id, workerId: 'w', attempt: 1 };
+    const message = { businessId: p.businessId, executionId: p.executions[1]!.id, workerId: 'm', attempt: 1 };
+    const providerId = 'pm-' + uniq();
+    await app(async () => {
+      await runtime.runtimeClaimExecution(db, checkout);
+      await runtime.saveCheckout(db, { ...checkout, squareOrderId: 'sq-' + p.subjectId, paymentLinkId: 'link-' + p.subjectId, url: 'https://example.test/c' });
+      await runtime.finishExecution(db, { ...checkout, status: 'SUCCEEDED', externalRef: 'sq-' + p.subjectId });
+      await runtime.runtimeClaimExecution(db, message);
+      const d = await runtime.recordDispatch(db, { ...message, bodyHash: hash('body') });
+      await runtime.updateDispatch(db, { ...message, dispatchId: d.id, status: 'SENT', providerMessageId: providerId });
+      // The receipt arrives before the sender finishes: deferred, nothing changes.
+      const deferred = await runtime.updateDispatchStatus(db, { businessId: p.businessId, dispatchId: d.id, status: 'FAILED' }).catch((e: unknown) => e);
+      expect(runtime.isRetryableReceiptError(deferred)).toBe(true);
+      expect((deferred as Error).message).toBe('RETRY: receipt deferred until the send step finishes');
+      expect(await one('select status from public.message_dispatches where id=$1', [d.id])).toEqual({ status: 'SENT' });
+      expect((await runtime.finishExecution(db, { ...message, status: 'SUCCEEDED', externalRef: providerId })).status).toBe('SUCCEEDED');
+      // The retried receipt now applies and reopens nothing.
+      expect((await runtime.updateDispatchStatus(db, { businessId: p.businessId, dispatchId: d.id, status: 'FAILED' })).status).toBe('FAILED');
+      expect(await one('select status,external_ref from public.action_executions where id=$1', [message.executionId])).toEqual({ status: 'SUCCEEDED', external_ref: providerId });
+      expect((await runtime.runtimeClaimNextExecution(db, { businessId: p.businessId, workerId: 'w' }))?.action_type).toBe('local.order.record');
+    });
+    expect(runtime.isRetryableReceiptError(new Error('SCOPE: dispatch not found'))).toBe(false);
+  });
+});
+
 describe('runtime_role_check', () => {
-  it('reports abos_app as restricted', async () => {
-    const check = await app(() => runtime.assertRestrictedRuntimeRole(db));
-    expect(check).toEqual({ role_name: 'abos_app', session_role_name: expect.any(String), superuser: false, bypass_rls: false, other_roles: 0,
+  // PGlite always logs in as its superuser, so SET SESSION AUTHORIZATION stands in for authenticating as a role.
+  async function session<T>(role: string, fn: () => Promise<T>): Promise<T> {
+    await db.exec(`set session authorization ${role}`);
+    try { return await fn(); } finally { await db.exec('set session authorization postgres; reset role'); }
+  }
+
+  it('reports a session authenticated as abos_app as restricted', async () => {
+    const check = await session('abos_app', () => runtime.assertRestrictedRuntimeRole(db));
+    expect(check).toEqual({ role_name: 'abos_app', session_role_name: 'abos_app', superuser: false, bypass_rls: false, other_roles: 0,
       writes_approvals: false, writes_executions: false, writes_dispatches: false, writes_sync_jobs: false, writes_receipts: false, restricted: true });
+  });
+
+  it('refuses an owner or administrator login that only SET ROLE abos_app', async () => {
+    // The test superuser stands for the owner connection; after RESET ROLE it has every right again.
+    const p = await approvedOn(db, 'order_bundle', false);
+    await db.exec('set role abos_app');
+    try {
+      expect(await runtime.runtimeRoleCheck(db)).toMatchObject({ role_name: 'abos_app', restricted: false });
+      expect((await runtime.runtimeRoleCheck(db)).session_role_name).not.toBe('abos_app');
+      await expect(runtime.assertRestrictedRuntimeRole(db)).rejects.toThrow(/both must be abos_app/);
+    } finally { await db.exec('reset role'); }
+    expect((await db.query("update public.orders set cart='{\"evil\":true}' where id=$1 returning id", [p.subjectId])).rows).toHaveLength(1);
+  });
+
+  it('refuses an inheriting login that SET ROLE abos_app', async () => {
+    const p = await approvedOn(db, 'order_bundle', false);
+    await db.exec('create role inheritor login inherit; grant abos_app to inheritor');
+    try {
+      await session('inheritor', async () => {
+        await db.exec('set role abos_app');
+        expect(await runtime.runtimeRoleCheck(db)).toMatchObject({ role_name: 'abos_app', session_role_name: 'inheritor', restricted: false });
+        await expect(runtime.assertRestrictedRuntimeRole(db)).rejects.toThrow(/connected as inheritor with role abos_app/);
+        await db.exec('reset role');
+        // Why the check must refuse: after RESET ROLE the guards no longer apply to this login.
+        expect((await runtime.runtimeRoleCheck(db)).restricted).toBe(false);
+        expect((await db.query("update public.orders set cart='{\"evil\":true}' where id=$1 returning id", [p.subjectId])).rows).toHaveLength(1);
+      });
+    } finally { await db.exec('drop owned by inheritor; drop role inheritor'); }
   });
 
   it('fails closed for the migration owner, a superuser and service_role', async () => {
     const owner = await as(db, 'supabase_postgres', () => runtime.runtimeRoleCheck(db));
     expect(owner).toMatchObject({ role_name: 'supabase_postgres', bypass_rls: true, writes_approvals: true, restricted: false });
-    await as(db, 'supabase_postgres', () => expect(runtime.assertRestrictedRuntimeRole(db)).rejects.toThrow(/connected as supabase_postgres/));
+    await as(db, 'supabase_postgres', () => expect(runtime.assertRestrictedRuntimeRole(db)).rejects.toThrow(/with role supabase_postgres; both must be abos_app/));
     expect(await runtime.runtimeRoleCheck(db)).toMatchObject({ superuser: true, restricted: false });
     await as(db, 'service_role', () => expect(runtime.assertRestrictedRuntimeRole(db)).rejects.toThrow(/not the restricted abos_app role/));
   });
@@ -362,8 +426,10 @@ it('applies to a database populated under 0001 to 0005 and the existing data kee
     await fresh.exec('reset role');
     expect((await fresh.query(counts)).rows[0]).toEqual(before);
 
+    // SET SESSION AUTHORIZATION stands in for logging in as abos_app.
+    expect(await (async () => { await fresh.exec('set session authorization abos_app');
+      try { return (await runtime.assertRestrictedRuntimeRole(fresh)).restricted; } finally { await fresh.exec('set session authorization postgres; reset role'); } })()).toBe(true);
     await as(fresh, 'abos_app', async () => {
-      expect((await runtime.assertRestrictedRuntimeRole(fresh)).restricted).toBe(true);
       // The pending proposal is decided, its checkout completes with saved references.
       const d = await runtime.runtimeDecideAndEnqueue(fresh, { businessId: pending.businessId, approvalId: pending.approvalId, ownerUserId: pending.owner.userId,
         payloadHash: (await fresh.query<{ h: string }>('select payload_hash h from public.approval_requests where id=$1', [pending.approvalId])).rows[0]!.h, decision: 'APPROVED' });

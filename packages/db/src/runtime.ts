@@ -243,10 +243,21 @@ export function markWebhookProcessed(db: QueryExecutor, args: {
 }): Promise<WebhookEventProcessedRow> {
   return row(db, 'select * from private.mark_webhook_processed($1,$2,$3)', [args.businessId,args.webhookEventId,args.error ?? null]);
 }
+/** Prefix of the error update_dispatch_status raises while the send step is still QUEUED or RUNNING. */
+export const RETRYABLE_RECEIPT_ERROR_PREFIX = 'RETRY: receipt deferred';
 /**
- * A provider delivery receipt for a recorded dispatch, with no worker lease. Moves SENT to DELIVERED or
- * FAILED. A repeated, stale or out-of-order receipt, or one for a DELIVERED, FAILED or UNKNOWN dispatch,
- * returns the row unchanged; compare the returned status to learn whether it moved.
+ * True for the deferred-receipt error: nothing changed, keep the webhook unprocessed and retry it after
+ * the sender finished (including after a restart). Do not mark that webhook processed.
+ */
+export function isRetryableReceiptError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : typeof error === 'object' && error && 'message' in error ? String((error as { message: unknown }).message) : '';
+  return message.startsWith(RETRYABLE_RECEIPT_ERROR_PREFIX);
+}
+/**
+ * A provider delivery receipt for a recorded dispatch, with no worker lease. While the send step is still
+ * QUEUED or RUNNING it throws an error for which isRetryableReceiptError is true and changes nothing.
+ * Otherwise it moves SENT to DELIVERED or FAILED. A repeated, stale or out-of-order receipt, or one for a
+ * DELIVERED, FAILED or UNKNOWN dispatch, returns the row unchanged; compare the returned status.
  */
 export function updateDispatchStatus(db: QueryExecutor, args: {
   businessId: string; dispatchId: string; status: 'SENT' | 'DELIVERED' | 'FAILED';
@@ -264,7 +275,8 @@ export function runtimeRoleCheck(db: QueryExecutor): Promise<RuntimeRoleCheck> {
   return row(db, 'select * from private.runtime_role_check()', []);
 }
 /**
- * Call at server startup. Throws unless the connection is the restricted abos_app role. Any other role,
+ * Call at server startup. Throws unless both the login (session_user) and current role are abos_app and it
+ * is restricted. Any other role,
  * including one refused permission to run the check, fails closed. The message names roles only.
  */
 export async function assertRestrictedRuntimeRole(db: QueryExecutor): Promise<RuntimeRoleCheck> {
@@ -272,6 +284,8 @@ export async function assertRestrictedRuntimeRole(db: QueryExecutor): Promise<Ru
   try { check = await runtimeRoleCheck(db); } catch {
     throw new Error('Runtime role check failed: the database connection is not the restricted abos_app role');
   }
+  if (check.role_name !== 'abos_app' || check.session_role_name !== 'abos_app')
+    throw new Error(`Runtime role check failed: connected as ${check.session_role_name} with role ${check.role_name}; both must be abos_app`);
   if (!check.restricted) throw new Error(`Runtime role check failed: connected as ${check.role_name}, which is not the restricted abos_app role`);
   return check;
 }
