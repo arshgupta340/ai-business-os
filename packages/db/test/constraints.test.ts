@@ -302,6 +302,25 @@ describe('never-broken rules held by constraints', () => {
     await expect(dispatchIn('QUEUED', 'whatsapp_sandbox', key)).rejects.toThrow(UNIQUE_VIOLATION);
   });
 
+  it('message_dispatches must carry the approval and business of its execution', async () => {
+    const order = await createOrder(db, owner);
+    const approval = await createApprovedApproval(db, owner, { subject_id: order.id });
+    const otherApproval = await createApprovedApproval(db, owner);
+    const exe = await createExecution(db, owner, String(approval.id), { action_type: 'message.checkout.send', step_index: 1 });
+    const other = await createOwner(db);
+    const base = {
+      execution_id: exe.id, order_id: order.id, channel: 'surge', recipient: '+15555550123',
+      template: 'checkout_link', body_hash: hash(),
+    };
+    await expect(
+      insert(db, 'message_dispatches', { ...base, business_id: owner.businessId, approval_id: otherApproval.id, idempotency_key: hex64() }),
+    ).rejects.toThrow(/message_dispatches_execution_approval_fk/);
+    await expect(
+      insert(db, 'message_dispatches', { ...base, business_id: other.businessId, approval_id: approval.id, idempotency_key: hex64() }),
+    ).rejects.toThrow(/message_dispatches_execution_approval_fk/);
+    await insert(db, 'message_dispatches', { ...base, business_id: owner.businessId, approval_id: approval.id, idempotency_key: hex64() });
+  });
+
   it('message_dispatches cannot be marked SENT without a provider message ID', async () => {
     const d = await dispatchIn('QUEUED');
     await expect(
