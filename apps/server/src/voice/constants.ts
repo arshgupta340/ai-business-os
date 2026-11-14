@@ -36,6 +36,8 @@ export const OAI_SERVER = {
   audioCommitted: 'input_audio_buffer.committed',
   transcriptionCompleted: 'conversation.item.input_audio_transcription.completed',
   transcriptionFailed: 'conversation.item.input_audio_transcription.failed',
+  /** The model's own transcript of one response's audio, read only for the server's offer line. */
+  outputTranscriptDone: 'response.output_audio_transcript.done',
 } as const;
 
 /**

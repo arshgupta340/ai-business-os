@@ -19,7 +19,7 @@ import {
   last4,
   safeLogger,
 } from './logic';
-import { callerNumberFrom } from './consent';
+import { FULL_ATTESTATION, callerNumberFrom, textOfferAllowed } from './consent';
 import { adaptWs, checkSessionCapabilities, runPhoneRelay, withDeadline } from './relay';
 import type { CatalogItem } from '@abos/contracts';
 import type { FactsSnapshot, PinnedCall, TwilioRequestValidator, VoicePluginOptions } from './types';
@@ -65,13 +65,15 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
   // Issue #95 item 6: a call whose credential was rejected or never used can never get a stream. It is
   // ended here, so its row does not stay IN_PROGRESS and call.ended is written: `failed` when the stream
   // presented the call's token and was refused, `dropped` when no stream ever presented it.
+  // The caller's full number leaves memory as soon as the call's credential can no longer be used.
   const tokens = new StreamTokenStore<PinnedCall>(tokenTtlMs, undefined, (call, why) => {
     const reason = why === 'unused' ? 'dropped' : 'failed';
     logger.warn({ callId: call.callId, agentVersionId: call.agentVersionId, why, endReason: reason }, 'voice: stream credential can no longer be used; ending the call');
     void withDeadline(opts.calls.endCall(call.callId, reason), cleanupMs, 'failed' as const).then((r) => {
       if (r === 'failed') logger.error({ callId: call.callId }, 'voice: could not end a call whose stream never started');
     });
-  });
+  }, (call) => { delete call.callerNumber; });
+  opts.inspectTokens?.(tokens);
   // One timer per minted credential, fired just after its life ends. A credential claimed in time is not reported.
   const expiryTimers = new Set<ReturnType<typeof setTimeout>>();
   const watchExpiry = () => {
@@ -90,6 +92,15 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
   const inflight = new Map<string, Promise<Reply>>();
 
   const ok = (body: string): Reply => ({ status: 200, body });
+  const textNumberFor = (spec: PinnedCall['spec'], from: string | undefined, params: Record<string, string>): string | undefined => {
+    if (opts.messageChannel === 'qr_only') return undefined;
+    // Read from Twilio's docs on 2026-11-14, not yet seen on a real call: A attestation means the
+    // originating carrier knows the caller may use this number. Diverted and passthrough values do not count.
+    if (params.StirVerstat !== FULL_ATTESTATION) return undefined;
+    if (params.ForwardedFrom !== undefined && params.ForwardedFrom !== '') return undefined;
+    const number = callerNumberFrom(from);
+    return textOfferAllowed(spec, opts.messageChannel, number) ? number : undefined;
+  };
   const refuseReplay = (): Reply => ({ status: 409, body: buildRejectTwiml() });
 
   const rejected = (reason: WebhookRejectReason) => {
@@ -99,7 +110,7 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
   };
 
   /** B2 and B3 for one CallSid. Never mints a second credential for a call. */
-  async function admit(providerCallId: string, to: string, from: string | undefined): Promise<Reply> {
+  async function admit(providerCallId: string, to: string, from: string | undefined, params: Record<string, string>): Promise<Reply> {
     const existing = tokens.lookup(providerCallId, now());
     if (existing.kind === 'pending') return ok(buildConnectTwiml(publicUrl, existing.token));
     if (existing.kind === 'refused') {
@@ -167,10 +178,11 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
       providerCallId,
       callerLast4: last4(from),
     });
-    // PROPOSED text step: the full number from the signed webhook, kept in memory with the call only.
-    // Twilio sends a non-E.164 string such as "anonymous" when it cannot normalize the caller ID; such a
-    // call has no text step. The number is never logged: only callerLast4 is.
-    const callerNumber = callerNumberFrom(from);
+    // PROPOSED text step: the full number from the signed webhook, kept in memory with the call only,
+    // and only when this call could get the offer: the server channel sends, the spec has the message
+    // capability, Twilio reports full STIR/SHAKEN attestation, and the call was not forwarded. Under
+    // qr_only no full number is held at all. The number is never logged: only callerLast4 is.
+    const callerNumber = textNumberFor(resolution.spec, from, params);
     const token = tokens.mint(
       { callId, providerCallId, businessId: resolution.businessId, businessName: resolution.businessName, agentId: resolution.agentId, agentVersionId: resolution.agentVersionId, spec: resolution.spec, facts, ...(menu !== undefined ? { menu } : {}), ...(callerNumber !== undefined ? { callerNumber } : {}) },
       now(),
@@ -215,7 +227,7 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
 
     let pending = inflight.get(providerCallId);
     if (pending === undefined) {
-      pending = admit(providerCallId, to, params.From).catch((err: unknown) => {
+      pending = admit(providerCallId, to, params.From, params).catch((err: unknown) => {
         logger.error({ ...errorInfo(err) }, 'voice: could not admit the call');
         return ok(buildSayTwiml(CALL_SETUP_FAILED_MESSAGE));
       });

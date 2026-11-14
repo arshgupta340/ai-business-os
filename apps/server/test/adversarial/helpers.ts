@@ -236,6 +236,8 @@ export async function phoneRelay(call: PhoneCall, o: { logger: VoiceLogger; spec
   const token = tokens.mint({ callId: call.callId, providerCallId: call.providerCallId, businessId: call.businessId, businessName: call.businessName,
     agentId: call.agentId, agentVersionId: call.agentVersionId, spec: o.spec ?? call.spec, facts: call.facts, ...(o.callerNumber ? { callerNumber: o.callerNumber } : {}) }) ?? '';
   const phone = new FakeSocket();
+  // Twilio echoes outstanding marks after a clear.
+  phone.echoMarksOnClear = true;
   const models: FakeSocket[] = [];
   const relay = runPhoneRelay({ phone, tokens, calls: call.options.calls, events: call.options.events, toolsetFactory: call.options.toolsetFactory,
     openaiSocketFactory: () => { const s = new FakeSocket(); models.push(s); return s; }, messageChannel: call.options.messageChannel, logger: o.logger,

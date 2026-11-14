@@ -1,7 +1,7 @@
 // PROPOSED text step: the pure parts. The spoken-answer matcher is strict and fails closed.
 import { describe, expect, it } from 'vitest';
 import { barberSpecV1, pizzaSpecV2 } from '@abos/contracts/fixtures';
-import { callerNumberFrom, matchSpokenAnswer, spacedLast4, textOfferAllowed } from '../../src/voice/consent';
+import { callerNumberFrom, matchSpokenAnswer, offerLineSpoken, spacedLast4, textOfferAllowed } from '../../src/voice/consent';
 import { specWith } from './helpers';
 
 describe('matchSpokenAnswer', () => {
@@ -28,6 +28,17 @@ describe('matchSpokenAnswer', () => {
     ['Absolutely.', 'agreed'],
     ['Of course.', 'agreed'],
     ['Yes please do', 'agreed'],
+    ['Yes, text me.', 'agreed'],
+    ['Yes, send me the link.', 'agreed'],
+    ['Yes, please send it.', 'agreed'],
+    ['Text me.', 'agreed'],
+    // A question is never an answer (Codex 5).
+    ['Yes?', 'unclear'],
+    ['Sure?', 'unclear'],
+    ['Okay?', 'unclear'],
+    ['Yes, text me?', 'unclear'],
+    ["Yes, don't text me.", 'unclear'],
+    ['No, text me later.', 'unclear'],
     // Clear negatives.
     ['no', 'declined'],
     ['No.', 'declined'],
@@ -112,5 +123,25 @@ describe('textOfferAllowed', () => {
 
   it('spaces the last four digits', () => {
     expect(spacedLast4('+15555553716')).toBe('3 7 1 6');
+  });
+});
+
+describe('offerLineSpoken (Opus B2)', () => {
+  const OFFER = 'Would you like one text message with your payment link, sent to the number you are calling from, ending in 3 7 1 6?';
+  it.each([
+    [OFFER, true],
+    ['Would you like one text message with your payment link, sent to the number you are calling from, ending in 3716?', true],
+    ['Would you like one text message with your payment link, sent to the number you are calling from, ending in three seven one six?', true],
+    ['Would you like one text message with your payment link, sent to the number you are calling from, ending in 3 7 1 5?', false],
+    ['Shall I send this to the shop for approval?', false],
+    ['Would you like a text?', false],
+    ['', false],
+  ])('%j is %s', (said, expected) => {
+    expect(offerLineSpoken('offer', said, '3716')).toBe(expected);
+  });
+  it('the re-ask needs its question', () => {
+    expect(offerLineSpoken('reask', 'Sorry, was that a yes or a no? You can also press 1 for yes or 2 for no.', '3716')).toBe(true);
+    expect(offerLineSpoken('reask', 'Okay, great.', '3716')).toBe(false);
+    expect(offerLineSpoken('offer', undefined, '3716')).toBe(false);
   });
 });

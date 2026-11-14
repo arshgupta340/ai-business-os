@@ -103,10 +103,14 @@ describe('voice prompt: the text step', () => {
     expect(text.length).toBeLessThan(5000);
   });
 
-  it('under qr_only a text offer is ignored and the prompt is exactly the counter-only prompt', () => {
-    const plain = buildInstructions(pizzaSpecV2, { ...pizza, messageChannel: 'qr_only' });
-    expect(buildInstructions(pizzaSpecV2, { ...pizza, messageChannel: 'qr_only', textOffer: { last4: '3716' } })).toBe(plain);
-    expect(buildInstructions(barberSpecV1, { businessName: 'B', messageChannel: 'qr_only', textOffer: { last4: '3716' } })).toBe(buildInstructions(barberSpecV1, { businessName: 'B', messageChannel: 'qr_only' }));
+  // The qr_only default is compared with origin/main's own output in golden.test.ts.
+
+  it('B5: never says a message is cancelled unless the server said so, and only asks for 2 before the request is sent', () => {
+    const text = buildInstructions(pizzaSpecV2, offer);
+    expect(text).toContain('Never tell the caller a message is cancelled or will not be sent unless a server status said so');
+    expect(text).toContain('before you send the order to the shop, tell them to press 2');
+    expect(text).toContain('Once the order was sent, do not ask them to press anything');
+    expect(consentResultInstruction('restaurant_order_taker', 'surge', '3716', 'already_sent')).toContain('already went to the shop with the text message. You can tell the shop at pickup.');
   });
 
   it('without a text offer the prompt is unchanged whatever the channel', () => {

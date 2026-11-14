@@ -22,7 +22,8 @@ const AFFIRMATIVE_WORDS = new Set(['yes', 'yeah', 'yep', 'yup', 'sure', 'okay', 
 const AFFIRMATIVE_PHRASES = new Set([
   'yes', 'yeah', 'yep', 'yup', 'yes please', 'yeah please', 'sure', 'sure thing', 'okay', 'ok', 'please do',
   'that works', 'go ahead', 'absolutely', 'definitely', 'of course', 'sounds good', 'thats fine', 'that is fine',
-  'yes thanks', 'yes thank you', 'send it', 'please', 'yes sir', 'yes maam', 'alright', 'all right',
+  'yes thanks', 'yes thank you', 'send it', 'please send it', 'please', 'yes sir', 'yes maam', 'alright', 'all right',
+  'text me', 'text it to me', 'send me the link', 'send me a text', 'send me the text',
 ]);
 
 /** Lower case, apostrophes dropped ("don't" is "dont"), every other mark a space. */
@@ -41,7 +42,7 @@ function isAffirmativeSequence(words: string[]): boolean {
   const best: number[] = Array(words.length + 1).fill(Infinity);
   best[0] = 0;
   for (let end = 1; end <= words.length; end++) {
-    for (let start = Math.max(0, end - 3); start < end; start++) {
+    for (let start = Math.max(0, end - 4); start < end; start++) {
       if (best[start] !== Infinity && AFFIRMATIVE_PHRASES.has(words.slice(start, end).join(' '))) best[end] = Math.min(best[end]!, best[start]! + 1);
     }
   }
@@ -56,6 +57,8 @@ function isAffirmativeSequence(words: string[]): boolean {
  */
 export function matchSpokenAnswer(transcript: string | undefined): SpokenAnswer {
   if (transcript === undefined) return 'unclear';
+  // A question ("yes?", "sure?") asks for clarification. Checked before punctuation is dropped.
+  if (/[?？¿]/.test(transcript)) return 'unclear';
   const all = normalizeAnswer(transcript);
   if (all.length === 0 || all.length > MAX_ANSWER_WORDS) return 'unclear';
   const words = all.filter((w) => !FILLER.has(w));
@@ -66,6 +69,9 @@ export function matchSpokenAnswer(transcript: string | undefined): SpokenAnswer 
   if (negated) return leansYes ? 'unclear' : 'declined';
   return isAffirmativeSequence(words) ? 'agreed' : 'unclear';
 }
+
+/** Twilio's `StirVerstat` for full (A) attestation on an incoming call. Read from Twilio's docs on 2026-11-14; untested. */
+export const FULL_ATTESTATION = 'TN-Validation-Passed-A';
 
 /** The caller's full number from the signed webhook's `From`, or undefined when it is not a usable E.164 number. */
 export function callerNumberFrom(from: string | undefined): string | undefined {
@@ -89,4 +95,24 @@ export function textOfferAllowed(spec: Pick<AgentSpec, 'template' | 'capabilitie
 /** "3 7 1 6": the last four digits spaced, so the model reads them one by one. */
 export function spacedLast4(number: string): string {
   return number.replace(/\D/g, '').slice(-4).split('').join(' ');
+}
+
+const DIGIT_WORDS: Record<string, string> = { zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9' };
+
+/** Lower-case letters and digits only, with spoken digits turned into digits. */
+function compact(text: string): string {
+  return normalizeAnswer(text).map((w) => DIGIT_WORDS[w] ?? w).join('');
+}
+
+/**
+ * Whether the model's own output transcript for the offer response carries the fixed line: for the
+ * offer, its key phrase and the last four digits; for the re-ask, "yes or a no". Model output, used
+ * in memory only and never logged.
+ */
+export function offerLineSpoken(line: 'offer' | 'reask', transcript: string | undefined, last4: string): boolean {
+  if (transcript === undefined) return false;
+  const said = compact(transcript);
+  if (line === 'reask') return said.includes('yesorano');
+  const digits = last4.replace(/\D/g, '');
+  return digits.length === 4 && said.includes('wouldyoulike') && said.includes('numberyouarecallingfrom') && said.includes(digits);
 }

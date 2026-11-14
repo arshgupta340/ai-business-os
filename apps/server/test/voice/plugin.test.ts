@@ -6,7 +6,8 @@ import WebSocket from 'ws';
 import type { CatalogItem } from '@abos/contracts';
 import { barberSpecV1, pizzaCatalog, pizzaSpecV2 } from '@abos/contracts/fixtures';
 import { createTwilioRequestValidator, voicePlugin } from '../../src/voice/plugin';
-import type { FactsSnapshot, LiveAgentResolution, VoicePluginOptions } from '../../src/voice/types';
+import type { FactsSnapshot, LiveAgentResolution, PinnedCall, VoicePluginOptions } from '../../src/voice/types';
+import type { StreamTokenStore } from '../../src/voice/logic';
 import { FakeSocket, PIZZA_SNAPSHOT, fakeCalls, fakeEvents, fakeLogger, fakeToolset, specWith } from './helpers';
 
 const PUBLIC_URL = 'https://demo.example.test';
@@ -20,7 +21,7 @@ afterEach(async () => {
   app = undefined;
 });
 
-async function build(opts: { resolution?: LiveAgentResolution; facts?: () => Promise<FactsSnapshot>; menu?: () => Promise<CatalogItem[]>; menuTimeoutMs?: number; validator?: VoicePluginOptions['twilioValidator']; rootWebsocket?: boolean; tokenTtlMs?: number } = {}) {
+async function build(opts: { resolution?: LiveAgentResolution; facts?: () => Promise<FactsSnapshot>; menu?: () => Promise<CatalogItem[]>; menuTimeoutMs?: number; validator?: VoicePluginOptions['twilioValidator']; rootWebsocket?: boolean; tokenTtlMs?: number; channel?: VoicePluginOptions['messageChannel']; inspectTokens?: VoicePluginOptions['inspectTokens'] } = {}) {
   const calls = fakeCalls();
   let resolution = opts.resolution ?? live;
   const liveAgent = { resolve: vi.fn(async () => resolution) };
@@ -41,7 +42,7 @@ async function build(opts: { resolution?: LiveAgentResolution; facts?: () => Pro
   app = Fastify();
   // The app may register the WebSocket plugin at the root; the voice plugin then reuses it.
   if (opts.rootWebsocket !== false) await app.register(websocket);
-  await app.register(voicePlugin, { publicServerUrl: `${PUBLIC_URL}/`, liveAgent, facts, ...(menu ? { menu } : {}), ...(opts.menuTimeoutMs !== undefined ? { menuTimeoutMs: opts.menuTimeoutMs } : {}), calls, events, toolsetFactory, twilioValidator, openaiSocketFactory, messageChannel: 'surge', logger, twilioBusinessId: 'biz_pizza_01', ...(opts.tokenTtlMs ? { tokenTtlMs: opts.tokenTtlMs } : {}) });
+  await app.register(voicePlugin, { publicServerUrl: `${PUBLIC_URL}/`, liveAgent, facts, ...(menu ? { menu } : {}), ...(opts.menuTimeoutMs !== undefined ? { menuTimeoutMs: opts.menuTimeoutMs } : {}), calls, events, toolsetFactory, twilioValidator, openaiSocketFactory, messageChannel: opts.channel ?? 'surge', logger, twilioBusinessId: 'biz_pizza_01', ...(opts.tokenTtlMs ? { tokenTtlMs: opts.tokenTtlMs } : {}), ...(opts.inspectTokens ? { inspectTokens: opts.inspectTokens } : {}) });
   await app.ready();
   const a = app;
   const post = (signature = 'good', form = FORM) =>
@@ -445,59 +446,87 @@ it('never reflects private URLs or malformed bodies through HTTP errors on voice
 });
 
 // PROPOSED text step (SPEC 2.9 "Consent evidence on a phone call"): the caller's number comes only from
-// the signed webhook's From, travels with the pinned call in memory, and is never logged.
+// the signed webhook's From, only when Twilio reports full attestation and no forwarding, only when the
+// call could get the offer, and it is removed from memory when the call's credential is ended.
 describe('voice plugin: the caller number for the text step', () => {
-  const pinnedVia = async (t: Awaited<ReturnType<typeof build>>, form: string) => {
+  const ATTESTED = `${FORM}&StirVerstat=TN-Validation-Passed-A`;
+  const startStream = async (t: Awaited<ReturnType<typeof build>>, form: string) => {
     const token = tokenOf((await t.post('good', form)).body);
     const ws = await t.app.injectWS('/ws/phone');
     ws.send(JSON.stringify({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ1', customParameters: { streamToken: token } } }));
     await vi.waitFor(() => expect(t.sockets).toHaveLength(1));
     t.sockets[0]?.open();
     const update = t.sockets[0]?.ofType('session.update')[0] as { session: { instructions: string } };
+    return { ws, text: update.session.instructions };
+  };
+  const pinnedVia = async (t: Awaited<ReturnType<typeof build>>, form: string) => {
+    const { ws, text } = await startStream(t, form);
     ws.terminate();
-    return update.session.instructions;
+    return text;
   };
 
-  it('a valid E.164 From is pinned: the prompt has the text step and only the last four digits', async () => {
+  it('an attested, unforwarded E.164 From is pinned: the prompt has the text step and only the last four digits', async () => {
     const t = await build();
-    const text = await pinnedVia(t, FORM);
+    const text = await pinnedVia(t, ATTESTED);
     expect(text).toContain('The server asks once');
     expect(text).toContain('ending in 0 1 2 3');
-    expect(text).not.toContain('+15555550123');
     expect(text).not.toContain('5555550123');
     expect(JSON.stringify(t.lines)).not.toContain('5555550123');
     expect(t.calls.startCall).toHaveBeenCalledWith(expect.objectContaining({ callerLast4: '0123' }));
   });
 
   it.each([
-    ['anonymous', 'anonymous'],
-    ['restricted', 'Restricted'],
-    ['no plus sign', '15555550123'],
-    ['too short', '+1555'],
-    ['letters', '+1555CALLME'],
-    ['empty', ''],
-  ])('a %s From is not pinned: the call has no text step', async (_label, from) => {
-    const t = await build();
-    const text = await pinnedVia(t, `CallSid=CA123&From=${encodeURIComponent(from)}&To=%2B15555550199`);
+    ['no attestation', FORM],
+    ['B attestation', `${FORM}&StirVerstat=TN-Validation-Passed-B`],
+    ['diverted A attestation', `${FORM}&StirVerstat=TN-Validation-Passed-A-Diverted`],
+    ['failed attestation', `${FORM}&StirVerstat=TN-Validation-Failed-A`],
+    ['a forwarded call', `${ATTESTED}&ForwardedFrom=%2B15555550111`],
+    ['an anonymous From', 'CallSid=CA123&From=anonymous&To=%2B15555550199&StirVerstat=TN-Validation-Passed-A'],
+    ['a malformed From', 'CallSid=CA123&From=15555550123&To=%2B15555550199&StirVerstat=TN-Validation-Passed-A'],
+    ['a missing From', 'CallSid=CA123&To=%2B15555550199&StirVerstat=TN-Validation-Passed-A'],
+  ])('%s is not pinned: the call has no text step and holds no full number', async (_label, form) => {
+    let store: StreamTokenStore<PinnedCall> | undefined;
+    const t = await build({ inspectTokens: (s) => { store = s; } });
+    const text = await pinnedVia(t, form);
     expect(text).toContain('Do not ask for a number');
-    expect(text).not.toContain('The server asks once');
+    expect(store?.valueOf('CA123')?.callerNumber).toBeUndefined();
   });
 
-  it('a missing From is not pinned', async () => {
-    const t = await build();
-    const text = await pinnedVia(t, 'CallSid=CA123&To=%2B15555550199');
-    expect(text).toContain('Do not ask for a number');
+  it('D1: under qr_only no full number is held anywhere after admit, even for an attested caller', async () => {
+    let store: StreamTokenStore<PinnedCall> | undefined;
+    const t = await build({ channel: 'qr_only', inspectTokens: (s) => { store = s; } });
+    expect((await t.post('good', ATTESTED)).statusCode).toBe(200);
+    expect(store?.valueOf('CA123')).toBeDefined();
+    expect(JSON.stringify(store?.valueOf('CA123'))).not.toContain('5555550123');
   });
 
-  it('B1: a signed retry still gets the same token, and the pinned number is the first delivery\'s', async () => {
+  it('D1: in the eligible case the number is pinned for the call and gone once the call ends', async () => {
+    let store: StreamTokenStore<PinnedCall> | undefined;
+    const t = await build({ inspectTokens: (s) => { store = s; } });
+    const { ws } = await startStream(t, ATTESTED);
+    expect(store?.valueOf('CA123')?.callerNumber).toBe('+15555550123');
+    ws.send(JSON.stringify({ event: 'stop' }));
+    await vi.waitFor(() => expect(t.calls.endCall).toHaveBeenCalledWith('call_test_01', 'completed'));
+    ws.terminate();
+    expect(store?.valueOf('CA123')).toBeDefined();
+    expect(store?.valueOf('CA123')?.callerNumber).toBeUndefined();
+    expect(JSON.stringify(store?.valueOf('CA123'))).not.toContain('5555550123');
+  });
+
+  it('B1: a signed retry with a different From gets the same token, and the first delivery\'s number stays pinned', async () => {
     const authToken = 'test_auth_token_value';
     const validator = createTwilioRequestValidator(authToken);
-    const first = { CallSid: 'CA123', From: '+15555550123', To: '+15555550199' };
-    const t = await build({ validator });
-    const a = await t.post(twilio.getExpectedTwilioSignature(authToken, `${PUBLIC_URL}/webhooks/twilio/voice`, first), new URLSearchParams(first).toString());
-    const b = await t.post(twilio.getExpectedTwilioSignature(authToken, `${PUBLIC_URL}/webhooks/twilio/voice`, first), new URLSearchParams(first).toString());
+    const first = { CallSid: 'CA123', From: '+15555550123', To: '+15555550199', StirVerstat: 'TN-Validation-Passed-A' };
+    const second = { ...first, From: '+15555550888' };
+    let store: StreamTokenStore<PinnedCall> | undefined;
+    const t = await build({ validator, inspectTokens: (s) => { store = s; } });
+    const sign = (p: Record<string, string>) => twilio.getExpectedTwilioSignature(authToken, `${PUBLIC_URL}/webhooks/twilio/voice`, p);
+    const a = await t.post(sign(first), new URLSearchParams(first).toString());
+    const b = await t.post(sign(second), new URLSearchParams(second).toString());
+    expect(b.statusCode).toBe(200);
     expect(tokenOf(b.body)).toBe(tokenOf(a.body));
     expect(t.calls.startCall).toHaveBeenCalledTimes(1);
-    expect(JSON.stringify(t.lines)).not.toContain('5555550123');
+    expect(store?.valueOf('CA123')?.callerNumber).toBe('+15555550123');
+    expect(JSON.stringify(t.lines)).not.toMatch(/5555550123|5555550888/);
   });
 });

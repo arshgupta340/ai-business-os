@@ -50,8 +50,8 @@ const TEXT_READBACK_LINE = 'Message consent requires trusted call evidence, whic
 const TEXT_READBACK_BOOKING_LINE = 'Message consent requires trusted call evidence, which only the server records. Never claim a message will follow unless a server status said the caller agreed to it.';
 /** The text step from the agent's side. The server asks; the agent never does. */
 const TEXT_STEP_LINE = 'Never ask for a phone number and never ask on your own whether the caller wants a message. The server asks once, through a server status, and then tells you the answer in another server status.';
-const TEXT_CHANGE_ORDER_LINE = 'If the caller changes their mind about the message after agreeing, tell them to press 2 on the keypad, or that the shop can show the link at the counter instead.';
-const TEXT_CHANGE_BOOKING_LINE = 'If the caller changes their mind about the message after agreeing, tell them to press 2 on the keypad.';
+const TEXT_CHANGE_ORDER_LINE = 'Never tell the caller a message is cancelled or will not be sent unless a server status said so. If the caller changes their mind about the message before you send the order to the shop, tell them to press 2 on the keypad. Once the order was sent, do not ask them to press anything: say the request already went to the shop with the message, and they can tell the shop at pickup.';
+const TEXT_CHANGE_BOOKING_LINE = 'Never tell the caller a message is cancelled or will not be sent unless a server status said so. If the caller changes their mind about the message before you send the booking to the shop, tell them to press 2 on the keypad. Once the booking was sent, do not ask them to press anything: say the request already went to the shop with the message, and they can tell the shop when they arrive.';
 
 /** "3 7 1 6": spaced so the model reads the digits one by one. */
 function spaced(last4: string): string {
@@ -77,13 +77,22 @@ export function consentOfferInstruction(template: AgentSpec['template'], channel
 }
 
 /** PROPOSED text step: the result the server observed, spoken next. */
-export function consentResultInstruction(template: AgentSpec['template'], channel: MessageChannelSetting, last4: string, outcome: 'agreed' | 'declined' | 'withdrawn'): string {
+export function consentResultInstruction(template: AgentSpec['template'], channel: MessageChannelSetting, last4: string, outcome: 'agreed' | 'declined' | 'withdrawn' | 'already_sent' | 'not_for_this_request'): string {
   const word = channelWord(channel);
   const booking = template === 'appointment_booker';
   if (outcome === 'agreed') {
     return booking
       ? `Server status: the caller agreed to one ${word}. Continue the booking. When you read the booking back, say the confirmation will come by ${word} to the number ending in ${spaced(last4)}.`
       : `Server status: the caller agreed to one ${word}. Continue the order. When you read the order back, say the payment link will be sent by ${word} to the number ending in ${spaced(last4)}.`;
+  }
+  if (outcome === 'already_sent') {
+    const when = booking ? 'when you arrive' : 'at pickup';
+    return `Server status: the caller pressed 2, but the request already went to the shop with the ${word}. Say: "Your request already went to the shop with the ${word}. You can tell the shop ${when}." Then continue.`;
+  }
+  if (outcome === 'not_for_this_request') {
+    return booking
+      ? `Server status: this new request goes to the shop without a ${word}; the caller's one ${word} was for the earlier request. Tell the caller the shop will confirm this one without a message.`
+      : `Server status: this new request goes to the shop without a ${word}; the caller's one ${word} was for the earlier request. Tell the caller the payment link for this one will be shown at the counter.`;
   }
   const lead = outcome === 'withdrawn' ? `Server status: the caller pressed 2, so no ${word} will be sent.` : `Server status: the caller did not agree to a ${word}. Do not offer one again.`;
   return booking

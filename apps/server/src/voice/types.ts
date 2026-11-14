@@ -132,8 +132,9 @@ export type PinnedCall = {
   /** The menu read when the call was pinned, for the prompt only. Absent when it could not be read. */
   menu?: readonly CatalogItem[] | undefined;
   /**
-   * The caller's full E.164 number from the signed webhook's `From`, for the text step only. Held in
-   * memory with the call. Never logged, never in an event, never sent to the model (only its last four
+   * The caller's full E.164 number from the signed webhook's `From`, for the text step only. Pinned only
+   * when the call could get the offer (channel sends, spec capability, A attestation, not forwarded) and
+   * removed when the call's credential is ended or unusable. Held in memory with the call. Never logged, never in an event, never sent to the model (only its last four
    * digits), and stored only inside a proposal after the caller consented. Absent for anonymous,
    * restricted or malformed callers: those calls have no text step.
    */
@@ -216,4 +217,6 @@ export type VoicePluginOptions = {
   now?: (() => number) | undefined;
   tokenTtlMs?: number | undefined;
   limits?: Partial<RelayLimits> | undefined;
+  /** Tests only: receives the plugin's stream credential store, so a test can inspect what stays pinned. */
+  inspectTokens?: ((store: import('./logic').StreamTokenStore<PinnedCall>) => void) | undefined;
 };

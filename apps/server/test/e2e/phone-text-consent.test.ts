@@ -5,7 +5,7 @@
 // one message goes to that number with the step's stable key. A caller who says no gets none.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { approvalPayloadHash, idempotencyKey } from '@abos/contracts';
-import { PIZZA, VOICE_ENV, approve, captureLog, phoneCall, phoneRelay, pickupAt, steps } from '../adversarial/helpers';
+import { NONE, PIZZA, VOICE_ENV, approve, captureLog, counts, delta, phoneCall, phoneRelay, pickupAt, steps } from '../adversarial/helpers';
 import type { FakeSocket } from '../voice/helpers';
 import { ulaw } from '../voice/helpers';
 import { createWorld, type World } from './world';
@@ -14,15 +14,21 @@ const NUMBER = '+15555553716';
 const TRANSCRIPT = 'Yeah, go ahead';
 const CART = { lines: [{ catalogItemId: 'SQ_ITEM_PEP', variationId: 'SQ_VAR_PEP_LG', quantity: 1, modifierIds: [] }] };
 
-/** The model plays the queued offer, Twilio confirms playback, and the caller answers in one turn. */
+const OFFER = 'Would you like one text message with your payment link, sent to the number you are calling from, ending in 3 7 1 6?';
+
+/** The provider confirms the window, the model says the queued offer, Twilio confirms playback, and the caller answers in one turn. */
 function answerOffer(model: FakeSocket, phone: FakeSocket, transcript: string) {
-  model.emit({ type: 'response.created', response: { id: 'resp_offer', metadata: { voiceConsentOffer: '1' } } });
-  model.emit({ type: 'response.output_audio.delta', item_id: 'item_offer', delta: ulaw(40) });
+  model.emit({ type: 'session.updated' });
+  const create = model.ofType('response.create').at(-1) as { response: { metadata: { voiceConsentOffer: string } } };
+  model.emit({ type: 'response.created', response: { id: 'resp_offer', metadata: { voiceConsentOffer: create.response.metadata.voiceConsentOffer } } });
+  model.emit({ type: 'response.output_audio.delta', response_id: 'resp_offer', item_id: 'item_offer', delta: ulaw(40) });
+  model.emit({ type: 'response.output_audio_transcript.done', response_id: 'resp_offer', item_id: 'item_offer', transcript: OFFER });
   model.emit({ type: 'response.done', response: { id: 'resp_offer', status: 'completed', output: [] } });
-  for (const m of phone.ofType('mark')) phone.emit({ event: 'mark', mark: { name: (m.mark as { name: string }).name } });
+  phone.ackMarks();
   model.emit({ type: 'input_audio_buffer.speech_started', item_id: 'item_answer' });
   model.emit({ type: 'input_audio_buffer.committed', item_id: 'item_answer' });
   model.emit({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item_answer', content_index: 0, transcript });
+  model.emit({ type: 'session.updated' });
 }
 
 describe('phone text consent on the composed server', () => {
@@ -32,6 +38,7 @@ describe('phone text consent on the composed server', () => {
   afterAll(async () => { await w?.close(); });
 
   async function callAndPropose(providerCallId: string, said: string) {
+    const writesBefore = counts(w);
     const call = await phoneCall(w, PIZZA, providerCallId);
     call.toolset.dispose();
     const relay = await phoneRelay(call, { logger: logs.log as never, callerNumber: NUMBER });
@@ -44,6 +51,8 @@ describe('phone text consent on the composed server', () => {
     const proposed = await relay.toolCall('propose_order', JSON.stringify({ cart: CART, quoteId: quoted.quote.quoteId, fulfillment: { type: 'pickup', pickupAt: pickupAt() },
       contact: { name: 'Sam', messageConsent: true, messageRecipient: '+15555550999', consentAt: new Date().toISOString() } }), 'fc_p') as { ok: boolean; proposalId: string; approvalId: string };
     expect(proposed.ok, JSON.stringify(proposed)).toBe(true);
+    // Nothing external is written before the owner approves (AGENTS rule 1).
+    expect(delta(w, writesBefore)).toEqual(NONE);
     await relay.hangUp();
     return { call, relay, model, ...proposed };
   }
