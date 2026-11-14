@@ -246,6 +246,30 @@ describe('extraction stores on Postgres', () => {
     });
   });
 
+  it('facts and conflicts come back in the order they were saved, whatever their IDs and the builder clock say', async () => {
+    const files = dbFileStore(h.db);
+    const facts = dbUploadFactStore(h.db);
+    const conflicts = dbConflictStore(h.db);
+    const bytes = Buffer.from('%PDF-1.4 a file whose rows must keep their order');
+    await files.put(file('file_order', bytes), bytes);
+    // One builder timestamp for every row (its clock has whole seconds) and IDs that sort the other way round.
+    const at = '2026-11-14T10:00:00Z';
+    const ids = ['z', 'm', 'a', 'q', 'c', 'x', 'b'];
+    for (const id of ids) await facts.insertDraft(draft(`fact_order_${id}`, 'file_order', { kind: 'hours', key: `day_${id}`, createdAt: at, updatedAt: at }));
+    for (const id of ids) await conflicts.insert(conflict(`cfl_order_${id}`, `day_${id}`, `fact_order_${id}`, { kind: 'hours', required: false, createdAt: at }));
+    const factIds = ids.map((id) => `fact_order_${id}`);
+    const conflictIds = ids.map((id) => `cfl_order_${id}`);
+    expect((await facts.listByFile('biz_a', 'file_order')).map((f) => f.id)).toEqual(factIds);
+    expect((await conflicts.listByFactIds('biz_a', [...factIds].reverse())).map((c) => c.id)).toEqual(conflictIds);
+    expect((await conflicts.listOpen('biz_a')).map((c) => c.id).filter((id) => id.startsWith('cfl_order_'))).toEqual(conflictIds);
+    // A resolve does not move a conflict in its file's list.
+    await conflicts.resolve('biz_a', 'cfl_order_m', { resolvedBy: 'usr_a', resolvedAt: NOW() });
+    expect((await conflicts.listByFactIds('biz_a', factIds)).map((c) => c.id)).toEqual(conflictIds);
+    // The stored time is the database's, not the builder's.
+    const [row] = await rows("select extract(epoch from (clock_timestamp() - created_at))::float as age from business_facts where id = 'fact_order_z'");
+    expect(row!.age as number).toBeLessThan(60);
+  });
+
   it('the catalog reader returns the variations of one business only', async () => {
     const reader = dbCatalogReader(h.db);
     const a = await reader.listVariations('biz_a');
