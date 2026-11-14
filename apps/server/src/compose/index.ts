@@ -128,6 +128,8 @@ export interface ComposedServer {
 
 /** For server-side reads that no caller can cancel (the voice worker's pinned snapshot, sim-call). */
 const NO_SIGNAL = new AbortController().signal;
+/** The most menu items written into the phone prompt. A longer menu is cut by the prompt size cap. */
+const VOICE_MENU_LIMIT = 60;
 const defaultNewId = (prefix: string) => `${prefix}${randomUUID().replaceAll('-', '')}`;
 const silentLog: SeamDeps['log'] = { info() {}, warn() {}, error() {} };
 
@@ -290,6 +292,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     ? { ok: true, options: {
       publicServerUrl: env.PUBLIC_SERVER_URL, liveAgent: dbLiveAgentPort(db), calls,
       facts: { snapshot: (businessId) => facts.readVerified({ businessId, signal: NO_SIGNAL }) },
+      menu: { snapshot: (businessId) => toolsetPorts.catalog.search({ businessId, limit: VOICE_MENU_LIMIT, signal: NO_SIGNAL }) },
       events: dbVoiceEventsPort(db, newId, now, env.TWILIO_PHONE_NUMBER),
       toolsetFactory: (ctx) => { const ts = toolsetFor(ctx); return { handler: ts.handler, dispose: () => ts.dispose() }; },
       twilioValidator: providers.twilioValidator,

@@ -1,6 +1,6 @@
 // Ports the phone voice worker needs. Each is implemented elsewhere (the live_agent, calls and
 // activity_events tables, the real toolset, Twilio, OpenAI) and injected, so tests can pass fakes.
-import type { ActivityEventPayloads, AgentSpec, CallEndReason, CallStage, CallStatus, CapabilityId, MessageChannelSetting, ToolHandler } from '@abos/contracts';
+import type { ActivityEventPayloads, AgentSpec, CallEndReason, CatalogItem, CallStage, CallStatus, CapabilityId, MessageChannelSetting, ToolHandler } from '@abos/contracts';
 import type { FactsSnapshot } from '../tools/real/types';
 
 export type { FactsSnapshot };
@@ -124,6 +124,8 @@ export type PinnedCall = {
   agentVersionId: string;
   spec: AgentSpec;
   facts: FactsSnapshot;
+  /** The menu read when the call was pinned, for the prompt only. Absent when it could not be read. */
+  menu?: readonly CatalogItem[] | undefined;
 };
 
 /** Deadlines and bounds of one relay, in milliseconds or counts. */
@@ -159,11 +161,20 @@ export type RelayLimits = {
   goodbyeMaxMs: number;
 };
 
+/** The cached menu of a business (`catalog_items`, P-10). */
+export interface VoiceMenuPort {
+  snapshot(businessId: string): Promise<CatalogItem[]>;
+}
+
 export type VoicePluginOptions = {
   /** Public https origin Twilio reaches, for example the tunnel URL. Used for the signature URL and the stream URL. */
   publicServerUrl: string;
   liveAgent: LiveAgentPort;
   facts: VoiceFactsPort;
+  /** Reads the cached menu of a business when a call is pinned, so the agent knows it from the first word. Display only: totals still come from quote_order. */
+  menu?: VoiceMenuPort | undefined;
+  /** The longest the webhook waits for the menu before the call goes on without it. Defaults to 1500. */
+  menuTimeoutMs?: number | undefined;
   calls: CallsPort;
   events: VoiceEventsPort;
   decisions?: CallDecisionsPort | undefined;
