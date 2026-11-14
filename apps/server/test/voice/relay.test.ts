@@ -73,7 +73,8 @@ describe('voice relay: session start', () => {
     expect(update.session.tools.map((t) => t.name).sort()).toEqual(['get_order_status', 'propose_order', 'quote_order', 'read_business_facts', 'read_catalog']);
     expect(String(update.session.instructions)).toContain('You are speaking with an AI assistant');
     expect(s.openai().ofType('response.create')).toHaveLength(1);
-    expect(s.toolsetFactory).toHaveBeenCalledWith({ businessId: 'biz_pizza_01', agentVersionId: 'agv_pizza_01_v2', callId: 'call_test_01', capabilities: pizzaSpecV2.capabilities, facts: PIZZA_SNAPSHOT });
+    expect(s.toolsetFactory).toHaveBeenCalledWith({ businessId: 'biz_pizza_01', agentVersionId: 'agv_pizza_01_v2', callId: 'call_test_01', capabilities: pizzaSpecV2.capabilities, facts: PIZZA_SNAPSHOT,
+      consent: { callId: 'call_test_01', agentVersionId: 'agv_pizza_01_v2', read: expect.any(Function) } });
     s.phone.emit({ event: 'stop' });
     await s.relay.done;
   });

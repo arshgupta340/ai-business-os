@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 // or external_message capability, and the module refuses to load if the tool table maps to one.
 import {
   CAPABILITIES,
+  E164Schema,
   HoursValueSchema,
   ServiceOfferingSchema,
   TOOL_CAPABILITY,
@@ -33,7 +34,7 @@ import {
   type Toolset,
 } from '@abos/contracts';
 import { localDay, localToEpoch, weekdayOfLocalDate } from './time';
-import type { FactsSnapshot, PortContext, RealToolset, RealToolsetDeps, InvocationControl, SafeTraceInput, SafeTraceOutput } from './types';
+import type { ConsentEvidence, FactsSnapshot, PortContext, RealToolset, RealToolsetDeps, InvocationControl, SafeTraceInput, SafeTraceOutput } from './types';
 
 export type * from './types';
 
@@ -145,8 +146,31 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
     return { ok: true, quote: r.quote };
   }
 
-  // No trusted read-back/affirmative-turn integration exists yet. The model cannot certify consent.
-  const channelFor = (_consent: boolean): MessageChannelSetting => 'qr_only';
+  /**
+   * PROPOSED (SPEC 2.9 "Consent evidence on a phone call"): the only consent this toolset accepts is
+   * server-held evidence from the phone relay, read through `deps.consent`, for this exact call and
+   * version, while the server channel sends messages. The model's `messageConsent`, `messageRecipient`
+   * and `consentAt` are never read. Without valid evidence the proposal is `qr_only` with no recipient.
+   */
+  function trustedConsent(ctx: ToolContext): ConsentEvidence | undefined {
+    const source = deps.consent;
+    if (source === undefined || deps.messageChannel === 'qr_only') return undefined;
+    if (ctx.callId === undefined || ctx.callId !== source.callId || ctx.agentVersionId !== source.agentVersionId) return undefined;
+    let e: ConsentEvidence | undefined;
+    try {
+      e = source.read();
+    } catch {
+      return undefined;
+    }
+    if (e === undefined || e.callId !== source.callId || e.agentVersionId !== source.agentVersionId) return undefined;
+    if (e.method !== 'spoken' && e.method !== 'keypad') return undefined;
+    if (!E164Schema.safeParse(e.recipient).success) return undefined;
+    const spoken = Date.parse(e.offerSpokenAt);
+    const agreed = Date.parse(e.consentAt);
+    if (!Number.isFinite(spoken) || !Number.isFinite(agreed) || agreed < spoken) return undefined;
+    return { ...e };
+  }
+  const channelFor = (consent: ConsentEvidence | undefined): MessageChannelSetting => (consent === undefined ? 'qr_only' : deps.messageChannel);
   const live = (op: Invocation) => !op.controller.signal.aborted && !disposed;
 
   // ---- The seven tools ----
@@ -211,7 +235,10 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
       if (where === 'unknown') return fail('VALIDATION_FAILED', NO_HOURS);
       if (where === 'outside') return fail('VALIDATION_FAILED', 'The pickup time is outside opening hours.');
 
-      const contact: Contact = { name: input.contact.name, messageConsent: false };
+      const consent = trustedConsent(ctx);
+      const contact: Contact = consent === undefined
+        ? { name: input.contact.name, messageConsent: false }
+        : { name: input.contact.name, messageRecipient: consent.recipient, messageConsent: true, consentAt: consent.consentAt };
 
       if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
       if (ports.proposals.atomicOperations !== true || reservedQuotes.size >= MAX_QUOTES) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
@@ -225,7 +252,7 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
         quote: stored.quote,
         contact,
         fulfillment: input.fulfillment,
-        messageChannel: channelFor(contact.messageConsent),
+        messageChannel: channelFor(consent),
       });
       if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
       if (!r.ok) {
@@ -279,7 +306,11 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
       if (where === 'outside') return fail('VALIDATION_FAILED', 'That time is outside opening hours.');
       if (input.customer.name.trim() === '') return { ok: true, missingFields: ['customer.name'], slot };
 
-      const customer: BookingCustomer = { name: input.customer.name, messageConsent: false };
+      // BookingCustomer has no consentAt field; the evidence's time stays with the relay.
+      const consent = trustedConsent(ctx);
+      const customer: BookingCustomer = consent === undefined
+        ? { name: input.customer.name, messageConsent: false }
+        : { name: input.customer.name, messageRecipient: consent.recipient, messageConsent: true };
 
       if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
       if (ports.proposals.atomicOperations !== true || bookingReserved) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
@@ -289,7 +320,7 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
         serviceId: input.serviceId,
         startUtc: input.startUtc,
         customer,
-        messageChannel: channelFor(customer.messageConsent),
+        messageChannel: channelFor(consent),
       });
       if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
       if (!r.ok) {

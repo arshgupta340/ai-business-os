@@ -18,8 +18,22 @@ export class FakeSocket implements DuplexSocket {
     error: [] as ((e: Error) => void)[],
   };
 
+  /** Plays the Twilio side: after a `clear`, echo every outstanding mark, as real Twilio does. */
+  echoMarksOnClear = false;
+  /** Marks sent and not yet echoed back. */
+  readonly pendingMarks: string[] = [];
+
   send(data: string): void {
-    if (this.isOpen) this.sent.push(JSON.parse(data) as Json);
+    if (!this.isOpen) return;
+    const msg = JSON.parse(data) as Json;
+    this.sent.push(msg);
+    if (msg.event === 'mark') this.pendingMarks.push(String((msg.mark as Json).name));
+    if (msg.event === 'clear' && this.echoMarksOnClear) queueMicrotask(() => this.ackMarks());
+  }
+
+  /** Twilio confirms playback of everything sent so far. */
+  ackMarks(): void {
+    for (const name of this.pendingMarks.splice(0)) for (const f of this.handlers.message) f(JSON.stringify({ event: 'mark', mark: { name } }));
   }
   close(): void {
     if (!this.isOpen) return;

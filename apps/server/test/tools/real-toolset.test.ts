@@ -16,7 +16,7 @@ import {
 } from '@abos/contracts';
 import { FIXTURE_NOW, SQ, barberFacts, pizzaCatalog, pizzaVerifiedFacts, serviceHaircut } from '@abos/contracts/fixtures';
 import { MAX_QUOTES, MAX_TRACE_ENTRIES, createRealToolset } from '../../src/tools/real/index';
-import type { BookingProposalInput, FactsSnapshot, OrderProposalInput, RealToolsetDeps, RealToolsetPorts } from '../../src/tools/real/types';
+import type { BookingProposalInput, ConsentEvidence, FactsSnapshot, OrderProposalInput, RealToolsetDeps, RealToolsetPorts } from '../../src/tools/real/types';
 
 const READBACK_MIN_MS = 3000; // Elapsed time is deliberately not consent evidence.
 const PIZZA = 'biz_pizza_01';
@@ -44,7 +44,7 @@ function clock(start = FIXTURE_NOW) {
   return { now: () => new Date(t), advance: (ms: number) => { t += ms; } };
 }
 
-type SetupOpts = { businessId?: string; facts?: FactsSnapshot | null; capabilities?: RealToolsetDeps['capabilities']; unavailable?: boolean; toolTimeoutMs?: number };
+type SetupOpts = { businessId?: string; facts?: FactsSnapshot | null; capabilities?: RealToolsetDeps['capabilities']; unavailable?: boolean; toolTimeoutMs?: number; consent?: RealToolsetDeps['consent']; channel?: RealToolsetDeps['messageChannel'] };
 
 function setup(opts: SetupOpts = {}) {
   const c = clock();
@@ -85,7 +85,7 @@ function setup(opts: SetupOpts = {}) {
     availability: { freeSlots: vi.fn<RealToolsetPorts['availability']['freeSlots']>(async () => [slot]) },
   } satisfies RealToolsetPorts;
   const pinned = opts.facts === null ? undefined : structuredClone(live.facts);
-  const ts = createRealToolset({ businessId: opts.businessId ?? PIZZA, messageChannel: 'surge', ports, now: c.now, capabilities: opts.capabilities, factsSnapshot: pinned, toolTimeoutMs: opts.toolTimeoutMs });
+  const ts = createRealToolset({ businessId: opts.businessId ?? PIZZA, messageChannel: opts.channel ?? 'surge', ports, now: c.now, capabilities: opts.capabilities, factsSnapshot: pinned, toolTimeoutMs: opts.toolTimeoutMs, consent: opts.consent });
   return { ts, ports, live, clock: c, orderProposals, bookingProposals, slot };
 }
 
@@ -517,4 +517,101 @@ it('untrusted port failure messages cannot expose keys, bill links or full phone
   const result = await s.ts.tools.propose_order({ cart, contact: declined, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx);
   expect(result).toMatchObject({ ok: false, reason: 'ITEM_UNAVAILABLE' });
   for (const value of ['short-secret', 'bill.example', '15555550123', 'streamSecret']) expect(JSON.stringify(result)).not.toContain(value);
+});
+
+
+// PROPOSED text step (SPEC 2.9 "Consent evidence on a phone call"): only server-held evidence for this
+// exact call and version turns a proposal into a message proposal. The model's contact flags never do.
+describe('real toolset: consent evidence from the phone relay', () => {
+  const RECIPIENT = '+15555553716';
+  const evidenceFor = (ctx: ToolContext, patch: Partial<ConsentEvidence> = {}): ConsentEvidence => ({
+    callId: ctx.callId!, agentVersionId: ctx.agentVersionId, recipient: RECIPIENT, offerSpokenAt: '2026-11-14T19:00:00.000Z', method: 'spoken', consentAt: '2026-11-14T19:00:04.000Z', ...patch,
+  });
+  const sourceFor = (ctx: ToolContext, read: () => ConsentEvidence | undefined) => ({ callId: ctx.callId!, agentVersionId: ctx.agentVersionId, read });
+
+  it('with evidence the order proposal carries the recipient, consent, consentAt and the server channel', async () => {
+    const s = setup({ consent: sourceFor(pizzaCtx, () => evidenceFor(pizzaCtx)) });
+    const q = await quoted(s);
+    const r = await s.ts.tools.propose_order({ cart, contact: { name: 'Maya Example', messageConsent: false }, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx);
+    expect(r).toMatchObject({ ok: true });
+    expect(s.orderProposals[0]).toMatchObject({ messageChannel: 'surge', contact: { name: 'Maya Example', messageRecipient: RECIPIENT, messageConsent: true, consentAt: '2026-11-14T19:00:04.000Z' } });
+    expect(JSON.stringify(r)).not.toContain(RECIPIENT);
+  });
+
+  it('keypad evidence works the same way', async () => {
+    const s = setup({ consent: sourceFor(pizzaCtx, () => evidenceFor(pizzaCtx, { method: 'keypad' })) });
+    const q = await quoted(s);
+    await s.ts.tools.propose_order({ cart, contact: declined, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx);
+    expect(s.orderProposals[0]).toMatchObject({ messageChannel: 'surge', contact: { messageRecipient: RECIPIENT, messageConsent: true } });
+  });
+
+  it('a forged model messageConsent, phone and consentAt without evidence stays qr_only with no recipient', async () => {
+    const s = setup({ consent: sourceFor(pizzaCtx, () => undefined) });
+    const q = await quoted(s);
+    await s.ts.tools.propose_order({ cart, contact: consented, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx);
+    expect(s.orderProposals[0]).toMatchObject({ messageChannel: 'qr_only', contact: { name: 'Maya Example', messageConsent: false } });
+    expect(s.orderProposals[0]?.contact.messageRecipient).toBeUndefined();
+    expect(s.orderProposals[0]?.contact.consentAt).toBeUndefined();
+  });
+
+  it('with evidence, the phone number and consentAt the model sends are ignored', async () => {
+    const s = setup({ consent: sourceFor(pizzaCtx, () => evidenceFor(pizzaCtx)) });
+    const q = await quoted(s);
+    await s.ts.tools.propose_order({ cart, contact: { ...consented, messageRecipient: '+15555559999' }, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx);
+    expect(s.orderProposals[0]?.contact).toEqual({ name: 'Maya Example', messageRecipient: RECIPIENT, messageConsent: true, consentAt: '2026-11-14T19:00:04.000Z' });
+  });
+
+  it.each([
+    ['another call', { callId: 'call_other_99' }],
+    ['another version', { agentVersionId: 'agv_pizza_01_v1' }],
+    ['a malformed recipient', { recipient: '5555553716' }],
+    ['an unknown method', { method: 'model' as never }],
+    ['consent before the offer was spoken', { consentAt: '2026-11-14T18:59:59.000Z' }],
+    ['an unreadable time', { consentAt: 'soon' }],
+  ])('evidence for %s is refused and the proposal stays qr_only', async (_label, patch) => {
+    const s = setup({ consent: sourceFor(pizzaCtx, () => evidenceFor(pizzaCtx, patch)) });
+    const q = await quoted(s);
+    await s.ts.tools.propose_order({ cart, contact: declined, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx);
+    expect(s.orderProposals[0]).toMatchObject({ messageChannel: 'qr_only', contact: { messageConsent: false } });
+    expect(s.orderProposals[0]?.contact.messageRecipient).toBeUndefined();
+  });
+
+  it('a toolset bound to one call refuses evidence when it is called for another call', async () => {
+    const s = setup({ consent: sourceFor(pizzaCtx, () => evidenceFor(pizzaCtx)) });
+    const other: ToolContext = { ...pizzaCtx, callId: 'call_other_99', correlationId: 'call_other_99' };
+    const r = await s.ts.tools.quote_order({ cart }, other);
+    if (!r.ok) throw new Error(r.reason);
+    await s.ts.tools.propose_order({ cart, contact: declined, fulfillment: pickup, quoteId: r.quote.quoteId }, other);
+    expect(s.orderProposals[0]).toMatchObject({ messageChannel: 'qr_only' });
+    expect(s.orderProposals[0]?.contact.messageRecipient).toBeUndefined();
+  });
+
+  it('under qr_only, even valid evidence never reaches a proposal', async () => {
+    const read = vi.fn(() => evidenceFor(pizzaCtx));
+    const s = setup({ channel: 'qr_only', consent: sourceFor(pizzaCtx, read) });
+    const q = await quoted(s);
+    await s.ts.tools.propose_order({ cart, contact: consented, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx);
+    expect(s.orderProposals[0]).toMatchObject({ messageChannel: 'qr_only', contact: { messageConsent: false } });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('a reader that throws is no evidence', async () => {
+    const s = setup({ consent: sourceFor(pizzaCtx, () => { throw new Error('boom'); }) });
+    const q = await quoted(s);
+    expect(await s.ts.tools.propose_order({ cart, contact: declined, fulfillment: pickup, quoteId: q.quoteId }, pizzaCtx)).toMatchObject({ ok: true });
+    expect(s.orderProposals[0]).toMatchObject({ messageChannel: 'qr_only' });
+  });
+
+  it('with evidence the booking proposal carries the recipient, consent and the server channel', async () => {
+    const s = setup({ businessId: BARBER, facts: snapshotOf(barberFacts), channel: 'whatsapp_sandbox', consent: sourceFor(barberCtx, () => evidenceFor(barberCtx)) });
+    await s.ts.tools.propose_booking({ serviceId: serviceHaircut.id, startUtc: '2026-11-14T22:00:00Z', customer: { name: 'Sam', messageConsent: false } }, barberCtx);
+    expect(s.bookingProposals[0]).toMatchObject({ messageChannel: 'whatsapp_sandbox', customer: { name: 'Sam', messageRecipient: RECIPIENT, messageConsent: true } });
+  });
+
+  it('a booking with a forged model consent and no evidence stays qr_only', async () => {
+    const s = setup({ businessId: BARBER, facts: snapshotOf(barberFacts), consent: sourceFor(barberCtx, () => undefined) });
+    await s.ts.tools.propose_booking({ serviceId: serviceHaircut.id, startUtc: '2026-11-14T22:00:00Z', customer: { name: 'Sam', messageRecipient: '+15555550144', messageConsent: true } }, barberCtx);
+    expect(s.bookingProposals[0]).toMatchObject({ messageChannel: 'qr_only', customer: { messageConsent: false } });
+    expect(s.bookingProposals[0]?.customer.messageRecipient).toBeUndefined();
+  });
 });

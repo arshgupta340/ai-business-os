@@ -231,11 +231,13 @@ export type PhoneCall = Awaited<ReturnType<typeof phoneCall>>;
  * events and toolset factory, with fake sockets in place of Twilio and OpenAI. `model` is the socket
  * the relay opened to the model; what the relay sends on it is what the model is given.
  */
-export async function phoneRelay(call: PhoneCall, o: { logger: VoiceLogger; spec?: AgentSpec; redactSecrets?: readonly string[] }) {
+export async function phoneRelay(call: PhoneCall, o: { logger: VoiceLogger; spec?: AgentSpec; redactSecrets?: readonly string[]; callerNumber?: string }) {
   const tokens = new StreamTokenStore<PinnedCall>();
   const token = tokens.mint({ callId: call.callId, providerCallId: call.providerCallId, businessId: call.businessId, businessName: call.businessName,
-    agentId: call.agentId, agentVersionId: call.agentVersionId, spec: o.spec ?? call.spec, facts: call.facts }) ?? '';
+    agentId: call.agentId, agentVersionId: call.agentVersionId, spec: o.spec ?? call.spec, facts: call.facts, ...(o.callerNumber ? { callerNumber: o.callerNumber } : {}) }) ?? '';
   const phone = new FakeSocket();
+  // Twilio echoes outstanding marks after a clear.
+  phone.echoMarksOnClear = true;
   const models: FakeSocket[] = [];
   const relay = runPhoneRelay({ phone, tokens, calls: call.options.calls, events: call.options.events, toolsetFactory: call.options.toolsetFactory,
     openaiSocketFactory: () => { const s = new FakeSocket(); models.push(s); return s; }, messageChannel: call.options.messageChannel, logger: o.logger,
