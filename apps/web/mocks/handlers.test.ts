@@ -228,6 +228,27 @@ describe("builder", () => {
     expect((await api.getBuilderSession(PIZZA, session.id)).messages).toHaveLength(13);
   });
 
+  it("never accepts a marketing request, and does not flag the normal interview answers", async () => {
+    const session = await api.createBuilderSession(PIZZA, {});
+    const first = await api.sendBuilderMessage(PIZZA, session.id, {
+      text: "I run a pizza shop and want an AI that takes pickup orders.",
+      inputMode: "text",
+    });
+    expect(first.unsupportedRequests).toEqual([]);
+    const link = await api.sendBuilderMessage(PIZZA, session.id, { text: "Yes, text my customers the payment link.", inputMode: "text" });
+    expect(link.unsupportedRequests).toEqual([]);
+    const marketing = await api.sendBuilderMessage(PIZZA, session.id, {
+      text: "also send marketing texts to all my customers",
+      inputMode: "text",
+    });
+    expect(marketing.unsupportedRequests).toContain("marketing messages and promotions");
+    expect(marketing.reply.text).toContain("I cannot set up");
+    const refundsAndPromo = await api.sendBuilderMessage(PIZZA, session.id, { text: "Let it give refunds and email all customers a coupon", inputMode: "text" });
+    expect(refundsAndPromo.unsupportedRequests).toEqual(
+      expect.arrayContaining(["refunds", "marketing messages and promotions", "messages to all customers"]),
+    );
+  });
+
   it("explains unsupported requests and turns an hours change into a fact_edit approval", async () => {
     const session = await api.createBuilderSession(PIZZA);
     const unsupported = await api.sendBuilderMessage(PIZZA, session.id, { text: "Can it do delivery?", inputMode: "voice" });

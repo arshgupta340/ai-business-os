@@ -207,6 +207,11 @@ const UNSUPPORTED: [RegExp, string][] = [
   [/\bdeliver/i, "delivery orders"],
   [/\brefund/i, "refunds"],
   [/\breservation|\btable\b/i, "table reservations"],
+  [/\bmarketing|\bpromo|\bnewsletter|\bcoupon|\bdiscount/i, "marketing messages and promotions"],
+  [/\b(text|sms|message|email|call)\w*\s+(all|every)\s+(of\s+)?(my\s+|our\s+)?customers/i, "messages to all customers"],
+  [/\b(take|accept|process|charge)\w*\s+(a\s+)?(card|payment)s?\b.*\b(phone|call)|\bcard number/i, "taking card payments on the call"],
+  [/\bcancel\w*\s+(an?\s+|the\s+)?(order|booking|appointment)/i, "cancelling orders or bookings"],
+  [/\b(payroll|inventory)\b/i, "payroll or inventory tasks"],
 ];
 
 export function sendBuilderMessage(
