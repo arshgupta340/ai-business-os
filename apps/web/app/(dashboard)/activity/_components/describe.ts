@@ -5,8 +5,9 @@
  */
 import type {ActivityEvent, ActivityEventPayloads} from '@/lib/api';
 import {formatDateTime, formatMoney} from '@/lib/format';
+import {actionLabel, guardrailLabel, messageChannelSender} from '@/lib/labels';
 import {statusView} from '@/lib/status';
-import {actionLabel} from './journey';
+import {paymentFailureReason, stepErrorSentence} from './journey';
 
 function p<T extends keyof ActivityEventPayloads>(event: ActivityEvent, _type: T): ActivityEventPayloads[T] {
   return event.payload as unknown as ActivityEventPayloads[T];
@@ -74,7 +75,7 @@ export function describeEvent(event: ActivityEvent, timeZone: string): EventLine
     }
     case 'execution.failed': {
       const e = p(event, 'execution.failed');
-      return {title: `Stopped: ${actionLabel(e.actionType)} (${e.errorCode})`};
+      return {title: `Stopped: ${actionLabel(e.actionType)}.${stepErrorSentence(e.errorCode)}`};
     }
     case 'checkout.created': {
       const e = p(event, 'checkout.created');
@@ -82,7 +83,7 @@ export function describeEvent(event: ActivityEvent, timeZone: string): EventLine
     }
     case 'message.sent': {
       const e = p(event, 'message.sent');
-      return {title: `Message accepted by ${e.channel} for the number ending in ${e.recipientLast4}`};
+      return {title: `Message accepted by ${messageChannelSender(e.channel)} for the number ending in ${e.recipientLast4}`};
     }
     case 'message.failed': {
       const e = p(event, 'message.failed');
@@ -94,7 +95,7 @@ export function describeEvent(event: ActivityEvent, timeZone: string): EventLine
     }
     case 'payment.failed': {
       const e = p(event, 'payment.failed');
-      return {title: `Payment failed (${e.reason})`, sandbox: true};
+      return {title: `Payment failed: ${paymentFailureReason(e.reason)}`, sandbox: true};
     }
     case 'booking.verified': {
       const e = p(event, 'booking.verified');
@@ -112,7 +113,7 @@ export function describeEvent(event: ActivityEvent, timeZone: string): EventLine
     }
     case 'guardrail.refused': {
       const e = p(event, 'guardrail.refused');
-      return {title: `The agent refused a request (${e.rule})`};
+      return {title: `The agent refused a request. ${guardrailLabel(e.rule)}`};
     }
     default:
       return null;

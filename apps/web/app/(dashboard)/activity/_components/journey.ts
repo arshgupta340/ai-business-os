@@ -23,7 +23,9 @@ import type {
   Order,
   OrderCheckout,
 } from '@/lib/api';
-import {statusView, type StatusView, type Tone} from '@/lib/status';
+import {errorCodeText} from '@/lib/error-text';
+import {actionLabel, guardrailLabel} from '@/lib/labels';
+import {readableLabel, statusView, type StatusView, type Tone} from '@/lib/status';
 
 // ------------------------------------------------------------- grouping
 
@@ -185,20 +187,21 @@ const PAST_MESSAGE_STEP = new Set(['PAYMENT_PENDING', 'PAID_VERIFIED', 'FULFILLM
 const ORDER_FINISHED = new Set(['FULFILLMENT_READY', 'REJECTED', 'APPROVAL_EXPIRED', 'CANCELLED', 'UNAVAILABLE', 'PAYMENT_FAILED']);
 const BOOKING_FINISHED = new Set(['BOOKED_VERIFIED', 'REJECTED', 'EXPIRED', 'SLOT_CONFLICT']);
 
-/** The owner-facing name of an action type in a bundle. */
-export const ACTION_LABELS: Record<string, string> = {
-  'square.checkout.create': 'Create the Square checkout link',
-  'message.checkout.send': 'Send the link to the customer',
-  'local.order.record': 'Record the order',
-  'sheets.order.append': 'Report to Google Sheets',
-  'calendar.event.create': 'Create the calendar event',
-  'message.booking.confirm': 'Send the confirmation',
-  'local.booking.record': 'Record the booking',
-  'sheets.booking.append': 'Report to Google Sheets',
-};
+/**
+ * The sentence for a step's error code, with a leading space, or nothing when
+ * the step has no code. The code itself never reaches the owner.
+ */
+export function stepErrorSentence(errorCode: string | undefined): string {
+  return errorCode ? ` ${errorCodeText(errorCode)}` : '';
+}
 
-export function actionLabel(actionType: string): string {
-  return ACTION_LABELS[actionType] ?? actionType;
+/**
+ * The reason Square gave for a failed payment, in lower case for use inside a
+ * sentence. The contract types it as free text, so a code such as
+ * "card_declined" shows as "card declined".
+ */
+export function paymentFailureReason(reason: string): string {
+  return readableLabel(reason, 'no reason given').toLowerCase();
 }
 
 function approvalFromEvents(events: ActivityEvent[]): ApprovalView | undefined {
@@ -404,7 +407,7 @@ function deriveOrder(input: JourneyInput, order: Order, base: Partial<Journey>):
         key: 'recovery',
         tone: statusView('order', 'RECOVERY_REQUIRED').tone,
         title: 'This order needs your review',
-        description: `A step stopped${failed ? ` (${actionLabel(failed.actionType)}${failed.errorCode ? `, ${failed.errorCode}` : ''})` : ''}. The customer did not get a payment link from this step. Check Square before you contact the customer.`,
+        description: `${failed ? `The step "${actionLabel(failed.actionType)}" stopped.${stepErrorSentence(failed.errorCode)}` : 'A step stopped.'} The customer did not get a payment link from this step. Check Square before you contact the customer.`,
       });
     } else {
       // The link exists from here on.
@@ -421,7 +424,7 @@ function deriveOrder(input: JourneyInput, order: Order, base: Partial<Journey>):
           key: 'payment_failed',
           tone: statusView('order', 'PAYMENT_FAILED').tone,
           title: 'Payment failed (sandbox)',
-          description: `Square reported the payment as failed${failedEvent?.reason ? ` (${failedEvent.reason})` : ''}. The order is not paid and will not go to the kitchen. You can call the customer back.`,
+          description: `Square reported the payment as failed${failedEvent?.reason ? `: ${paymentFailureReason(failedEvent.reason)}` : ''}. The order is not paid and will not go to the kitchen. You can call the customer back.`,
         });
       } else if (status === 'CANCELLED') {
         steps[4].view = statusView('order', 'CANCELLED');
@@ -454,7 +457,7 @@ function deriveOrder(input: JourneyInput, order: Order, base: Partial<Journey>):
         key: `review_${exe.executionId}`,
         tone: statusView('execution', 'NEEDS_REVIEW').tone,
         title: `${actionLabel(exe.actionType)} needs your review`,
-        description: `The result of this step is unknown${exe.errorCode ? ` (${exe.errorCode})` : ''}. It is not repeated automatically.`,
+        description: `The result of this step is unknown.${stepErrorSentence(exe.errorCode)} It is not repeated automatically.`,
       });
     }
   }
@@ -574,7 +577,7 @@ function deriveBooking(input: JourneyInput, booking: Booking, base: Partial<Jour
         key: 'retry',
         tone: statusView('booking', 'RETRY_REQUIRED').tone,
         title: 'This booking needs your review',
-        description: `The calendar step did not finish${calendarStep?.errorCode ? ` (${calendarStep.errorCode})` : ''}. Check Google Calendar before you contact the customer. It is not repeated automatically.`,
+        description: `The calendar step did not finish.${stepErrorSentence(calendarStep?.errorCode)} Check Google Calendar before you contact the customer. It is not repeated automatically.`,
       });
     } else if (calendarStep?.status === 'SUCCEEDED') {
       steps[3].view = statusView('execution', 'SUCCEEDED');
@@ -730,9 +733,9 @@ export function deriveJourney(input: JourneyInput): Journey {
       key: 'guardrail',
       tone: 'info',
       title: 'The agent refused a request',
-      description: `The caller asked for something the agent may not do (${guardrail
-        .map((e) => payload(e, 'guardrail.refused')!.rule)
-        .join(', ')}). Nothing changed.`,
+      description: `The caller asked for something the agent may not do. ${[
+        ...new Set(guardrail.map((e) => guardrailLabel(payload(e, 'guardrail.refused')!.rule))),
+      ].join(' ')} Nothing changed.`,
     });
   }
   return journey;

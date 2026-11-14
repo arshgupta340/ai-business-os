@@ -14,6 +14,7 @@ import {LoadingState} from '@/components/LoadingState';
 import {PageHeader} from '@/components/PageHeader';
 import {SandboxBadge} from '@/components/SandboxBadge';
 import {isApiError, useActivity, useActivityFeed, useApprovals, useCatalog, useFacts, type ActivityEventType, type ApprovalRequest} from '@/lib/api';
+import {errorText} from '@/lib/error-text';
 import {formatDateTime} from '@/lib/format';
 import {ApprovalDecisionDialog} from '../../../approvals/_components/ApprovalDecisionDialog';
 import {approvalByVariation, mergeExecutionEvents, priceConflictFor} from '../_lib/price-row';
@@ -72,7 +73,7 @@ export function PricesScreen({businessId, businessName, timezone}: PricesScreenP
       ) : catalog.error ? (
         <ErrorState
           title="The catalog could not be loaded"
-          message={isApiError(catalog.error) && catalog.error.code === 'FORBIDDEN_BUSINESS' ? 'You do not have access to this business.' : catalog.error.message}
+          message={errorText(catalog.error)}
           onRetry={isApiError(catalog.error) && !catalog.error.retryable ? undefined : () => void catalog.refetch()}
         />
       ) : variationCount === 0 ? (

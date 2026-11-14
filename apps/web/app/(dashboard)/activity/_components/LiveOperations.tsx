@@ -16,11 +16,11 @@ import {
   useBookings,
   useCalls,
   useOrders,
-  type ActivityFeedStatus,
   type ActivityEventPayloads,
 } from '@/lib/api';
 import {formatRelative} from '@/lib/format';
-import type {Tone} from '@/lib/status';
+import {providerLabel} from '@/lib/labels';
+import {statusView} from '@/lib/status';
 import {useBusiness} from '@/lib/session';
 import {EmptyState} from '@/components/EmptyState';
 import {LoadingState} from '@/components/LoadingState';
@@ -31,18 +31,6 @@ import {CallList} from './CallList';
 import {deriveJourney, groupByCall, mergeEvents, rejectedWebhooks, subjectIdFromEvents, type JourneyInput} from './journey';
 import {MockControlsPanel} from './MockControlsPanel';
 import {QueryError} from './ui';
-
-/**
- * The live feed is not a server state machine, so statusView has no entry
- * for it. Nothing here is green: a connected feed confirms nothing.
- */
-const FEED_VIEW: Record<ActivityFeedStatus, {label: string; tone: Tone}> = {
-  connecting: {label: 'Live updates: connecting', tone: 'info'},
-  connected: {label: 'Live updates: on', tone: 'info'},
-  disconnected: {label: 'Live updates lost, data may be stale', tone: 'warning'},
-  unavailable: {label: 'Live updates not configured', tone: 'warning'},
-  idle: {label: 'No business selected', tone: 'neutral'},
-};
 
 type Tab = 'active' | 'finished';
 
@@ -133,7 +121,7 @@ export function LiveOperations() {
   }, [queryClient, select]);
 
   const webhooks = useMemo(() => rejectedWebhooks(mergeEvents(activity.data?.items ?? [], feedEvents)), [activity.data, feedEvents]);
-  const feedView = FEED_VIEW[feed.status];
+  const feedView = statusView('feed', feed.status);
   const feedLabel = feed.source === 'mock' ? `${feedView.label} (mock data)` : feedView.label;
 
   const loading = calls.isPending || activity.isPending;
@@ -159,7 +147,7 @@ export function LiveOperations() {
       {webhooks[0] ? (
         <Banner
           status="warning"
-          title={`Rejected webhook from ${(webhooks[0].payload as unknown as ActivityEventPayloads['webhook.rejected']).provider === 'square' ? 'Square' : 'Twilio'}`}
+          title={`Rejected webhook from ${providerLabel((webhooks[0].payload as unknown as ActivityEventPayloads['webhook.rejected']).provider)}`}
           description={`${
             (webhooks[0].payload as unknown as ActivityEventPayloads['webhook.rejected']).reason === 'signature_invalid'
               ? 'The signature did not match, so the server ignored it.'

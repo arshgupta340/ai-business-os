@@ -11,13 +11,10 @@ import {SandboxBadge} from '@/components/SandboxBadge';
 import {StatusBadge} from '@/components/StatusBadge';
 import type {ApprovalRequest, Business, BusinessFact} from '@/lib/api';
 import {statusView, type StatusView} from '@/lib/status';
+import {FACT_KIND_GROUP_LABELS, HOURS_KEY_LABELS, factKeyLabel, factSourceLabel} from '@/lib/labels';
 import {
-  KIND_LABELS,
-  WEEKDAY_NAMES,
   describeValue,
-  factKeyLabel,
   groupKnowledge,
-  sourceTypeLabel,
   type KnowledgeKind,
   type KnowledgeRow,
 } from './knowledge-model';
@@ -58,14 +55,14 @@ export function KnowledgeGroups({facts, timezone, profile, pendingApprovals}: Pr
       label: label ?? factKeyLabel(kind, row.key, fact?.value ?? row.pending[0]?.value),
       value: value.text,
       hasMoney: value.hasMoney,
-      source: fact ? `${sourceTypeLabel(fact.sourceType)}${fact.sourceRef ? `, reference ${fact.sourceRef}` : ''}` : 'None',
+      source: fact ? `${factSourceLabel(fact.sourceType)}${fact.sourceRef ? `, reference ${fact.sourceRef}` : ''}` : 'None',
       version: fact ? `Version ${fact.version}` : 'No version',
       status: fact ? statusView('fact', fact.status) : undefined,
       pending: pendingOf(kind, row.pending),
     };
   };
 
-  const hoursRows = groups.hours.map((h) => toRow('hours', {key: h.day, verified: h.verified, pending: h.pending}, WEEKDAY_NAMES[h.day]));
+  const hoursRows = groups.hours.map((h) => toRow('hours', {key: h.day, verified: h.verified, pending: h.pending}, HOURS_KEY_LABELS[h.day]));
   const contactRows = groups.contact.map((r) => toRow('contact', r));
   if (profile?.contact?.address) {
     contactRows.unshift({
@@ -82,22 +79,22 @@ export function KnowledgeGroups({facts, timezone, profile, pendingApprovals}: Pr
   return (
     <VStack gap={4}>
       <Group
-        title={KIND_LABELS.hours}
+        title={FACT_KIND_GROUP_LABELS.hours}
         note={`Times are in the business time zone, ${timezone}.`}
         rows={hoursRows}
         empty="No opening hours yet."
       />
-      <Group title={KIND_LABELS.policy} rows={groups.policy.map((r) => toRow('policy', r))} empty="No policies yet." />
+      <Group title={FACT_KIND_GROUP_LABELS.policy} rows={groups.policy.map((r) => toRow('policy', r))} empty="No policies yet." />
       {groups.service.length ? (
         <Group
-          title={KIND_LABELS.service}
+          title={FACT_KIND_GROUP_LABELS.service}
           rows={groups.service.map((r) => toRow('service', r))}
           empty="No services yet."
           note="Service prices are sandbox payment data."
         />
       ) : null}
-      <Group title={KIND_LABELS.contact} rows={contactRows} empty="No contact details yet." />
-      <Group title={KIND_LABELS.faq} rows={groups.faq.map((r) => toRow('faq', r))} empty="No questions and answers yet." />
+      <Group title={FACT_KIND_GROUP_LABELS.contact} rows={contactRows} empty="No contact details yet." />
+      <Group title={FACT_KIND_GROUP_LABELS.faq} rows={groups.faq.map((r) => toRow('faq', r))} empty="No questions and answers yet." />
     </VStack>
   );
 }

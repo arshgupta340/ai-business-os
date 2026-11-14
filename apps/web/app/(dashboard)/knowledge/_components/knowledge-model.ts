@@ -6,7 +6,22 @@
  * values into plain strings. Nothing here builds markup or follows a link.
  */
 import type {ActivityEvent, BusinessFact, CatalogItem, FactConflict, FactKind, FileRecord} from '@/lib/api';
+import type {SyncJobState} from '@abos/contracts';
 import {formatMoney} from '@/lib/format';
+import {FACT_KIND_GROUP_LABELS, HOURS_KEY_LABELS, factKeyLabel, factSourceLabel, menuItemNames} from '@/lib/labels';
+
+/**
+ * The labels these names stood for now live in @/lib/labels. The names stay
+ * as aliases, with no map of their own, because the Settings screen still
+ * imports them from here. Import from @/lib/labels in new code.
+ */
+export {factKeyLabel, menuItemNames};
+/** @deprecated Use HOURS_KEY_LABELS from @/lib/labels. */
+export const WEEKDAY_NAMES = HOURS_KEY_LABELS;
+/** @deprecated Use FACT_KIND_GROUP_LABELS or factKindGroupLabel from @/lib/labels. */
+export const KIND_LABELS = FACT_KIND_GROUP_LABELS;
+/** @deprecated Use factSourceLabel from @/lib/labels. */
+export const sourceTypeLabel = factSourceLabel;
 
 // ------------------------------------------------------------------ uploads
 
@@ -99,28 +114,9 @@ export function formatConfidence(confidence: number): string {
 export const WEEKDAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
 export type Weekday = (typeof WEEKDAYS)[number];
 
-export const WEEKDAY_NAMES: Record<Weekday, string> = {
-  mon: 'Monday',
-  tue: 'Tuesday',
-  wed: 'Wednesday',
-  thu: 'Thursday',
-  fri: 'Friday',
-  sat: 'Saturday',
-  sun: 'Sunday',
-};
-
 /** Kinds shown in "Business knowledge". menu_item is left out on purpose: it is never a price source. */
 export const KNOWLEDGE_KINDS = ['hours', 'policy', 'service', 'contact', 'faq'] as const satisfies readonly FactKind[];
 export type KnowledgeKind = (typeof KNOWLEDGE_KINDS)[number];
-
-export const KIND_LABELS: Record<FactKind, string> = {
-  hours: 'Opening hours',
-  policy: 'Policies',
-  service: 'Services',
-  contact: 'Contact',
-  faq: 'Questions and answers',
-  menu_item: 'Menu item from a file',
-};
 
 export type HoursRow = {day: Weekday; verified?: BusinessFact; pending: BusinessFact[]};
 
@@ -240,26 +236,6 @@ export function conflictByFactId(conflicts: readonly FactConflict[]): Map<string
   return map;
 }
 
-/** "Square", "Uploaded file" and so on, for a fact source type. */
-export function sourceTypeLabel(sourceType: BusinessFact['sourceType']): string {
-  switch (sourceType) {
-    case 'square':
-      return 'Square';
-    case 'google_calendar':
-      return 'Google Calendar';
-    case 'owner_chat':
-      return 'You, in the builder chat';
-    case 'owner_ui':
-      return 'You, in the dashboard';
-    case 'upload':
-      return 'Uploaded file';
-    case 'seed':
-      return 'Setup data';
-    default:
-      return String(sourceType);
-  }
-}
-
 /**
  * The Square variation a menu price conflict is about. A candidate may name it
  * (`value.variationId`, as the shared fixtures do), or the conflict key is the
@@ -271,18 +247,6 @@ export function conflictVariationId(conflict: Pick<FactConflict, 'key' | 'candid
     if (isRecord(v) && typeof v.variationId === 'string') return v.variationId;
   }
   return conflict.key;
-}
-
-/**
- * Item and variation names of a draft menu_item value. Both spellings occur:
- * `{item, variation}` and `{itemName, variationName}` (the shared fixtures).
- */
-export function menuItemNames(value: unknown): {item?: string; variation?: string} {
-  if (!isRecord(value)) return {};
-  const item = typeof value.item === 'string' ? value.item : typeof value.itemName === 'string' ? value.itemName : undefined;
-  const variation =
-    typeof value.variation === 'string' ? value.variation : typeof value.variationName === 'string' ? value.variationName : undefined;
-  return {item, variation};
 }
 
 /** Finds the catalog item and variation for a Square variation ID. */
@@ -329,17 +293,6 @@ export function formatHours(value: unknown): string {
 export function humanizeKey(key: string): string {
   const spaced = key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().toLowerCase();
   return spaced ? spaced[0].toUpperCase() + spaced.slice(1) : key;
-}
-
-/** The row label for a fact key. */
-export function factKeyLabel(kind: FactKind, key: string, value?: unknown): string {
-  if (kind === 'hours' && (WEEKDAYS as readonly string[]).includes(key)) return WEEKDAY_NAMES[key as Weekday];
-  if (kind === 'service' && isRecord(value) && typeof value.name === 'string') return value.name;
-  if (kind === 'faq' && isRecord(value) && typeof value.question === 'string') return value.question;
-  const menu = kind === 'menu_item' ? menuItemNames(value) : {};
-  if (menu.item) return menu.variation ? `${menu.item}, ${menu.variation}` : menu.item;
-  if (kind === 'menu_item') return key;
-  return humanizeKey(key);
 }
 
 export type ValueText = {text: string; hasMoney: boolean};
@@ -466,7 +419,7 @@ export function applyEdits(
 
 // ------------------------------------------------------------ catalog sync
 
-export type CatalogSyncState = 'PENDING' | 'RUNNING' | 'RETRYING' | 'DONE' | 'FAILED';
+export type CatalogSyncState = SyncJobState;
 
 /**
  * The state of one catalog sync job, read from sync.* events with
@@ -483,11 +436,3 @@ export function catalogSyncState(events: readonly ActivityEvent[], jobId: string
   }
   return 'PENDING';
 }
-
-export const CATALOG_SYNC_LABELS: Record<CatalogSyncState, string> = {
-  PENDING: 'Sync queued',
-  RUNNING: 'Syncing from Square',
-  RETRYING: 'Sync failed, retrying',
-  DONE: 'Synced from Square',
-  FAILED: 'Sync failed',
-};

@@ -16,7 +16,7 @@ import {useCatalog, useSyncCatalog, type ActivityEvent} from '@/lib/api';
 import {formatDateTime, formatMoney} from '@/lib/format';
 import {statusView} from '@/lib/status';
 import {ApiErrorBanner} from './ApiErrorBanner';
-import {CATALOG_SYNC_LABELS, catalogSyncState} from './knowledge-model';
+import {catalogSyncState} from './knowledge-model';
 
 interface VariationRow extends Record<string, unknown> {
   id: string;
@@ -35,8 +35,7 @@ export function CatalogSection({businessId, timezone, events}: Props) {
   const [jobId, setJobId] = useState<string | null>(null);
 
   const syncState = jobId ? catalogSyncState(events, jobId) : null;
-  // The sync job reuses the shared sync tones. Only the labels name the catalog.
-  const syncView = syncState ? {label: CATALOG_SYNC_LABELS[syncState], tone: statusView('syncJob', syncState).tone} : null;
+  const syncView = syncState ? statusView('catalogSync', syncState) : null;
   const syncing = sync.isPending || syncState === 'PENDING' || syncState === 'RUNNING' || syncState === 'RETRYING';
 
   const startSync = () => {
