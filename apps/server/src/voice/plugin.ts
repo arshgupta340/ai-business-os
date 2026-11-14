@@ -20,6 +20,7 @@ import {
   safeLogger,
 } from './logic';
 import { adaptWs, checkSessionCapabilities, runPhoneRelay, withDeadline } from './relay';
+import type { CatalogItem } from '@abos/contracts';
 import type { FactsSnapshot, PinnedCall, TwilioRequestValidator, VoicePluginOptions } from './types';
 
 export type * from './types';
@@ -43,6 +44,9 @@ function formParams(body: unknown): Record<string, string> {
 function hasReadableHours(snapshot: FactsSnapshot): boolean {
   return snapshot.facts.some((f) => f.kind === 'hours' && HoursValueSchema.safeParse(f.value).success);
 }
+
+/** The longest the webhook waits for the menu before it goes on without it. */
+const MENU_SNAPSHOT_TIMEOUT_MS = 1500;
 
 type Reply = { status: number; body: string };
 
@@ -107,6 +111,18 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
       return ok(buildSayTwiml(CANNOT_TAKE_ORDERS_MESSAGE));
     }
 
+    // The menu goes into the prompt so a basic question needs no tool call. It is best effort:
+    // without it the agent reads the menu through read_catalog as before.
+    let menu: CatalogItem[] | undefined;
+    if (opts.menu !== undefined && capCheck.tools.includes('read_catalog')) {
+      try {
+        const read = await withDeadline(opts.menu.snapshot(resolution.businessId), MENU_SNAPSHOT_TIMEOUT_MS, undefined);
+        if (read !== undefined) menu = structuredClone(read).filter((item) => item.businessId === resolution.businessId);
+      } catch (err) {
+        logger.warn({ ...errorInfo(err) }, 'voice: could not read the menu for the prompt; the agent will use read_catalog');
+      }
+    }
+
     const { callId } = await opts.calls.startCall({
       businessId: resolution.businessId,
       agentId: resolution.agentId,
@@ -115,7 +131,7 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
       callerLast4: last4(from),
     });
     const token = tokens.mint(
-      { callId, providerCallId, businessId: resolution.businessId, businessName: resolution.businessName, agentId: resolution.agentId, agentVersionId: resolution.agentVersionId, spec: resolution.spec, facts },
+      { callId, providerCallId, businessId: resolution.businessId, businessName: resolution.businessName, agentId: resolution.agentId, agentVersionId: resolution.agentVersionId, spec: resolution.spec, facts, ...(menu !== undefined ? { menu } : {}) },
       now(),
     );
     if (token === null) return refuseReplay();

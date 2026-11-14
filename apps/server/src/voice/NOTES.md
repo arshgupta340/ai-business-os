@@ -30,3 +30,12 @@ Handing a live call to a person is not one of the four approval-gated writes: Sq
 - OpenAI acceptance of injected system status items, echoed response metadata, zero-length truncation and generation-end event ordering remains unverified against a real provider. Twilio behavior after closing a Media Stream, actual speech delivery and live read-back remain unverified. Tests prove socket handling and sent instructions with fakes, not delivered speech or actual phone hangup.
 - The in-memory stream credential store deduplicates one process. Cross-process uniqueness, event persistence and call-state enforcement remain adapter duties. No `/webhooks/twilio/status` handler is implemented here; the relay polls call status.
 - docs/FLOWS.md B12 needs the lead's correction: declined messages do not block an order. The checkout link is shown at the counter with `qr_only`.
+
+## Shop data in the prompt (2026-11-14)
+
+- The prompt now carries the fact snapshot pinned with the call, the cached menu read at the webhook and the local time (`knowledge.ts`). A basic question about hours, prices or policies needs no tool call. `quote_order` and `propose_order` are unchanged, so totals, IDs, the quote and the pickup time are still checked on the server.
+- The menu read is best effort with a 1.5 second limit. When it fails, or the block passes 6000 characters, the menu is left out and the agent uses `read_catalog` as before. Hours are written only when all seven days are readable.
+- The menu in the prompt is the cache as it stood when the call was pinned. A price changed during a call shows in the quote, not in the price the agent quoted for one item.
+- Owner text (FAQs, policies) and Square names now sit in the instruction channel. They are flattened to one line, cut to 200 characters, stripped of Markdown marks and placed under a line that calls them reference data. This lowers the risk; it does not remove it. Safety still rests on the tool allowlist and the approval engine (FLOWS 8).
+- The phone session adds "call this silently" to every tool description (`phoneToolDefinitions`). Checked in text mode against the real model with `scripts/live/phone-prompt-trial.ts`: seven runs, no announcement lines, at most "Got it." before a tool call. Not yet checked by ear on a phone call.
+- The opening line is still the greeting stored in the published agent version. It is owner text, so this change did not shorten it.

@@ -139,6 +139,14 @@ export type SessionUpdateEvent = {
   };
 };
 
+/** Added to every tool description on the phone, where an announcement before a tool call is dead air. */
+export const SILENT_TOOL_NOTE = 'Call this silently: say nothing before the call and do not announce it.';
+
+/** The allowed tools as the phone session gets them: the shared definitions plus the silent-call note. */
+export function phoneToolDefinitions(tools: readonly ToolName[]): ToolDefinition[] {
+  return toolDefinitionsFor(tools).map((d) => ({ ...d, description: `${d.description} ${SILENT_TOOL_NOTE}` }));
+}
+
 /** The spike's session shape, proven against gpt-realtime-2.1, with only the allowed tools. */
 export function buildSessionUpdate(args: { model: string; voice: string; instructions: string; tools: readonly ToolName[] }): SessionUpdateEvent {
   return {
@@ -152,7 +160,7 @@ export function buildSessionUpdate(args: { model: string; voice: string; instruc
         input: { format: AUDIO_FORMAT, turn_detection: TURN_DETECTION },
         output: { format: AUDIO_FORMAT, voice: args.voice },
       },
-      tools: toolDefinitionsFor(args.tools),
+      tools: phoneToolDefinitions(args.tools),
       tool_choice: 'auto',
     },
   };
@@ -690,7 +698,7 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     }
     stage = 'CALL_STARTED';
     setStage(initialStage(call.spec.template));
-    const instructions = buildInstructions(call.spec, { businessName: call.businessName, messageChannel: deps.messageChannel });
+    const instructions = buildInstructions(call.spec, { businessName: call.businessName, messageChannel: deps.messageChannel, facts: call.facts, menu: call.menu, nowMs: now() });
     const session = buildSessionUpdate({ model, voice: deps.voice ?? VOICE, instructions, tools: allowedTools });
     const socket = openai;
     socket.onOpen(() => {

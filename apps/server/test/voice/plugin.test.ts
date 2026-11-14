@@ -3,7 +3,8 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import twilio from 'twilio';
 import WebSocket from 'ws';
-import { barberSpecV1, pizzaSpecV2 } from '@abos/contracts/fixtures';
+import type { CatalogItem } from '@abos/contracts';
+import { barberSpecV1, pizzaCatalog, pizzaSpecV2 } from '@abos/contracts/fixtures';
 import { createTwilioRequestValidator, voicePlugin } from '../../src/voice/plugin';
 import type { FactsSnapshot, LiveAgentResolution, VoicePluginOptions } from '../../src/voice/types';
 import { FakeSocket, PIZZA_SNAPSHOT, fakeCalls, fakeEvents, fakeLogger, fakeToolset, specWith } from './helpers';
@@ -19,11 +20,12 @@ afterEach(async () => {
   app = undefined;
 });
 
-async function build(opts: { resolution?: LiveAgentResolution; facts?: () => Promise<FactsSnapshot>; validator?: VoicePluginOptions['twilioValidator']; rootWebsocket?: boolean } = {}) {
+async function build(opts: { resolution?: LiveAgentResolution; facts?: () => Promise<FactsSnapshot>; menu?: () => Promise<CatalogItem[]>; validator?: VoicePluginOptions['twilioValidator']; rootWebsocket?: boolean } = {}) {
   const calls = fakeCalls();
   let resolution = opts.resolution ?? live;
   const liveAgent = { resolve: vi.fn(async () => resolution) };
   const facts = { snapshot: vi.fn(opts.facts ?? (async () => PIZZA_SNAPSHOT)) };
+  const menu = opts.menu === undefined ? undefined : { snapshot: vi.fn(opts.menu) };
   const events = fakeEvents();
   const validated: { url: string; params: Record<string, string> }[] = [];
   const twilioValidator = opts.validator ?? { validate: vi.fn((sig: string, url: string, params: Record<string, string>) => (validated.push({ url, params }), sig === 'good')) };
@@ -39,12 +41,12 @@ async function build(opts: { resolution?: LiveAgentResolution; facts?: () => Pro
   app = Fastify();
   // The app may register the WebSocket plugin at the root; the voice plugin then reuses it.
   if (opts.rootWebsocket !== false) await app.register(websocket);
-  await app.register(voicePlugin, { publicServerUrl: `${PUBLIC_URL}/`, liveAgent, facts, calls, events, toolsetFactory, twilioValidator, openaiSocketFactory, messageChannel: 'surge', logger, twilioBusinessId: 'biz_pizza_01' });
+  await app.register(voicePlugin, { publicServerUrl: `${PUBLIC_URL}/`, liveAgent, facts, ...(menu ? { menu } : {}), calls, events, toolsetFactory, twilioValidator, openaiSocketFactory, messageChannel: 'surge', logger, twilioBusinessId: 'biz_pizza_01' });
   await app.ready();
   const a = app;
   const post = (signature = 'good', form = FORM) =>
     a.inject({ method: 'POST', url: '/webhooks/twilio/voice', headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-twilio-signature': signature }, payload: form });
-  return { app: a, calls, liveAgent, facts, events, validated, sockets, openaiSocketFactory, toolsetFactory, lines, post, switchAgent: (r: LiveAgentResolution) => (resolution = r) };
+  return { app: a, calls, liveAgent, facts, menu, events, validated, sockets, openaiSocketFactory, toolsetFactory, lines, post, switchAgent: (r: LiveAgentResolution) => (resolution = r) };
 }
 
 describe('voice plugin: POST /webhooks/twilio/voice', () => {
@@ -195,6 +197,50 @@ describe('voice plugin: fact snapshot (S9, S10)', () => {
 });
 
 describe('voice plugin: /ws/phone', () => {
+  const instructionsOf = async (t: Awaited<ReturnType<typeof build>>) => {
+    const token = tokenOf((await t.post()).body);
+    const ws = await t.app.injectWS('/ws/phone');
+    ws.send(JSON.stringify({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ1', customParameters: { streamToken: token } } }));
+    await vi.waitFor(() => expect(t.sockets).toHaveLength(1));
+    t.sockets[0]?.open();
+    const update = t.sockets[0]?.ofType('session.update')[0] as { session: { instructions: string } };
+    ws.terminate();
+    return update.session.instructions;
+  };
+
+  it('pins the menu at the webhook and writes it, the hours and the time into the prompt', async () => {
+    const t = await build({ menu: async () => pizzaCatalog });
+    const text = await instructionsOf(t);
+    expect(t.menu?.snapshot).toHaveBeenCalledWith('biz_pizza_01');
+    expect(t.menu?.snapshot).toHaveBeenCalledTimes(1);
+    expect(text).toContain('Menu, prices before tax:');
+    expect(text).toContain('Opening hours: Monday 11 AM to 9 PM.');
+    expect(text).toContain('Now: ');
+    expect(text).toContain('Never say you are checking');
+  });
+
+  it('a failed menu read does not stop the call; the agent keeps the read_catalog path', async () => {
+    const t = await build({ menu: async () => Promise.reject(new Error('db down')) });
+    const text = await instructionsOf(t);
+    expect(t.calls.startCall).toHaveBeenCalledTimes(1);
+    expect(text).not.toContain('Menu, prices before tax:');
+    expect(text).toContain('Build the cart only from IDs returned by read_catalog');
+    expect(text).toContain('Opening hours: Monday 11 AM to 9 PM.');
+  });
+
+  it('never puts menu rows of another business in the prompt', async () => {
+    const foreign: CatalogItem[] = [{ ...pizzaCatalog[0]!, businessId: 'biz_barber_01', name: 'Foreign Pie' }, pizzaCatalog[1]!];
+    const text = await instructionsOf(await build({ menu: async () => foreign }));
+    expect(text).not.toContain('Foreign Pie');
+    expect(text).toContain('Pepperoni');
+  });
+
+  it('does not read a menu for an agent without the catalog capability', async () => {
+    const t = await build({ resolution: { ...live, businessId: 'biz_barber_01', spec: barberSpecV1 }, menu: async () => pizzaCatalog });
+    await t.post();
+    expect(t.menu?.snapshot).not.toHaveBeenCalled();
+  });
+
   it('accepts the minted token over the socket and opens the model session', async () => {
     const t = await build();
     const token = tokenOf((await t.post()).body);
