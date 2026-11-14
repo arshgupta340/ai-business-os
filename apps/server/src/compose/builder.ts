@@ -76,10 +76,12 @@ export function dbAgentDraftStore(db: Db): AgentDraftStore {
       return (await db.query('select * from public.agents where business_id = $1 order by created_at desc, id desc', [businessId])).rows.map((r) => fromRow(r as Row));
     },
     async update(a) {
-      // Publish state and versions belong to B-17. This store changes only the draft fields.
+      // Publish, pause and rollback pass the same store (issue #96 items 1 and 2), so state and
+      // active_version_id are written too; the builder's draft writers keep both as they read them.
       // The template column follows the draft (review finding 6): the summary and the call stage read it.
-      const r = await db.query('update public.agents set name = $3, draft_spec = $4::jsonb, template = $5, spec_revision = $6 where id = $1 and business_id = $2 returning id',
-        [a.id, a.businessId, a.name, json(a.draftSpec), a.template, a.specRevision]);
+      const r = await db.query(`update public.agents set name = $3, draft_spec = $4::jsonb, template = $5, spec_revision = $6, state = $7, active_version_id = $8
+        where id = $1 and business_id = $2 returning id`,
+      [a.id, a.businessId, a.name, json(a.draftSpec), a.template, a.specRevision, a.state, a.activeVersionId ?? null]);
       if (r.rows.length === 0) throw new Error(`unknown agent ${a.id}`);
     },
   };
