@@ -4,3 +4,6 @@ node_modules/
 .env*.local
 test-results/
 playwright-report/
+
+# The root .gitignore ignores every build/ folder. This one is a route, not build output.
+!/app/(dashboard)/build/
