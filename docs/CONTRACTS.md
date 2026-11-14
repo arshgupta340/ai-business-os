@@ -237,7 +237,7 @@ type ActionExecution = {
 type MessageDispatchStatus = "QUEUED" | "SENT" | "DELIVERED" | "FAILED" | "UNKNOWN";
 type MessageDispatch = {
   id: string; businessId: string; executionId: string; subjectId: string;
-  channel: "surge" | "android_gateway" | "whatsapp_sandbox";
+  channel: "surge" | "android_gateway" | "whatsapp_sandbox" | "agentphone";
   recipient: string;           // E.164, stored in full, never in events
   template: "checkout_link" | "booking_confirmed";
   status: MessageDispatchStatus; providerMessageId?: string; idempotencyKey: string; errorCode?: ErrorCode;
@@ -246,7 +246,7 @@ type MessageDispatch = {
 
 ```
 
-`messageConsent` is a boolean on `Contact` and on `BookingCustomer`. With consent, `messageRecipient` is required (and `consentAt` on a `Contact`). Without consent there is no recipient, the approval's `messageChannel` is `qr_only`, and the checkout link is shown as a QR code at the counter. Only `whatsapp_sandbox` can reach `DELIVERED`. `SENT` is the last state for every other channel, and `deliveredAt` is present only on a `DELIVERED` dispatch.
+`messageConsent` is a boolean on `Contact` and on `BookingCustomer`. With consent, `messageRecipient` is required (and `consentAt` on a `Contact`). Without consent there is no recipient, the approval's `messageChannel` is `qr_only`, and the checkout link is shown as a QR code at the counter. Only `whatsapp_sandbox` and `agentphone` can reach `DELIVERED`. `SENT` is the last state for every other channel, and `deliveredAt` is present only on a `DELIVERED` dispatch.
 
 ```ts
 type CallStage = "CALL_STARTED" | "COLLECTING" | "VALIDATING" | "UNAVAILABLE" | "CUSTOMER_CONFIRMED"
@@ -280,7 +280,7 @@ type IntegrationHealthEntry = {
   state: "connected" | "degraded" | "disconnected";
   lastCheckedAt: string;
   environment?: "sandbox";      // always present for square
-  channel?: "surge" | "android_gateway" | "whatsapp_sandbox" | "qr_only"; // message_channel only
+  channel?: "surge" | "android_gateway" | "whatsapp_sandbox" | "qr_only" | "agentphone"; // message_channel only
   detail?: string;
 };
 type IntegrationHealth = Record<IntegrationProvider, IntegrationHealthEntry>; // GET /api/integrations/health
@@ -423,7 +423,7 @@ The payment poller checks every 30 seconds for 15 minutes after the link is read
 | `SENT` | verified delivery callback: delivered | `DELIVERED` (terminal, server only) |
 | `SENT` | verified delivery callback: failed | `FAILED` (terminal) |
 
-Only `whatsapp_sandbox` can reach `DELIVERED`. `SENT` is the last state for every other channel. The `MessageDispatch` schema refuses `DELIVERED` on any other channel.
+Only `whatsapp_sandbox` and `agentphone` (D-12) can reach `DELIVERED`. `SENT` is the last state for every other channel. The `MessageDispatch` schema refuses `DELIVERED` on any other channel.
 
 **Fact.** An approved `fact_edit` targets the existing verified row. When `local.fact.update` runs, that row becomes `superseded` and the approved value is inserted as a new `verified` row in the same transaction. `superseded` is terminal. **Fact conflict.** `open` to `resolved` when the owner picks a candidate (or an approved edit carries `resolvesConflictId`); `resolved` is terminal.
 
@@ -471,7 +471,7 @@ Payloads are redacted. `guardrail.refused` names the rule that fired in `rule` a
 | `agent.paused` | `{ agentId }` | OV, MA |
 | `live_agent.changed` | `{ phoneNumberLast4, agentId, agentVersionId, previousAgentId? }` | OV, MA |
 | `guardrail.refused` | `{ callId?, executionId?, approvalId?, reasonCode, rule: GuardrailRule, toolName? }`. `reasonCode` is a machine code of 1 to 64 characters matching `^[A-Za-z0-9_][A-Za-z0-9_.:-]*$`, for example `fact_change_forbidden` or `approval_pending`. `callId` is set for a refusal on a call, `executionId` and `approvalId` for a refusal in the executor or the approval engine | LO, MA |
-| `webhook.rejected` | `{ provider: "square" \| "twilio", reason: "signature_invalid" \| "malformed" }`. `businessId` is the business that owns the integration the webhook URL belongs to, read from `integrations`. Nothing from the request body is trusted, stored or copied | IN, LO |
+| `webhook.rejected` | `{ provider: "square" | "twilio" | "agentphone", reason\| "twilio", reason: "signature_invalid" \| "malformed" }`. `businessId` is the business that owns the integration the webhook URL belongs to, read from `integrations`. Nothing from the request body is trusted, stored or copied | IN, LO |
 
 ## 8. Agent tools
 

@@ -156,11 +156,12 @@ export const CallChannelSchema = z.enum(['phone', 'test_console']);
 export type CallChannel = z.infer<typeof CallChannelSchema>;
 
 /** SPEC 2.9: `message_dispatches.channel`. `qr_only` never appears here. */
-export const MessageChannelSchema = z.enum(['surge', 'android_gateway', 'whatsapp_sandbox']);
+export const MessageChannelSchema = z.enum(['surge', 'android_gateway', 'whatsapp_sandbox', 'agentphone']);
 export type MessageChannel = z.infer<typeof MessageChannelSchema>;
 
 /** SPEC 3.3: the server's `MESSAGE_CHANNEL` setting. The order and booking approval payloads carry this value. */
-export const MessageChannelSettingSchema = z.enum(['surge', 'android_gateway', 'whatsapp_sandbox', 'qr_only']);
+/** `agentphone` (D-12) is additive: SMS through the AgentPhone REST API. */
+export const MessageChannelSettingSchema = z.enum(['surge', 'android_gateway', 'whatsapp_sandbox', 'qr_only', 'agentphone']);
 export type MessageChannelSetting = z.infer<typeof MessageChannelSettingSchema>;
 
 export const MessageTemplateSchema = z.enum(['checkout_link', 'booking_confirmed']);
@@ -235,7 +236,7 @@ export type SyncTarget = z.infer<typeof SyncTargetSchema>;
 export const SyncRecordTypeSchema = z.enum(['order', 'booking']);
 export type SyncRecordType = z.infer<typeof SyncRecordTypeSchema>;
 
-export const WebhookProviderSchema = z.enum(['square', 'twilio']);
+export const WebhookProviderSchema = z.enum(['square', 'twilio', 'agentphone']);
 export type WebhookProvider = z.infer<typeof WebhookProviderSchema>;
 
 export const WebhookRejectReasonSchema = z.enum(['signature_invalid', 'malformed']);

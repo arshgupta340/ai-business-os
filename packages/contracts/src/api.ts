@@ -403,5 +403,7 @@ export const WEBHOOK_ENDPOINTS = {
   twilioVoice: { method: 'POST', path: '/webhooks/twilio/voice', owner: 'arsh', tier: 'MUST', signatureHeader: 'x-twilio-signature', contentType: 'application/x-www-form-urlencoded', responds: 'TwiML' },
   twilioStatus: { method: 'POST', path: '/webhooks/twilio/status', owner: 'arsh', tier: 'MUST', signatureHeader: 'x-twilio-signature', contentType: 'application/x-www-form-urlencoded', responds: '204' },
   square: { method: 'POST', path: '/webhooks/square', owner: 'arsh', tier: 'MUST', signatureHeader: 'x-square-hmacsha256-signature', contentType: 'application/json', responds: '200' },
+  // D-12: one AgentPhone webhook for calls and texts. Voice turns are answered with a JSON object or NDJSON.
+  agentphone: { method: 'POST', path: '/webhooks/agentphone', owner: 'arsh', tier: 'SHOULD', signatureHeader: 'x-webhook-signature', contentType: 'application/json', responds: 'JSON' },
 } as const;
 export const PHONE_SOCKET_PATH = '/ws/phone';
