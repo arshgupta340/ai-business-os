@@ -2,6 +2,7 @@
 // npm run register-webhooks -- --apply            points Twilio and the Square sandbox at PUBLIC_SERVER_URL.
 // npm run register-webhooks -- --twilio-only      only the Twilio number (add --apply to change it).
 // npm run register-webhooks -- --square-only      only the Square sandbox subscription (add --apply to change it).
+// npm run register-webhooks -- --agentphone-only  only the AgentPhone project webhook (D-12; --apply rotates its secret).
 // npm run register-webhooks -- --base https://x   use this address instead of PUBLIC_SERVER_URL.
 // The logic lives in scripts/register-webhooks-lib.ts.
 import { existsSync } from 'node:fs';

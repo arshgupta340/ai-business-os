@@ -81,3 +81,20 @@ These are additional contradictions found by searching all files under `docs/` a
 - **Builder response example:** API section 3.3 omits `sessionId` and `inputMode` on the assistant message and omits `unsupportedRequests` on the turn response. SPEC section 2.9 requires those fields.
 - **Original PRD payload and key:** PRD section 12's approval example uses fields such as `proposalId`, `amountMinor` and `smsRecipient`, omits required material fields and mixes approval metadata into the payload. SPEC section 2.9 defines the exact order payload fields. PRD section 14's example hashes `businessId + proposalId + capabilityId + approvalRevision`; SPEC section 2.9 and migration 0004 use colon-separated `businessId:subjectId:actionType:approvalId`.
 - **Original PRD table names and webhook storage:** PRD section 10 lists `orders.amount_minor`, `approval_requests.action_type`, `payload_json`, `activity_events.redacted_payload` and `webhook_events.signature_valid`. SPEC section 2.9's order-total, column-name and webhook-storage rulings require the current DATA-MODEL names and permit only verified webhook rows, with no `signature_valid` column.
+
+## AgentPhone (D-12), 2026-11-14: unverified assumptions and fail-closed choices
+
+Vendor facts are in `docs/notes-agentphone.md`, each with its URL. None was tested: no AgentPhone account exists yet.
+
+- **Voice mode.** The build assumes the AgentPhone agent is set to `webhook` voice mode. In `hosted` mode AgentPhone's own model would answer and no turn would reach us.
+- **Turn timing.** A turn is bounded at 20 seconds (AgentPhone's default webhook timeout is 30). If the model is slower, the caller hears a fixed apology and the late answer is dropped; the runner is not cancelled, so a propose tool already running can still store its PENDING proposal. After 1.5 seconds without an answer the caller hears an interim "One moment."
+- **No hang-up from our side.** The server never ends an AgentPhone call on its own, matching voice NOTES item 4 (no goodbye is inferred from the transcript). The call ends when the caller hangs up, or by AgentPhone's own silence limit, and `agent.call_ended` closes the call row.
+- **Owner decision mid-call.** No documented API pushes speech into a live webhook-mode call, so the decision is spoken at the caller's next turn, in fixed wording that never says paid or booked.
+- **Restart.** Call history and the per-call toolset live in process memory, as for sim-call. After a restart the call continues on its pinned version with a fresh history and a fresh fact read.
+- **`agent.call_ended` recovery.** AgentPhone sends it once. If processing fails, the stored row is retried every minute by the AgentPhone job and closed as `completed`, since the stored row keeps only the provider call ID.
+- **Inbound texts.** Verified, deduplicated and stored with the provider message ID only. There is no inbound-text feature, so nothing else happens and the body is never stored.
+- **Delivery status.** There is no receipt webhook. Dispatches on `agentphone` that are SENT within the last 24 hours are matched against up to 300 messages of the number's history every minute. Older messages are not checked. How long AgentPhone keeps history is not documented.
+- **Send outcomes.** Only the documented `sent` (and `delivered`) status counts as SENT. Any other status, a timeout, a 5xx or a 409 is UNKNOWN and is never resent; 4xx is FAILED.
+- **Health entry.** With `TELEPHONY_PROVIDER=agentphone`, AgentPhone is reported on the existing `twilio` health key ("the phone line your agent answers"), with the detail naming AgentPhone. A separate key would be a contract and web change.
+- **Publish binding.** Publish binds `live_agent` to the selected provider's number. The seed still uses `TWILIO_PHONE_NUMBER`, so after switching, publish again.
+- **Web app.** `apps/web` has exhaustive `Record` maps of message channels and webhook providers (`integrations-view.ts`, `HealthSection.tsx`) that need an `agentphone` label after the contract change. That is a needs:saina change; until it lands, `npm run typecheck` fails in `apps/web` only.

@@ -133,6 +133,8 @@ Set these by name in the host's variable settings. Values come from your `.env.l
 | `SQUARE_ACCESS_TOKEN`, `SQUARE_LOCATION_ID` | Square Developer Console, your app, Sandbox tab |
 | `SQUARE_WEBHOOK_SIGNATURE_KEY`, `SQUARE_WEBHOOK_URL` | Part 3, after the address exists |
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` | Twilio Console, Account Info, and Phone Numbers |
+| `TELEPHONY_PROVIDER` | `twilio` (the default when unset) or `agentphone` (D-12). See "Switching the telephony provider" below. |
+| `AGENTPHONE_API_KEY`, `AGENTPHONE_WEBHOOK_SECRET`, `AGENTPHONE_NUMBER_ID`, `AGENTPHONE_PHONE_NUMBER` | AgentPhone dashboard and `npm run register-webhooks -- --agentphone-only --apply` (docs/SETUP-ACCOUNTS.md 4b) |
 | `MESSAGE_CHANNEL` and that channel's keys | Spike B-04 result. `qr_only` needs no keys. `surge` needs `SURGE_API_KEY`. `android_gateway` needs `ANDROID_GATEWAY_URL` and `ANDROID_GATEWAY_API_KEY`. `whatsapp_sandbox` needs `TWILIO_WHATSAPP_FROM`. |
 | `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_CALENDAR_ID`, `GOOGLE_SHEET_ID` | Google Cloud service account key, the demo calendar and the demo sheet |
 | `PUBLIC_SERVER_URL` | The host's own address, after the first deploy |
@@ -275,6 +277,23 @@ These are application code changes, not part of B-09. They are listed so the own
 - **CORS** for the Vercel address, if the web app calls the server from the browser.
 - **`/api/integrations/health`** is not built yet.
 
+## Switching the telephony provider (D-12)
+
+`TELEPHONY_PROVIDER` picks who answers calls. Only one answers at a time, and the server never falls back from one to the other.
+
+- **`twilio` (default).** Unchanged: `/webhooks/twilio/voice` and `/ws/phone` answer calls through the Realtime relay. `/webhooks/agentphone` answers 503 and reads nothing.
+- **`agentphone`.** `/webhooks/agentphone` answers each caller turn with our agent (the same model and read and propose tools as sim-call, so it needs `OPENAI_API_KEY` and `OPENAI_BUILDER_MODEL`). `/webhooks/twilio/voice` answers 503. If an AgentPhone variable is missing, `/webhooks/agentphone` also answers 503, and the phone-line entry in integration health says `telephony provider agentphone: missing ...`.
+
+To switch to AgentPhone:
+1. Set the four `AGENTPHONE_*` variables and `TELEPHONY_PROVIDER=agentphone` on the host, then redeploy.
+2. Run `npm run register-webhooks -- --agentphone-only --apply`, copy the new `AGENTPHONE_WEBHOOK_SECRET` to the host, and redeploy again. Setting the webhook rotates the secret, so run it only when the address changes.
+3. Publish the agent again from the dashboard. Publish binds the live agent to the selected provider's number (`AGENTPHONE_PHONE_NUMBER`); until then a call to the AgentPhone number hears "this number is not taking calls".
+4. Check `GET /api/integrations/health?refresh=1`: the phone-line entry should say `agentphone number readable`.
+
+To switch back: set `TELEPHONY_PROVIDER=twilio` (or remove it), redeploy and publish again so the live agent points at `TWILIO_PHONE_NUMBER`. The Twilio console settings were never touched, so nothing needs re-registering on Twilio.
+
+Texting is separate: `MESSAGE_CHANNEL=agentphone` sends the approved checkout or booking message through AgentPhone with either telephony provider, once AgentPhone's 10DLC registration is approved. Its delivery status is read from AgentPhone's message history every minute; there is no receipt webhook.
+
 ## Registering the webhooks with one command
 
 Once `PUBLIC_SERVER_URL` in `.env.local` holds the public address (tunnel or host), one command does the Square and Twilio steps of Part 3 for you. First look at what it would change. This is a dry run: it reads both accounts and changes nothing.
@@ -295,7 +314,7 @@ What `--apply` changes:
 - **Square sandbox.** If a subscription already points at `<PUBLIC_SERVER_URL>/webhooks/square`, its events are set to `payment.created` and `payment.updated` and it is enabled. Otherwise it creates one named "AI Business OS sandbox" with those events. It refuses to run unless `SQUARE_ENVIRONMENT` is `sandbox`.
 - **`.env.local`.** It writes `SQUARE_WEBHOOK_SIGNATURE_KEY` and `SQUARE_WEBHOOK_URL`, replacing those two lines and leaving every other line as it was. The signature key is never printed.
 
-Other options: `--twilio-only`, `--square-only`, and `--base <url>` to use an address other than `PUBLIC_SERVER_URL`. The address must be `https`, must not be localhost and must have no path.
+Other options: `--twilio-only`, `--square-only`, `--agentphone-only` (D-12; only the AgentPhone project webhook, see above), and `--base <url>` to use an address other than `PUBLIC_SERVER_URL`. The address must be `https`, must not be localhost and must have no path.
 
 **Undo the Twilio change.** The output shows each value before and after, and after `--apply` it prints the previous voice URL and status callback. To go back, enter those values on the number in the Twilio Console (Phone Numbers, Manage, Active numbers).
 

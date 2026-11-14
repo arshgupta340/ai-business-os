@@ -35,6 +35,17 @@ const WHATSAPP = {
   // The spike could not confirm Twilio's error body. Never return raw errors.
   errorBodyUnverified: true,
 } as const;
+// D-12, from the vendor's documentation (docs/notes-agentphone.md), not tested with a real send:
+// POST /v1/messages with to_number, body and number_id; the answer has id and status "sent". "The API
+// doesn't support customer-supplied idempotency keys", and a timeout, 5xx or 409 DELIVERY_UNCONFIRMED may
+// already have sent, so those are UNKNOWN and are never resent (sendOnce's durable dispatch row is the gate).
+// Delivery is not confirmed by the send: a polled delivery status may later move SENT to DELIVERED or FAILED.
+const AGENTPHONE = {
+  baseUrl: 'https://api.agentphone.ai',
+  path: '/v1/messages',
+  accepted: ['sent', 'delivered'],
+  failed: ['failed'],
+} as const;
 
 // Status mapping for every channel: 2xx with a recognized accepted state and an id is SENT,
 // 4xx is FAILED with a contract code, and 408, 409, 5xx, a timeout or an unreadable body is
@@ -191,6 +202,17 @@ export function createMessageAdapter(config: MessageAdapterConfig): MessageAdapt
       // Preserve the spike's provider cap. Local dedupe uses all 64 characters.
       body: JSON.stringify({ id: input.idempotencyKey.slice(0, SMSGATE.maxIdLength), textMessage: { text: input.body }, phoneNumbers: [input.to], ...device }),
     }), (json) => acknowledged(json, 'id', 'state', SMSGATE.accepted, SMSGATE.failed));
+  }
+
+  if (channel === 'agentphone') {
+    const apiKey = required(config.agentphone?.apiKey, 'AGENTPHONE_API_KEY');
+    const numberId = required(config.agentphone?.numberId, 'AGENTPHONE_NUMBER_ID');
+    const base = baseUrl(config.agentphone?.baseUrl ?? AGENTPHONE.baseUrl, 'AGENTPHONE_BASE_URL');
+    // The dispatch key is our own dedupe (sendOnce); AgentPhone has no field for it, so it is not sent.
+    return networkAdapter(channel, fetch, timeoutMs, (input) => ({
+      url: `${base}${AGENTPHONE.path}`, headers: { ...jsonHeaders, Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ to_number: input.to, body: input.body, number_id: numberId }),
+    }), (json) => acknowledged(json, 'id', 'status', AGENTPHONE.accepted, AGENTPHONE.failed));
   }
 
   const accountSid = required(config.whatsappSandbox?.accountSid, 'TWILIO_ACCOUNT_SID');
