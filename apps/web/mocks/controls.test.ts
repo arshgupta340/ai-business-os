@@ -135,7 +135,7 @@ describe("simulateSheetsDisconnected", () => {
     expect(before.google_calendar.state).toBe("degraded");
     mockControls.simulateSheetsDisconnected?.();
     const after = await api.getIntegrationsHealth(PIZZA);
-    expect(after.google_sheets).toMatchObject({ state: "disconnected", detail: "Reconnect Google Sheets to resume sync." });
+    expect(after.google_sheets).toMatchObject({ state: "disconnected", detail: "Reconnect Google Sheets to resume sync" });
     expect(after.google_calendar.state).toBe("degraded");
     await mockControls.reset();
     expect((await api.getIntegrationsHealth(PIZZA)).google_sheets.state).toBe("connected");

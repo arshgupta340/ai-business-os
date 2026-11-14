@@ -87,6 +87,24 @@ describe('labels', () => {
     expect(summaryLine(approval(), 'America/Los_Angeles')).toBe('Pickup Nov 13, 6:00 PM, link to phone ending 0123');
   });
 
+  it('says QR code only when the business sends no message, even with a recipient on file', () => {
+    const base = approval();
+    const qr = {...base, payload: {...base.payload, messageChannel: 'qr_only'}} as ApprovalRequest;
+    expect(summaryLine(qr, 'America/Los_Angeles')).toBe('Pickup Nov 13, 6:00 PM, QR code only, no message is sent');
+  });
+
+  it('summarizes a fact edit with the current value, and a new fact without one', () => {
+    const edit = (before: unknown) =>
+      ({
+        ...approval(),
+        bundleType: 'fact_edit',
+        subjectId: 'fact_1',
+        payload: {businessId: 'biz_pizza_01', subjectId: 'fact_1', kind: 'hours', key: 'fri', before, after: {open: '11:00', close: '23:00'}, fromVersion: before ? 1 : 0, actionBundle: ['local.fact.update'], expiresAt: '2026-11-13T19:52:00Z'},
+      }) as unknown as ApprovalRequest;
+    expect(summaryLine(edit({open: '11:00', close: '22:00'}), 'America/Los_Angeles')).toBe('Opening hours, Friday: 11:00 to 23:00 (now 11:00 to 22:00)');
+    expect(summaryLine(edit(null), 'America/Los_Angeles')).toBe('Opening hours, Friday: 11:00 to 23:00 (new fact)');
+  });
+
   it('formats hours values, closed days and a new fact', () => {
     expect(formatFactValue('hours', {open: '11:00', close: '22:00'})).toBe('11:00 to 22:00');
     expect(formatFactValue('hours', {closed: true})).toBe('Closed');
