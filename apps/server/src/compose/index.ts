@@ -40,6 +40,7 @@ import type { PricesDependencies } from '../api/prices/index';
 import type { RecoveryPorts } from '../api/recovery/index';
 import { createDbRecoveryPorts } from './recovery';
 import { createDbFallback, type FallbackDeps } from './fallback';
+import { dbAgentVersionStore, dbLiveAgentStore, dbPublishEventSink, squareCatalogSync } from './builder-publish';
 import { createCallDecisions, type CallDecisionsBus } from './decisions';
 import { createProposeFactFromChat, dbAgentDraftStore, dbBuilderSessionStore, dbBusinessKnowledge, dbDraftFactStore, dbLiveAgentReader, type ProposeFactFromChat } from './builder';
 import { notWiredExecutor, notWiredWebhooks, type Executor, type ExecutorFactory, type SeamDeps, type WebhooksFactory } from './seams';
@@ -231,12 +232,20 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
 
   // The builder's own seams (issue #65). Without a database it keeps its in-memory defaults, and
   // without a way to verify tokens it keeps its fail-closed auth default.
+  const proposeFactFromChat = createProposeFactFromChat(engine);
+  // Publish stops on a disconnected integration, read from the last stored health results.
+  const integrations = { read: () => health.read({ refresh: false }) };
+  // Extraction keeps its in-memory stores: uploaded bytes have no database column or storage bucket
+  // wired, and upload facts reference their files row, so the set moves together (see the report).
   const builder: BuilderPluginOptions = hasDb ? {
     ...(authConfigured ? { auth: createBuilderAuth(db, verifier) } : {}),
     liveAgent: dbLiveAgentReader(db), sessions: dbBuilderSessionStore(db), agents: dbAgentDraftStore(db),
-    draftFacts: dbDraftFactStore(db), knowledge: dbBusinessKnowledge(db),
-  } : {};
-  const proposeFactFromChat = createProposeFactFromChat(engine);
+    draftFacts: dbDraftFactStore(db), knowledge: dbBusinessKnowledge(db), proposeFactFromChat,
+    publish: {
+      versions: dbAgentVersionStore(db), events: dbPublishEventSink(db), syncCatalog: squareCatalogSync(db, providers, now), integrations,
+      ...(env.TWILIO_PHONE_NUMBER ? { liveAgents: dbLiveAgentStore(db, env.TWILIO_PHONE_NUMBER) } : {}),
+    },
+  } : { proposeFactFromChat, publish: { integrations } };
 
   const fallback = createDbFallback({ db, providers, ownedNumber: env.TWILIO_PHONE_NUMBER, newId,
     ...(options.versionEnablesFallback ? { versionEnablesFallback: options.versionEnablesFallback } : {}) });

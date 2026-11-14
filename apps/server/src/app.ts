@@ -107,8 +107,9 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
   await app.register(withAuthPolicy('owner', async (scope) => {
     registerSimCall(scope, { db: composed.db, calls: composed.calls, toolsetFor: composed.toolsetFor, model: composed.agentModel, now: composed.now, newId: composed.newId });
   }));
-  // The builder authenticates its own routes through BuilderAuth (composed.builder.auth).
-  await app.register(withAuthPolicy('builder', builderPlugin), composed.builder);
+  // The builder authenticates its own routes through BuilderAuth (composed.builder.auth). Every builder
+  // route declares config { auth: 'builder' } itself, which the default-deny guard reads.
+  await app.register(builderPlugin, composed.builder);
 
   // Phone calls (B-15). Off, with a log line naming the missing settings, when a key is absent.
   // When it is off, the voice webhook answers 503 (Twilio retries later) and /ws/phone does not exist.
