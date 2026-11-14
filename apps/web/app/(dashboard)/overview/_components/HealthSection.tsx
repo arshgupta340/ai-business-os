@@ -21,6 +21,7 @@ const CHANNEL_LABEL: Record<NonNullable<IntegrationHealthEntry['channel']>, stri
   android_gateway: 'Android gateway',
   whatsapp_sandbox: 'WhatsApp sandbox',
   qr_only: 'QR code only, no message is sent',
+  agentphone: 'AgentPhone',
 };
 
 function describeEntry(provider: IntegrationProvider, entry: IntegrationHealthEntry, timeZone: string): string {
