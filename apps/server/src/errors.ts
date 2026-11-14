@@ -9,12 +9,13 @@ export class AppError extends Error {
     public readonly code: ErrorCode,
     message: string,
     _status?: number,
-    _retryable?: boolean,
+    retryable?: boolean,
     public readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'AppError';
     this.status = ERROR_CODE_INFO[code].httpStatus;
-    this.retryable = ERROR_CODE_INFO[code].retryable;
+    // An explicit retryable wins (a redirect answer is never worth retrying); the status stays the contract's.
+    this.retryable = retryable ?? ERROR_CODE_INFO[code].retryable;
   }
 }

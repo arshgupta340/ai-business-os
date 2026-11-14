@@ -242,6 +242,17 @@ export async function apiRoutes(app: FastifyInstance, deps: ApiDependencies): Pr
         if ('resolvesConflictId' in proposal) {
           const conflict = await one(db, 'fact_conflicts', proposal.resolvesConflictId, businessId);
           if (conflict.state !== 'open') throw new AppError('INVALID_STATE', 'Conflict is already resolved.');
+          // A Square price is not a fact edit, and the price proposal carries no resolvesConflictId yet.
+          if (conflict.kind === 'menu_item') {
+            throw new AppError('CAPABILITY_NOT_ALLOWED', 'A Square price is changed with a price change. Change the price, sync, then keep the current value on this conflict.', undefined, false,
+              { use: ['POST /api/businesses/:id/catalog/prices/propose', 'POST /api/conflicts/:id/resolve with resolution keep_authoritative'] });
+          }
+          const kept = (await db.query("select value from public.business_facts where business_id = $1 and kind = $2 and key = $3 and status = 'verified'",
+            [businessId, conflict.kind, conflict.key])).rows[0] as { value: unknown } | undefined;
+          if (kept && canonicalJson(kept.value) === canonicalJson(proposal.value)) {
+            throw new AppError('VALIDATION_FAILED', 'This is the current value. Keep it on the conflict instead of proposing it.', undefined, false,
+              { use: 'POST /api/conflicts/:id/resolve with resolution keep_authoritative' });
+          }
           const input = { ...proposal, kind: conflict.kind, key: conflict.key };
           const normalized = ProposeFactBodySchema.options[0].parse({ kind: input.kind, key: input.key, value: input.value, reason: input.reason });
           return { approval: (await ports.proposeFactEdit({ ...normalized, resolvesConflictId: proposal.resolvesConflictId, businessId, ownerUserId })).approval };
