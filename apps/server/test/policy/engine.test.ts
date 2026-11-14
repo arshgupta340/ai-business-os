@@ -291,13 +291,121 @@ describe('bookings and facts', () => {
     expect((await t.db.query('select state, resolved_fact_id from fact_conflicts where id=$1', [unseen])).rows[0]).toEqual({ state: 'open', resolved_fact_id: null });
     expect((await t.db.query("select value from business_facts where business_id=$1 and kind='policy' and key='returns' and status='verified'", [ids.businessId])).rows[0]).toEqual({ value: 'new' });
   });
-  it('a selected conflict is checked at proposal time but stays open after confirmation (no signed binding yet)', async () => {
-    await verifiedFact('policy', 'refunds', 'old');
-    const conflictId = newId('cfl_');
-    await t.insert('fact_conflicts', { id: conflictId, business_id: ids.businessId, kind: 'policy', key: 'refunds', candidates: JSON.stringify([{ sourceType: 'seed', value: 'old' }, { sourceType: 'upload', value: 'new' }]) });
-    const { approval } = await engine.proposeFactEdit({ businessId: ids.businessId, ownerUserId: ids.ownerUserId, kind: 'policy', key: 'refunds', value: 'new', resolvesConflictId: conflictId });
-    await engine.decide(decision(approval));
-    expect((await t.db.query('select state from fact_conflicts where id=$1', [conflictId])).rows[0]).toEqual({ state: 'open' });
+  // Issue #97 follow-up: an approved edit that named a conflict resolves that conflict. The conflict ID is
+  // not hashed material. It is stored with the proposal, in the approval row's payload beside the
+  // material (the row is frozen from insert), and read from there when the step runs.
+  describe('an approved edit that carries resolvesConflictId', () => {
+    const conflictRow = async (id: string) => (await t.db.query('select state, resolved_by, resolved_fact_id from fact_conflicts where id=$1', [id])).rows[0];
+    const resolvedEvents = async (conflictId: string) => (await t.db.query("select correlation_id, actor_type, payload from activity_events where type='fact.changed' and payload->>'resolvedConflictId'=$1", [conflictId])).rows as { correlation_id: string; actor_type: string; payload: Record<string, unknown> }[];
+    async function openConflict(kind: string, key: string, businessId = ids.businessId) {
+      const id = newId('cfl_');
+      await t.insert('fact_conflicts', { id, business_id: businessId, kind, key, candidates: JSON.stringify([{ sourceType: 'seed', value: 'old' }, { sourceType: 'upload', value: 'new' }]) });
+      return id;
+    }
+    const propose = (key: string, value: unknown, resolvesConflictId?: string) =>
+      engine.proposeFactEdit({ businessId: ids.businessId, ownerUserId: ids.ownerUserId, kind: 'policy', key, value: value as never, ...(resolvesConflictId ? { resolvesConflictId } : {}) });
+
+    it('resolves the named conflict when the fact update is applied, and writes fact.changed with resolvedConflictId', async () => {
+      await verifiedFact('policy', 'refunds', 'old');
+      const conflictId = await openConflict('policy', 'refunds');
+      const { approval } = await propose('refunds', 'new', conflictId);
+      // Nothing is resolved by proposing.
+      expect(await conflictRow(conflictId)).toEqual({ state: 'open', resolved_by: null, resolved_fact_id: null });
+      const result = await engine.decide(decision(approval));
+      expect(result.executions[0]?.status).toBe('SUCCEEDED');
+      const fact = (await t.db.query("select id, version from business_facts where business_id=$1 and kind='policy' and key='refunds' and status='verified'", [ids.businessId])).rows[0] as { id: string; version: number };
+      expect(await conflictRow(conflictId)).toEqual({ state: 'resolved', resolved_by: ids.ownerUserId, resolved_fact_id: fact.id });
+      const events = await resolvedEvents(conflictId);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ correlation_id: approval.id, actor_type: 'owner',
+        payload: { resolvedConflictId: conflictId, factId: fact.id, kind: 'policy', key: 'refunds', toVersion: Number(fact.version) } });
+    });
+
+    it('keeps the approval payload exactly the hashed material: the conflict ID is stored beside it, never inside the hash', async () => {
+      await verifiedFact('policy', 'refunds', 'old');
+      const conflictId = await openConflict('policy', 'refunds');
+      const { approval } = await propose('refunds', 'new', conflictId);
+      expect(Object.keys(approval.payload).sort()).toEqual([...MATERIAL_FIELDS.fact_edit].sort());
+      expect(approval.payloadHash).toBe(await payloadHash(approval.payload));
+      const stored = (await t.db.query('select payload, payload_canonical, payload_hash from approval_requests where id=$1', [approval.id])).rows[0] as { payload: Record<string, unknown>; payload_canonical: string; payload_hash: string };
+      expect(stored.payload_canonical).toBe(canonicalJson(approval.payload));
+      expect(stored.payload_hash).toBe(approval.payloadHash);
+      expect(stored.payload.resolvesConflictId).toBe(conflictId);
+      // The stored row cannot be changed afterwards, by the server role or through an update.
+      await expect(t.db.query("update approval_requests set payload = payload - 'resolvesConflictId' where id=$1", [approval.id])).rejects.toMatchObject({ code: '42501' });
+    });
+
+    it('resolves nothing when the named conflict is no longer open, and leaves a newer conflict on the same key alone', async () => {
+      await verifiedFact('policy', 'refunds', 'old');
+      const named = await openConflict('policy', 'refunds');
+      const { approval } = await propose('refunds', 'new', named);
+      // Someone resolves the named conflict first, and another upload opens a new one on the same key.
+      await t.admin((q) => q.query("update public.fact_conflicts set state='resolved', resolved_by=$2, resolved_at=now() where id=$1", [named, ids.ownerUserId]));
+      const newer = await openConflict('policy', 'refunds');
+      const result = await engine.decide(decision(approval));
+      expect(result.executions[0]?.status).toBe('SUCCEEDED');
+      expect(await conflictRow(named)).toEqual({ state: 'resolved', resolved_by: ids.ownerUserId, resolved_fact_id: null });
+      expect(await conflictRow(newer)).toEqual({ state: 'open', resolved_by: null, resolved_fact_id: null });
+      expect(await resolvedEvents(named)).toEqual([]);
+      expect(await resolvedEvents(newer)).toEqual([]);
+      expect((await t.db.query("select value from business_facts where business_id=$1 and kind='policy' and key='refunds' and status='verified'", [ids.businessId])).rows[0]).toEqual({ value: 'new' });
+    });
+
+    it('a rejected or undecided edit resolves nothing', async () => {
+      await verifiedFact('policy', 'refunds', 'old');
+      const conflictId = await openConflict('policy', 'refunds');
+      const { approval } = await propose('refunds', 'new', conflictId);
+      await engine.decide(decision(approval, 'reject'));
+      expect(await conflictRow(conflictId)).toEqual({ state: 'open', resolved_by: null, resolved_fact_id: null });
+      expect(await resolvedEvents(conflictId)).toEqual([]);
+    });
+
+    it('refuses to name a conflict of another business, of another key, or one already resolved', async () => {
+      await verifiedFact('policy', 'refunds', 'old');
+      const foreign = await openConflict('policy', 'refunds', ids.otherBusinessId);
+      await expect(propose('refunds', 'new', foreign)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+      const otherKey = await openConflict('policy', 'parking');
+      await expect(propose('refunds', 'new', otherKey)).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
+      const closed = await openConflict('policy', 'refunds');
+      await t.admin((q) => q.query("update public.fact_conflicts set state='resolved', resolved_by=$2, resolved_at=now() where id=$1", [closed, ids.ownerUserId]));
+      await expect(propose('refunds', 'new', closed)).rejects.toMatchObject({ code: 'INVALID_STATE' });
+      expect(await conflictRow(foreign)).toEqual({ state: 'open', resolved_by: null, resolved_fact_id: null });
+      expect(await conflictRow(otherKey)).toEqual({ state: 'open', resolved_by: null, resolved_fact_id: null });
+    });
+
+    it('the decision cannot add a conflict: an edit proposed without one resolves none, whatever the decision input carries', async () => {
+      await verifiedFact('policy', 'refunds', 'old');
+      const conflictId = await openConflict('policy', 'refunds');
+      const { approval } = await propose('refunds', 'new');
+      await engine.decide({ ...decision(approval), resolvesConflictId: conflictId } as ReturnType<typeof decision>);
+      expect(await conflictRow(conflictId)).toEqual({ state: 'open', resolved_by: null, resolved_fact_id: null });
+    });
+
+    it('a repeat of the same proposal returns the pending approval, and a pending edit that named no conflict cannot gain one', async () => {
+      await verifiedFact('policy', 'refunds', 'old');
+      const conflictId = await openConflict('policy', 'refunds');
+      const first = await propose('refunds', 'new', conflictId);
+      expect((await propose('refunds', 'new', conflictId)).approval.id).toBe(first.approval.id);
+      // The same edit asked again without the conflict is still the pending approval that named it.
+      expect((await propose('refunds', 'new')).approval.id).toBe(first.approval.id);
+
+      await verifiedFact('policy', 'returns', 'old');
+      const later = await openConflict('policy', 'returns');
+      const plain = await propose('returns', 'new');
+      // The stored approval is frozen, so it cannot be made to resolve a conflict after the fact.
+      await expect(propose('returns', 'new', later)).rejects.toMatchObject({ code: 'INVALID_STATE' });
+      await engine.decide(decision(plain.approval));
+      expect(await conflictRow(later)).toEqual({ state: 'open', resolved_by: null, resolved_fact_id: null });
+    });
+
+    it('a new key (fromVersion 0) resolves its named conflict the same way', async () => {
+      const conflictId = await openConflict('policy', 'wifi');
+      const { approval } = await propose('wifi', 'yes', conflictId);
+      expect(approval.payload).toMatchObject({ fromVersion: 0, before: null });
+      await engine.decide(decision(approval));
+      expect(await conflictRow(conflictId)).toEqual({ state: 'resolved', resolved_by: ids.ownerUserId, resolved_fact_id: approval.subjectId });
+      expect(await resolvedEvents(conflictId)).toHaveLength(1);
+    });
   });
 });
 

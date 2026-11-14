@@ -56,7 +56,31 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
   const cleanupMs = opts.limits?.cleanupTimeoutMs ?? 5000;
   const publicUrl = opts.publicServerUrl.replace(/\/+$/, '');
   const webhookUrl = `${publicUrl}${VOICE_WEBHOOK_PATH}`;
-  const tokens = new StreamTokenStore<PinnedCall>(opts.tokenTtlMs ?? STREAM_TOKEN_TTL_MS);
+  const tokenTtlMs = opts.tokenTtlMs ?? STREAM_TOKEN_TTL_MS;
+  // Issue #95 item 6: a call whose credential was rejected or never used can never get a stream. It is
+  // ended here, so its row does not stay IN_PROGRESS and call.ended is written: `failed` when the stream
+  // presented the call's token and was refused, `dropped` when no stream ever presented it.
+  const tokens = new StreamTokenStore<PinnedCall>(tokenTtlMs, undefined, (call, why) => {
+    const reason = why === 'unused' ? 'dropped' : 'failed';
+    logger.warn({ callId: call.callId, agentVersionId: call.agentVersionId, why, endReason: reason }, 'voice: stream credential can no longer be used; ending the call');
+    void withDeadline(opts.calls.endCall(call.callId, reason), cleanupMs, 'failed' as const).then((r) => {
+      if (r === 'failed') logger.error({ callId: call.callId }, 'voice: could not end a call whose stream never started');
+    });
+  });
+  // One timer per minted credential, fired just after its life ends. A credential claimed in time is not reported.
+  const expiryTimers = new Set<ReturnType<typeof setTimeout>>();
+  const watchExpiry = () => {
+    const t = setTimeout(() => {
+      expiryTimers.delete(t);
+      tokens.expireUnclaimed(now());
+    }, tokenTtlMs + 5);
+    (t as { unref?: () => void }).unref?.();
+    expiryTimers.add(t);
+  };
+  app.addHook('onClose', async () => {
+    for (const t of expiryTimers) clearTimeout(t);
+    expiryTimers.clear();
+  });
   // Simultaneous deliveries of one CallSid share one result.
   const inflight = new Map<string, Promise<Reply>>();
 
@@ -87,6 +111,17 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
     const resolution = await opts.liveAgent.resolve(to);
     if (resolution.state !== 'live' || resolution.spec.status !== 'live') {
       logger.info({ state: resolution.state }, 'voice: no live agent answers this number; refused politely');
+      // API.md section 4: a paused agent's call is recorded as started and at once ended (`completed`),
+      // with no credential, snapshot or session. A number with no agent has no agent to record a call for.
+      if (resolution.state !== 'none' && resolution.businessId !== undefined && resolution.agentId !== undefined && resolution.agentVersionId !== undefined) {
+        try {
+          const { callId } = await opts.calls.startCall({ businessId: resolution.businessId, agentId: resolution.agentId, agentVersionId: resolution.agentVersionId, providerCallId, callerLast4: last4(from) });
+          await opts.calls.endCall(callId, 'completed');
+        } catch (err) {
+          // The caller still hears the closed message.
+          logger.error({ ...errorInfo(err) }, 'voice: could not record the call refused for a paused agent');
+        }
+      }
       return ok(buildSayTwiml(NOT_TAKING_CALLS_MESSAGE));
     }
     const capCheck = checkSessionCapabilities(resolution.spec);
@@ -118,7 +153,12 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
       { callId, providerCallId, businessId: resolution.businessId, businessName: resolution.businessName, agentId: resolution.agentId, agentVersionId: resolution.agentVersionId, spec: resolution.spec, facts },
       now(),
     );
-    if (token === null) return refuseReplay();
+    if (token === null) {
+      // The call row exists but no credential could be minted for it: it can never get a stream.
+      await withDeadline(opts.calls.endCall(callId, 'failed'), cleanupMs, 'failed' as const);
+      return refuseReplay();
+    }
+    watchExpiry();
     logger.info({ callId, agentVersionId: resolution.agentVersionId, callerLast4: last4(from) }, 'voice: call started; stream credential minted');
     return ok(buildConnectTwiml(publicUrl, token));
   }

@@ -32,7 +32,7 @@ import {
 } from '@abos/contracts';
 import { AUDIO_FORMAT, OAI_CLIENT, OAI_ITEM, OAI_SERVER, OPENAI_REALTIME_URL, STREAM_TOKEN_PARAM, TURN_DETECTION, TWILIO_EVENT, VOICE } from './constants';
 import { PlaybackTracker, StreamTokenStore, TimingTracker, errorInfo, safeLogger, spokenText, ulawBase64DurationMs } from './logic';
-import { buildInstructions, decisionInstruction, pendingGoodbyeInstruction } from './prompt';
+import { buildInstructions, decisionInstruction, pendingGoodbyeInstruction, proposalLimitInstruction, toolLimitGoodbyeInstruction } from './prompt';
 import type {
   CallDecision,
   CallDecisionsPort,
@@ -247,6 +247,10 @@ export const DEFAULT_LIMITS: RelayLimits = {
   cleanupTimeoutMs: 5_000,
   closeGraceMs: 2_000,
   maxPendingResponses: 4,
+  // Issue #95 item 8. A full order or booking call uses about ten to fifteen tool calls and one proposal,
+  // or two when a slot conflict or a changed cart needs a second one.
+  maxToolCalls: 40,
+  maxProposals: 3,
   // About 30 seconds of 20 ms chunks that Twilio has not confirmed as played.
   maxPendingMarks: 1500,
   maxBufferedBytes: 512 * 1024,
@@ -256,6 +260,10 @@ export const DEFAULT_LIMITS: RelayLimits = {
 
 /** Model error events tolerated after the session is ready before the call is ended. */
 const MAX_MODEL_ERRORS = 3;
+/** Function calls refused after the tool-call cap was reached before the call is cut off without waiting for the goodbye. */
+const MAX_CALLS_AFTER_TOOL_LIMIT = 5;
+const LIMIT_REACHED = 'The limit for this call is reached.';
+const isProposeTool = (tool: ToolName) => tool === 'propose_order' || tool === 'propose_booking';
 
 export type PhoneRelayDeps = {
   phone: DuplexSocket;
@@ -325,6 +333,15 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
   let droppedEarlyChunks = 0;
   let bargeIns = 0;
   let toolCalls = 0;
+  // Issue #95 item 8: per-call caps. Every function call the model makes is counted when it arrives.
+  let toolCallsSeen = 0;
+  let toolLimitReached = false;
+  let callsAfterToolLimit = 0;
+  /** Approvals stored on this call. A repeat that returns the same stored proposal is not a new one. */
+  const storedApprovals = new Set<string>();
+  /** Proposals whose result is unknown (timed out, cut off or threw): each may have been stored. */
+  let uncertainProposals = 0;
+  let proposalLimitTold = false;
   let startedAt = now();
   let unsubscribe: (() => void) | undefined;
   const timers = new Set<ReturnType<typeof setTimeout>>();
@@ -476,7 +493,8 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     });
     if (deps.decisions !== undefined && unsubscribe === undefined) {
       unsubscribe = deps.decisions.subscribe(call.callId, (decision: CallDecision) => {
-        if (closed || proposal === undefined || decision.proposalId !== proposal.proposalId || decision.approvalId !== proposal.approvalId) return;
+        // Once the call is saying its final goodbye for the tool-call cap, nothing reopens it.
+        if (closed || toolLimitReached || proposal === undefined || decision.proposalId !== proposal.proposalId || decision.approvalId !== proposal.approvalId) return;
         cancel(pendingTimer); pendingTimer = undefined;
         invalidateFinish();
         sendOpenAI({ type: 'response.cancel' });
@@ -486,7 +504,7 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     }
   };
 
-  const runFunctionCall = async (name: string, argsJson: string): Promise<{ result: unknown; tool: ToolName | null }> => {
+  const runFunctionCall = async (name: string, argsJson: string): Promise<{ result: unknown; tool: ToolName | null; proposalLimit?: true }> => {
     const parsedName = ToolNameSchema.safeParse(name);
     if (!parsedName.success) {
       // The name came from the model: it is never logged or stored, only its length.
@@ -505,6 +523,12 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     } catch {
       return { result: toolFailure('VALIDATION_FAILED', 'The arguments were not valid JSON.'), tool };
     }
+    // Issue #95 item 8: a caller who keeps changing the cart and saying yes cannot fill the approvals inbox.
+    if (isProposeTool(tool) && storedApprovals.size + uncertainProposals >= limits.maxProposals) {
+      logger.warn({ ...tag(), tool, maxProposals: limits.maxProposals }, 'voice: proposal limit reached; proposal refused');
+      guardrail({ callId: pinned.callId, rule: 'unsupported_request', reasonCode: 'proposal_limit', toolName: tool });
+      return { result: toolFailure('VALIDATION_FAILED', LIMIT_REACHED), tool, proposalLimit: true };
+    }
     const ctx: ToolContext = { businessId: pinned.businessId, agentVersionId: pinned.agentVersionId, callId: pinned.callId, correlationId: pinned.callId };
     const timeoutMs = limits.toolTimeoutMs ?? CAPABILITIES[TOOL_CAPABILITY[tool]].timeoutMs;
     const handler = toolset.handler as CancellableToolHandler;
@@ -512,29 +536,38 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
     activeInvocations.add(controller);
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     let result: unknown;
+    let unknownOutcome = false;
     try {
-      const aborted = new Promise<ToolFailure>((resolve) => controller.signal.addEventListener('abort', () => resolve(toolFailure('INTEGRATION_UNAVAILABLE', UNAVAILABLE)), { once: true }));
+      const aborted = new Promise<ToolFailure>((resolve) => controller.signal.addEventListener('abort', () => { unknownOutcome = true; resolve(toolFailure('INTEGRATION_UNAVAILABLE', UNAVAILABLE)); }, { once: true }));
       result = await Promise.race([
         Promise.resolve().then(() => handler.call(tool, args as ToolInput[ToolName], ctx, { signal: controller.signal, timeoutMs })),
         aborted,
       ]);
     } catch {
+      unknownOutcome = true;
       result = toolFailure('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
     } finally {
       clearTimeout(timeout);
       activeInvocations.delete(controller);
     }
     const r = asObject(result);
+    if (isProposeTool(tool)) {
+      if (isProposal(r) && r !== undefined) storedApprovals.add(String(r.approvalId));
+      // A proposal that timed out or threw may still have been stored, so it uses one place.
+      else if (unknownOutcome) uncertainProposals++;
+    }
     if (r?.ok === false && r.reason === 'CAPABILITY_NOT_ALLOWED') guardrail({ callId: pinned.callId, rule: 'no_cross_business', reasonCode: 'CAPABILITY_NOT_ALLOWED', toolName: tool });
     return { result, tool };
   };
 
   const handleCalls = async (calls: JsonObject[]) => {
+    let tellProposalLimit = false;
     for (const call of calls) {
       if (closed) return;
       const callId = str(call, 'call_id');
       const t0 = now();
-      const { result, tool } = await runFunctionCall(str(call, 'name') ?? '', str(call, 'arguments') ?? '{}');
+      const { result, tool, proposalLimit } = await runFunctionCall(str(call, 'name') ?? '', str(call, 'arguments') ?? '{}');
+      if (proposalLimit && !proposalLimitTold) tellProposalLimit = true;
       // A result that arrives after the call ended changes nothing.
       if (closed || pinned === undefined) return;
       toolCalls++;
@@ -547,7 +580,49 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
       }
       if (callId !== undefined) sendOpenAI({ type: OAI_CLIENT.itemCreate, item: { type: OAI_ITEM.functionCallOutput, call_id: callId, output: JSON.stringify(result) } });
     }
+    // The final goodbye for the tool-call cap follows on the tool chain: no other response is asked for.
+    if (toolLimitReached || closed || pinned === undefined) return;
+    if (tellProposalLimit) {
+      // Told once, by a fixed server instruction. Later refused proposals answer the model with the failure only.
+      proposalLimitTold = true;
+      instruct(proposalLimitInstruction(pinned.spec.template, proposal !== undefined));
+      return;
+    }
     sendOpenAI({ type: OAI_CLIENT.responseCreate });
+  };
+
+  /**
+   * Issue #95 item 8: function calls past the per-call cap. Each is answered with a failure at once,
+   * without reaching the toolset, and recorded as guardrail.refused with fixed codes (never the name or
+   * arguments the model sent, unless the name is a registered tool). The first time, the agent is told
+   * by a fixed server instruction to say it cannot continue, and the call ends after that goodbye. A
+   * model that keeps calling tools instead is cut off.
+   */
+  const refuseOverToolLimit = (calls: JsonObject[]) => {
+    const call = pinned;
+    if (call === undefined) return;
+    for (const c of calls) {
+      const named = ToolNameSchema.safeParse(str(c, 'name') ?? '');
+      const tool = named.success ? named.data : undefined;
+      logger.warn({ ...tag(), tool: tool ?? 'unknown_tool', maxToolCalls: limits.maxToolCalls }, 'voice: tool call limit reached; call refused');
+      guardrail({ callId: call.callId, rule: 'unsupported_request', reasonCode: 'tool_call_limit', ...(tool ? { toolName: tool } : {}) });
+      const callId = str(c, 'call_id');
+      if (callId !== undefined) sendOpenAI({ type: OAI_CLIENT.itemCreate, item: { type: OAI_ITEM.functionCallOutput, call_id: callId, output: JSON.stringify(toolFailure('VALIDATION_FAILED', LIMIT_REACHED)) } });
+    }
+    if (toolLimitReached) {
+      callsAfterToolLimit += calls.length;
+      if (callsAfterToolLimit > MAX_CALLS_AFTER_TOOL_LIMIT) shutdown('completed', 'tool call limit: the model kept calling tools');
+      return;
+    }
+    toolLimitReached = true;
+    cancel(pendingTimer); pendingTimer = undefined;
+    // After the tool work already queued, so its outputs come first.
+    toolChain = toolChain.then(() => {
+      if (closed) return;
+      sendOpenAI({ type: 'response.cancel' });
+      const generation = beginFinish();
+      instruct(toolLimitGoodbyeInstruction(call.businessName, proposal !== undefined), generation);
+    });
   };
 
   const onResponseDone = (ev: JsonObject) => {
@@ -567,6 +642,12 @@ export function runPhoneRelay(deps: PhoneRelayDeps): { done: Promise<RelayOutcom
       }
       return;
     }
+    // Issue #95 item 8: every function call counts when it arrives, whatever its name. The calls past the
+    // cap are refused here and never queued.
+    const room = Math.max(0, limits.maxToolCalls - toolCallsSeen);
+    toolCallsSeen += calls.length;
+    if (calls.length > room) refuseOverToolLimit(calls.splice(room));
+    if (calls.length === 0 || closed) return;
     if (pendingResponses >= limits.maxPendingResponses) {
       // Bounded: answer at once instead of queueing behind slow tools.
       logger.warn({ ...tag(), pendingResponses }, 'voice: tool queue full; answering unavailable');
