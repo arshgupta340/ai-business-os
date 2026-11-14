@@ -3,13 +3,13 @@
  * The text says only what the event says. It never claims a payment or a
  * delivery the event does not report.
  */
-import type {ActivityEvent, ActivityPayloads} from '@/lib/api';
+import type {ActivityEvent, ActivityEventPayloads} from '@/lib/api';
 import {formatDateTime, formatMoney} from '@/lib/format';
 import {statusView} from '@/lib/status';
 import {actionLabel} from './journey';
 
-function p<T extends keyof ActivityPayloads>(event: ActivityEvent, _type: T): ActivityPayloads[T] {
-  return event.payload as unknown as ActivityPayloads[T];
+function p<T extends keyof ActivityEventPayloads>(event: ActivityEvent, _type: T): ActivityEventPayloads[T] {
+  return event.payload as unknown as ActivityEventPayloads[T];
 }
 
 export interface EventLine {

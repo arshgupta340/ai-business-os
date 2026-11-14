@@ -7,7 +7,7 @@
  *   useMockControls() reads them and returns null outside mock mode.
  */
 import { useSyncExternalStore } from "react";
-import type { ActivityEvent } from "./pending-contracts";
+import type { ActivityEvent } from "@abos/contracts";
 import { isMockMode } from "./config";
 
 type Listener = (event: ActivityEvent) => void;
@@ -57,12 +57,12 @@ export interface MockControls {
   simulateCallLost(): Promise<{ callId: string }>;
   /** Emit a webhook.rejected event for the pizza business. */
   simulateRejectedWebhook(): void;
-  /** Change the stored payload of a pending approval so the hash the UI shows no longer matches. */
-  simulatePayloadChanged(approvalId: string): void;
+  /** Change the stored payload of a pending approval so the hash the UI shows no longer matches. Resolves once the new hash is stored. */
+  simulatePayloadChanged(approvalId: string): Promise<void>;
   /** Leave the phone number unanswered: GET /api/live-agent then has no agentId or agentVersionId. */
   simulateNoLiveAgent(): void;
-  /** Put every fixture back and cancel scripted timers. */
-  reset(): void;
+  /** Put every fixture back and cancel scripted timers. Resolves once the fixtures are back (hashing is async). */
+  reset(): Promise<void>;
   /** Mock only. The next uploaded file ends in extractionState FAILED with no draft facts. */
   simulateExtractionFailed?(): void;
   /** Mock only. The next catalog sync ends with sync.failed (target "catalog", final true) and leaves syncedAt unchanged. */

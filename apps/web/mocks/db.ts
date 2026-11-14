@@ -9,30 +9,45 @@
  * provider step that confirms it has run. All payment data is sandbox.
  */
 import {
-  ACTION_CAPABILITY,
+  ACTION_TYPE_CAPABILITY,
+  AgentSpecSchema,
+  APPROVAL_EXPIRY_MS,
   BUNDLE_ACTIONS,
-  CAPABILITY_REGISTRY,
+  CAPABILITIES,
+  canonicalJson,
+  idempotencyKey,
+  isCapabilityId,
+  isDeferredActionType,
+  payloadHash,
   type ActionExecution,
   type ActionType,
   type ActivityEvent,
+  type ActivityEventPayloads,
   type ActivityEventType,
-  type ActivityPayloads,
+  type ActorType,
+  type Agent,
   type AgentSpec,
+  type AgentVersion,
   type ApprovalRequest,
   type Booking,
+  type BookingMachineState,
   type BookingStatus,
   type BusinessFact,
   type Call,
   type CallStage,
   type CapabilityId,
+  type DraftAgentSpec,
   type ErrorCode,
+  type ExecutionActionType,
   type FactConflict,
   type FactKind,
   type FileRecord,
+  type JsonValue,
   type Order,
+  type OrderMachineState,
   type OrderStatus,
-} from "@/lib/api/pending-contracts";
-import type { Agent, AgentVersion, FactProposeRequest } from "@/lib/api/api-shapes";
+  type ProposeFactBody,
+} from "@abos/contracts";
 import { publishMockActivity } from "@/lib/api/mock-bridge";
 import {
   bookingApproval,
@@ -49,8 +64,7 @@ import {
   priceEditApproval,
   sandboxCheckoutUrl,
 } from "./builders";
-import { buildSeed, BARBER_SERVICES, TIMELINE_CART } from "./fixtures";
-import { canonicalJson, idempotencyKey, payloadHash, sha256Hex } from "./hash";
+import { buildSeed, emptyState, BARBER_SERVICES, TIMELINE_CART } from "./fixtures";
 import { cancel, cancelAllScheduled, schedule, timing } from "./scheduler";
 import { BARBER_CALENDAR_ID, MESSAGE_CHANNEL, OWNER_USER_ID, TIMEZONE, type AgentRecord, type MockState } from "./types";
 
@@ -72,7 +86,17 @@ const fail = (code: ErrorCode, message: string, details?: Record<string, unknown
 
 // ------------------------------------------------------------------- state
 
-let state: MockState = buildSeed();
+/**
+ * Empty until the first seed finishes. The contract's hash functions are async,
+ * so seeding is too; the handlers await ready() before they read the state.
+ */
+let state: MockState = emptyState(Date.now());
+let seeding: Promise<void> = Promise.resolve();
+
+/** Resolves once the current seed (start or reset) is in place. */
+export function ready(): Promise<void> {
+  return seeding;
+}
 
 // ------------------------------------------- builder sessions across reload
 
@@ -132,7 +156,10 @@ export function restoreBuilderSessions(): void {
   }
 }
 
-restoreBuilderSessions();
+seeding = buildSeed().then((seed) => {
+  state = seed;
+  restoreBuilderSessions();
+});
 
 interface Flags {
   nextPaymentFails: boolean;
@@ -171,7 +198,7 @@ export function getState(): MockState {
   return state;
 }
 
-export function resetDb(now: number = Date.now()): void {
+export async function resetDb(now: number = Date.now()): Promise<void> {
   cancelAllScheduled();
   paymentTimers.clear();
   slotConflictBookings.clear();
@@ -185,8 +212,12 @@ export function resetDb(now: number = Date.now()): void {
   flags.nextCatalogSyncFails = false;
   flags.nextCallQrOnly = false;
   failingExtractions.clear();
-  state = buildSeed(now);
-  saveBuilderSessions();
+  clockOffsetMs = 0;
+  seeding = buildSeed(now).then((seed) => {
+    state = seed;
+    saveBuilderSessions();
+  });
+  await seeding;
 }
 
 export function setFlag(name: keyof Flags, value: boolean): void {
@@ -195,12 +226,40 @@ export function setFlag(name: keyof Flags, value: boolean): void {
 
 const nowIso = () => iso(Date.now());
 
+/**
+ * Tests only: how far the mock's expiry clock runs ahead of real time. An
+ * approval's createdAt, expiresAt and payload.expiresAt are tied together by
+ * the contract (and expiresAt is hashed), so tests move the clock instead of
+ * editing expiresAt. Reset to 0 by resetDb().
+ */
+let clockOffsetMs = 0;
+const expiryNow = () => Date.now() + clockOffsetMs;
+
+/** Tests only: move the mock's expiry clock forward by `ms`. */
+export function advanceMockClock(ms: number): void {
+  clockOffsetMs += ms;
+}
+
+/**
+ * Tests only: re-create a pending approval as if it had been made so that it
+ * expires at `expiresAtMs`. Moves createdAt, expiresAt and payload.expiresAt
+ * together and stores the new payload hash, like a fresh approval would have.
+ */
+export async function setApprovalExpiry(approvalId: string, expiresAtMs: number): Promise<void> {
+  const apv = state.approvals.find((a) => a.id === approvalId);
+  if (!apv || apv.state !== "PENDING") return;
+  apv.createdAt = iso(expiresAtMs - APPROVAL_EXPIRY_MS);
+  apv.expiresAt = iso(expiresAtMs);
+  apv.payload = { ...apv.payload, expiresAt: apv.expiresAt } as ApprovalRequest["payload"];
+  apv.payloadHash = await payloadHash(apv.payload);
+}
+
 export function emit<T extends ActivityEventType>(
   businessId: string,
   type: T,
   correlationId: string,
-  actorType: ActivityEvent["actorType"],
-  payload: ActivityPayloads[T],
+  actorType: ActorType,
+  payload: ActivityEventPayloads[T],
 ): ActivityEvent {
   const event = makeEvent(businessId, type, correlationId, actorType, Date.now(), payload);
   state.activity.push(event);
@@ -249,10 +308,12 @@ const newestFirst = <T extends { createdAt?: string; occurredAt?: string; starte
 // ---------------------------------------------------------------- expiry
 
 /** Moves PENDING approvals past expiresAt to EXPIRED, like the server's job (API.md 3.7). */
-export function sweepExpired(now: number = Date.now()): void {
+export function sweepExpired(now: number = expiryNow()): void {
   for (const apv of state.approvals) {
     if (apv.state !== "PENDING" || Date.parse(apv.expiresAt) > now) continue;
     apv.state = "EXPIRED";
+    // DATA-MODEL 2.14: decidedAt is set on every state but PENDING; an expiry has no decidedBy.
+    apv.decidedAt = iso(now);
     emit(apv.businessId, "approval.expired", correlationFor(apv), "system", { approvalId: apv.id, subjectId: apv.subjectId });
     if (apv.bundleType === "order_bundle") {
       const order = state.orders.find((o) => o.id === apv.subjectId);
@@ -338,7 +399,7 @@ function verifiedFact(businessId: string, kind: FactKind, key: string): Business
  * POST /api/businesses/:id/facts/propose. Stores the value as a draft fact and
  * creates a fact_edit approval with actorType owner. Nothing changes until approved.
  */
-export function proposeFact(businessId: string, body: FactProposeRequest, sourceType: BusinessFact["sourceType"] = "owner_ui") {
+export async function proposeFact(businessId: string, body: ProposeFactBody, sourceType: BusinessFact["sourceType"] = "owner_ui") {
   let kind: FactKind;
   let key: string;
   let conflict: FactConflict | undefined;
@@ -370,12 +431,13 @@ export function proposeFact(businessId: string, body: FactProposeRequest, source
     sourceType,
     status: "draft",
     confidence: 1,
-    version: current ? current.version : 0,
+    // The proposed edit is the next version; drafts never have version 0 (BusinessFact.version is at least 1).
+    version: (current?.version ?? 0) + 1,
     createdAt: iso(at),
     updatedAt: iso(at),
   };
   state.facts.push(draft);
-  const approval = factEditApproval({
+  const approval = await factEditApproval({
     id: newId("apv_"),
     businessId,
     subjectId: draft.id,
@@ -436,7 +498,9 @@ export function syncCatalog(businessId: string) {
   if (flags.nextCatalogSyncFails) {
     flags.nextCatalogSyncFails = false;
     // Square did not answer. The stored catalog and syncedAt stay as they were.
-    schedule(() => emit(businessId, "sync.failed", jobId, "system", { target: "catalog", jobId, attempts: 1, final: true }), timing.stepMs);
+    schedule(() => {
+      emit(businessId, "sync.failed", jobId, "system", { target: "catalog", jobId, attempts: 1, final: true });
+    }, timing.stepMs);
     return { jobId };
   }
   schedule(() => {
@@ -447,7 +511,7 @@ export function syncCatalog(businessId: string) {
   return { jobId };
 }
 
-export function proposePrice(businessId: string, body: { variationId?: string; newPriceMinor?: number; currency?: string }) {
+export async function proposePrice(businessId: string, body: { variationId?: string; newPriceMinor?: number; currency?: string }) {
   if (!body.variationId || !Number.isInteger(body.newPriceMinor) || (body.newPriceMinor as number) < 0 || body.currency !== "USD") {
     fail("VALIDATION_FAILED", "variationId, a whole newPriceMinor and currency USD are required.", {
       issues: [{ path: "newPriceMinor", message: "Invalid" }],
@@ -457,7 +521,7 @@ export function proposePrice(businessId: string, body: { variationId?: string; n
   if (!item) fail("NOT_FOUND", "Variation not found.");
   const version = squareVersions.get(body.variationId!) ?? 3;
   squareVersions.set(body.variationId!, version);
-  const approval = priceEditApproval({
+  const approval = await priceEditApproval({
     id: newId("apv_"),
     businessId,
     item: item!,
@@ -489,11 +553,15 @@ export const ACCEPTED_MIME = [
 ] as const;
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
-export function createFile(businessId: string, input: { name: string; mime: string; size: number; bytes: Uint8Array }): FileRecord {
+export async function createFile(businessId: string, input: { name: string; mime: string; size: number; bytes: Uint8Array }): Promise<FileRecord> {
   if (!(ACCEPTED_MIME as readonly string[]).includes(input.mime)) {
     fail("VALIDATION_FAILED", "This file type is not accepted. Upload a PDF, image, CSV or spreadsheet.", {
       issues: [{ path: "file", message: `Type ${input.mime || "unknown"} is not accepted` }],
     });
+  }
+  if (input.size < 1) {
+    // FileRecord.sizeBytes is at least 1, so an empty file cannot be stored.
+    fail("VALIDATION_FAILED", "The file is empty.", { issues: [{ path: "file", message: "Empty file" }] });
   }
   if (input.size > MAX_UPLOAD_BYTES) {
     fail("VALIDATION_FAILED", "The file is larger than 10 MB.", { issues: [{ path: "file", message: "Larger than 10 MB" }] });
@@ -504,7 +572,7 @@ export function createFile(businessId: string, input: { name: string; mime: stri
     name: input.name,
     mime: input.mime as FileRecord["mime"],
     sizeBytes: input.size,
-    sha256: sha256Hex(input.bytes),
+    sha256: await fileSha256(input.bytes),
     extractionState: "PENDING",
     draftFactIds: [],
     createdAt: nowIso(),
@@ -519,6 +587,12 @@ export function createFile(businessId: string, input: { name: string; mime: stri
     schedule(() => (failingExtractions.has(file.id) ? failExtraction(file) : finishExtraction(file)), timing.extractionMs);
   }, timing.extractionStartMs);
   return file;
+}
+
+/** DATA-MODEL files.sha256: "sha256:" plus the hex SHA-256 of the file bytes. */
+async function fileSha256(bytes: Uint8Array): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>);
+  return `sha256:${Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
 /** Mock control outcome: the file could not be read, so it has no drafts and no conflicts. */
@@ -540,7 +614,7 @@ function finishExtraction(file: FileRecord): void {
   const at = Date.now();
   const drafts: BusinessFact[] = [];
   const conflicts: FactConflict[] = [];
-  const draft = (kind: FactKind, key: string, value: unknown, confidence: number): BusinessFact => ({
+  const draft = (kind: FactKind, key: string, value: JsonValue, confidence: number): BusinessFact => ({
     id: newId("fact_"),
     businessId: file.businessId,
     kind,
@@ -550,7 +624,7 @@ function finishExtraction(file: FileRecord): void {
     fileId: file.id,
     status: "draft",
     confidence,
-    version: 0,
+    version: 1,
     createdAt: iso(at),
     updatedAt: iso(at),
   });
@@ -625,19 +699,26 @@ export function getAgentRecord(businessId: string, agentId: string): AgentRecord
   return inBusiness(state.agents, businessId, agentId, "Agent");
 }
 
-function checkCapabilities(spec: Partial<AgentSpec>): void {
-  const unknown = (spec.capabilities ?? []).filter((c) => !(c in CAPABILITY_REGISTRY));
+function checkCapabilities(spec: DraftAgentSpec): void {
+  const unknown = ((spec.capabilities ?? []) as string[]).filter((c) => !isCapabilityId(c));
   if (unknown.length) fail("CAPABILITY_NOT_ALLOWED", "The spec names a capability that is not in the registry.", { capabilities: unknown });
 }
 
-export function createAgent(businessId: string, body: { builderSessionId?: string; spec?: Partial<AgentSpec> }): Agent {
-  let spec: Partial<AgentSpec>;
+export function createAgent(businessId: string, body: { builderSessionId?: string; spec?: DraftAgentSpec }): Agent {
+  let spec: DraftAgentSpec;
   if (body.builderSessionId) {
     const rec = state.builderSessions.find((s) => s.session.id === body.builderSessionId && s.session.businessId === businessId);
     if (!rec) fail("NOT_FOUND", "Builder session not found.");
     spec = rec!.session.draftSpec;
   } else if (body.spec) {
-    spec = body.spec;
+    // CreateAgentBodySchema: a spec sent directly must be a full AgentSpec.
+    const parsed = AgentSpecSchema.safeParse(body.spec);
+    if (!parsed.success) {
+      fail("VALIDATION_FAILED", "The spec is not a complete agent spec.", {
+        issues: parsed.error.issues.map((i) => ({ path: `spec.${i.path.join(".")}`, message: i.message })),
+      });
+    }
+    spec = parsed.data!;
   } else {
     fail("VALIDATION_FAILED", "Send builderSessionId or spec.", { issues: [{ path: "builderSessionId", message: "Required" }] });
     return undefined as never;
@@ -668,7 +749,7 @@ export function listVersions(businessId: string, agentId: string): AgentVersion[
   return state.versions.filter((v) => v.agentId === agentId).sort((a, b) => b.version - a.version);
 }
 
-const comparableSpec = (spec: Partial<AgentSpec>) => canonicalJson({ ...spec, id: undefined, version: undefined, status: undefined });
+const comparableSpec = (spec: DraftAgentSpec) => canonicalJson({ ...spec, id: undefined, version: undefined, status: undefined });
 
 function openRequiredConflicts(businessId: string): string[] {
   return state.conflicts.filter((c) => c.businessId === businessId && c.state === "open" && c.required).map((c) => c.id);
@@ -716,11 +797,19 @@ export function publishAgent(businessId: string, agentId: string, body: { confir
     version = active; // unchanged draft: reactivate the current version
   } else {
     const n = Math.max(0, ...state.versions.filter((v) => v.agentId === agentId).map((v) => v.version)) + 1;
+    // AgentVersion.spec is a full AgentSpec, so a draft with fields still missing cannot be published.
+    const parsed = AgentSpecSchema.safeParse({ ...agent.draftSpec, id: agent.id, businessId, version: n, status: "live" });
+    if (!parsed.success) {
+      fail("VALIDATION_FAILED", "The draft spec is not complete yet.", {
+        issues: parsed.error.issues.map((i) => ({ path: `draftSpec.${i.path.join(".")}`, message: i.message })),
+      });
+    }
+    const spec: AgentSpec = parsed.data!;
     version = {
       id: `${agent.id.replace(/^agt_/, "agv_")}_v${n}`,
       agentId,
       version: n,
-      spec: { ...agent.draftSpec, id: agent.id, businessId, version: n, status: "live" },
+      spec,
       knowledgeSnapshotRef: snapshotRef(businessId),
       createdBy: OWNER_USER_ID,
       publishedAt: nowIso(),
@@ -811,12 +900,12 @@ export function getApproval(businessId: string, approvalId: string): ApprovalReq
  * Idempotency-Key replay is handled here too: same key and body gives the
  * first answer; same key with a different body is VALIDATION_FAILED.
  */
-export function decideApproval(
+export async function decideApproval(
   businessId: string,
   approvalId: string,
   body: { decision?: unknown; payloadHash?: unknown; reason?: unknown },
   key: string | null,
-): { status: number; body: unknown } {
+): Promise<{ status: number; body: unknown }> {
   const bodyKey = canonicalJson({ approvalId, businessId, decision: body.decision, payloadHash: body.payloadHash });
   if (key) {
     const prior = idempotency.get(key);
@@ -838,7 +927,7 @@ export function decideApproval(
   const wanted = body.decision === "approve" ? "APPROVED" : "REJECTED";
   const reply = () => ({ approval: { id: apv.id, state: apv.state, decidedBy: apv.decidedBy, decidedAt: apv.decidedAt } });
   if (apv.state === wanted) return { status: 200, body: reply() };
-  if (apv.state === "EXPIRED" || (apv.state === "PENDING" && Date.now() > Date.parse(apv.expiresAt))) {
+  if (apv.state === "EXPIRED" || (apv.state === "PENDING" && expiryNow() > Date.parse(apv.expiresAt))) {
     if (apv.state === "PENDING") sweepExpired();
     fail("APPROVAL_EXPIRED", "This approval expired, so nothing was sent.", { approvalId });
   }
@@ -853,7 +942,7 @@ export function decideApproval(
     decision: wanted,
     decidedBy: OWNER_USER_ID,
   });
-  if (wanted === "APPROVED") runBundle(apv);
+  if (wanted === "APPROVED") await runBundle(apv);
   else rejectSubject(apv);
 
   const result = { status: 200, body: reply() };
@@ -862,11 +951,11 @@ export function decideApproval(
 }
 
 /** Mock control: change a pending approval's stored payload, so the hash the UI shows no longer matches. */
-export function tamperApproval(approvalId: string): void {
+export async function tamperApproval(approvalId: string): Promise<void> {
   const apv = state.approvals.find((a) => a.id === approvalId);
   if (!apv || apv.state !== "PENDING") return;
   apv.payload = { ...apv.payload, expiresAt: iso(Date.parse(apv.expiresAt) + 1000) } as ApprovalRequest["payload"];
-  apv.payloadHash = payloadHash(apv.payload);
+  apv.payloadHash = await payloadHash(apv.payload);
 }
 
 function rejectSubject(apv: ApprovalRequest): void {
@@ -884,19 +973,21 @@ function rejectSubject(apv: ApprovalRequest): void {
 
 // ---------------------------------------------------------------- executor
 
-function queueExecutions(apv: ApprovalRequest): Map<ActionType, ActionExecution> {
-  const map = new Map<ActionType, ActionExecution>();
-  apv.actionBundle.forEach((step, stepIndex) => {
-    const actionType = step as ActionType;
-    if (actionType === "sheets.order.append" || actionType === "sheets.booking.append") return; // created later as a sync job
+async function queueExecutions(apv: ApprovalRequest): Promise<Map<ExecutionActionType, ActionExecution>> {
+  const map = new Map<ExecutionActionType, ActionExecution>();
+  const steps: readonly string[] = apv.actionBundle;
+  for (const [stepIndex, step] of steps.entries()) {
+    if (isDeferredActionType(step as ActionType)) continue; // the Sheets step is created later as a sync job
+    const actionType = step as ExecutionActionType;
+    const capabilityId = ACTION_TYPE_CAPABILITY[actionType];
     const exe: ActionExecution = {
       id: newId("exe_"),
       businessId: apv.businessId,
       approvalId: apv.id,
       actionType,
       stepIndex,
-      capabilityId: ACTION_CAPABILITY[actionType],
-      idempotencyKey: idempotencyKey(apv.businessId, apv.subjectId, actionType, apv.id),
+      ...(capabilityId ? { capabilityId } : {}),
+      idempotencyKey: await idempotencyKey({ businessId: apv.businessId, subjectId: apv.subjectId, actionType, approvalId: apv.id }),
       status: "QUEUED",
       attempts: 0,
       createdAt: nowIso(),
@@ -904,7 +995,7 @@ function queueExecutions(apv: ApprovalRequest): Map<ActionType, ActionExecution>
     };
     state.executions.push(exe);
     map.set(actionType, exe);
-  });
+  }
   return map;
 }
 
@@ -954,24 +1045,24 @@ function sequence(steps: (() => void)[]): void {
   next(0);
 }
 
-function runBundle(apv: ApprovalRequest): void {
-  if (apv.bundleType === "order_bundle") runOrderBundle(apv);
-  else if (apv.bundleType === "booking_bundle") runBookingBundle(apv);
-  else if (apv.bundleType === "fact_edit") runFactEdit(apv);
-  else runPriceEdit(apv);
+async function runBundle(apv: ApprovalRequest): Promise<void> {
+  if (apv.bundleType === "order_bundle") await runOrderBundle(apv);
+  else if (apv.bundleType === "booking_bundle") await runBookingBundle(apv);
+  else if (apv.bundleType === "fact_edit") await runFactEdit(apv);
+  else await runPriceEdit(apv);
 }
 
-function runOrderBundle(apv: ApprovalRequest): void {
+async function runOrderBundle(apv: ApprovalRequest): Promise<void> {
   const order = state.orders.find((o) => o.id === apv.subjectId);
   if (!order) return;
   const c = order.callId;
-  const exes = queueExecutions(apv);
+  const exes = await queueExecutions(apv);
   const checkout = exes.get("square.checkout.create")!;
   const message = exes.get("message.checkout.send")!;
   const record = exes.get("local.order.record")!;
   setOrderStatus(order, "APPROVED");
   let messageSent = false;
-  const qrOnly = (apv.payload as { messageChannel?: string }).messageChannel === "qr_only";
+  const qrOnly = apv.bundleType === "order_bundle" && apv.payload.messageChannel === "qr_only";
 
   const checkoutSteps: (() => void)[] = [
     () => {
@@ -1028,7 +1119,8 @@ function runOrderBundle(apv: ApprovalRequest): void {
         executionId: message.id,
         subjectId: order.id,
         channel: MESSAGE_CHANNEL,
-        recipient: order.contact.messageRecipient,
+        // A channel other than qr_only always has a recipient (the payload schema requires it).
+        recipient: order.contact.messageRecipient!,
         template: "checkout_link",
         status: "QUEUED",
         idempotencyKey: message.idempotencyKey,
@@ -1049,7 +1141,7 @@ function runOrderBundle(apv: ApprovalRequest): void {
         subjectId: order.id,
         channel: MESSAGE_CHANNEL,
         template: "checkout_link",
-        recipientLast4: last4(order.contact.messageRecipient),
+        recipientLast4: last4(order.contact.messageRecipient!),
       });
       succeedStep(apv, message, c, dispatch.providerMessageId);
       setOrderStatus(order, "MESSAGE_SENT");
@@ -1118,7 +1210,7 @@ function runSheetsSync(
     target: "google_sheets" as const,
     recordType,
     recordId,
-    status: "PENDING" as "PENDING" | "RUNNING" | "DONE" | "RETRYING" | "FAILED",
+    status: "PENDING" as MockState["syncJobs"][number]["status"],
     attempts: 0,
     createdAt: nowIso(),
     updatedAt: nowIso(),
@@ -1153,11 +1245,11 @@ function runSheetsSync(
   sequence(steps);
 }
 
-function runBookingBundle(apv: ApprovalRequest): void {
+async function runBookingBundle(apv: ApprovalRequest): Promise<void> {
   const booking = state.bookings.find((b) => b.id === apv.subjectId);
   if (!booking) return;
   const c = booking.callId ?? booking.id;
-  const exes = queueExecutions(apv);
+  const exes = await queueExecutions(apv);
   const calendar = exes.get("calendar.event.create")!;
   const message = exes.get("message.booking.confirm")!;
   const record = exes.get("local.booking.record")!;
@@ -1198,7 +1290,7 @@ function runBookingBundle(apv: ApprovalRequest): void {
         executionId: message.id,
         subjectId: booking.id,
         channel: MESSAGE_CHANNEL,
-        recipient: booking.customer.messageRecipient,
+        recipient: booking.customer.messageRecipient!,
         template: "booking_confirmed" as const,
         status: "SENT" as const,
         providerMessageId: newId("surge_"),
@@ -1213,7 +1305,7 @@ function runBookingBundle(apv: ApprovalRequest): void {
         subjectId: booking.id,
         channel: MESSAGE_CHANNEL,
         template: "booking_confirmed",
-        recipientLast4: last4(booking.customer.messageRecipient),
+        recipientLast4: last4(booking.customer.messageRecipient!),
       });
       succeedStep(apv, message, c, dispatch.providerMessageId);
     },
@@ -1233,8 +1325,8 @@ function runBookingBundle(apv: ApprovalRequest): void {
   ]);
 }
 
-function runFactEdit(apv: ApprovalRequest): void {
-  const exes = queueExecutions(apv);
+async function runFactEdit(apv: ApprovalRequest): Promise<void> {
+  const exes = await queueExecutions(apv);
   const exe = exes.get("local.fact.update")!;
   sequence([
     () => {
@@ -1279,8 +1371,8 @@ function runFactEdit(apv: ApprovalRequest): void {
   ]);
 }
 
-function runPriceEdit(apv: ApprovalRequest): void {
-  const exes = queueExecutions(apv);
+async function runPriceEdit(apv: ApprovalRequest): Promise<void> {
+  const exes = await queueExecutions(apv);
   const update = exes.get("square.catalog.price.update")!;
   const sync = exes.get("local.catalog.sync")!;
   const payload = apv.payload as { variationId: string; newPriceMinor: number; squareVersion: number };
@@ -1427,9 +1519,17 @@ export function setStage(call: Call, to: CallStage): void {
   if (from === to) return;
   call.stage = to;
   if (call.businessId === "biz_barber_01") {
-    emit(call.businessId, "booking.status_changed", call.id, "deployed_agent", { callId: call.id, from, to });
+    emit(call.businessId, "booking.status_changed", call.id, "deployed_agent", {
+      callId: call.id,
+      from: from as BookingMachineState,
+      to: to as BookingMachineState,
+    });
   } else {
-    emit(call.businessId, "order.status_changed", call.id, "deployed_agent", { callId: call.id, from, to });
+    emit(call.businessId, "order.status_changed", call.id, "deployed_agent", {
+      callId: call.id,
+      from: from as OrderMachineState,
+      to: to as OrderMachineState,
+    });
   }
 }
 
@@ -1447,9 +1547,9 @@ export function endCall(call: Call, reason: "completed" | "dropped" | "failed"):
 }
 
 /** What propose_order does: the order row and the approval, no external write. */
-export function proposeOrderOnCall(call: Call, contact: { name: string; messageRecipient: string }): { order: Order; approval: ApprovalRequest } {
+export async function proposeOrderOnCall(call: Call, contact: { name: string; messageRecipient: string }): Promise<{ order: Order; approval: ApprovalRequest }> {
   const at = Date.now();
-  const order = buildOrder({
+  const order = await buildOrder({
     id: newId("ord_"),
     businessId: call.businessId,
     callId: call.id,
@@ -1461,7 +1561,7 @@ export function proposeOrderOnCall(call: Call, contact: { name: string; messageR
   });
   const channel = flags.nextCallQrOnly ? "qr_only" : MESSAGE_CHANNEL;
   flags.nextCallQrOnly = false;
-  const approval = orderApproval(order, call.agentVersionId, newId("apv_"), at, channel);
+  const approval = await orderApproval(order, call.agentVersionId, newId("apv_"), at, channel);
   order.approvalId = approval.id;
   state.orders.push(order);
   state.approvals.push(approval);
@@ -1491,11 +1591,11 @@ export function proposeOrderOnCall(call: Call, contact: { name: string; messageR
 }
 
 /** What propose_booking does. slotConflict makes the scripted recheck after approval find the slot taken. */
-export function proposeBookingOnCall(
+export async function proposeBookingOnCall(
   call: Call,
   customer: { name: string; messageRecipient: string },
   options: { slotConflict?: boolean } = {},
-): { booking: Booking; approval: ApprovalRequest } {
+): Promise<{ booking: Booking; approval: ApprovalRequest }> {
   const at = Date.now();
   const service = BARBER_SERVICES[0];
   const start = new Date(at + 26 * 60 * MINUTE);
@@ -1515,7 +1615,7 @@ export function proposeBookingOnCall(
     createdAt: iso(at),
     updatedAt: iso(at),
   };
-  const approval = bookingApproval(booking, call.agentVersionId, newId("apv_"), at);
+  const approval = await bookingApproval(booking, call.agentVersionId, newId("apv_"), at);
   booking.approvalId = approval.id;
   state.bookings.push(booking);
   state.approvals.push(approval);
@@ -1607,5 +1707,5 @@ export function quoteFor(businessId: string) {
   );
 }
 
-export const capabilityEffect = (id: CapabilityId) => CAPABILITY_REGISTRY[id].effect;
+export const capabilityEffect = (id: CapabilityId) => CAPABILITIES[id].effect;
 export { BUNDLE_ACTIONS };

@@ -3,7 +3,7 @@
  * the UI to refetch). Used by useActivityFeed in both mock and real mode.
  */
 import type { QueryClient } from "@tanstack/react-query";
-import type { ActivityEventType } from "./pending-contracts";
+import type { ActivityEventType } from "@abos/contracts";
 import { queryKeys, type Resource } from "./query-keys";
 
 export interface InvalidationTarget {

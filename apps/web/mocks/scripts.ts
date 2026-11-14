@@ -6,27 +6,28 @@
  * The test console path only reads fixtures. It never writes to the mock db,
  * never creates an approval row and never emits an event (AC-03).
  */
-import type { AgentRunResponse, AgentSpec, BuilderMessage, CapabilityId, GuardrailRule, ToolName } from "@/lib/api/pending-contracts";
-import type { Agent, BuilderTurnResponse } from "@/lib/api/api-shapes";
+import {
+  TOOL_CAPABILITY,
+  type Agent,
+  type AgentRunResponse,
+  type BuilderMessage,
+  type BuilderSession,
+  type BuilderTurnResponse,
+  type CapabilityId,
+  type DraftAgentSpec,
+  type GuardrailRule,
+  type JsonValue,
+  type PreviewResponse,
+  type ToolName,
+  type ToolTraceEntry,
+} from "@abos/contracts";
 import { iso, newId } from "./builders";
 import * as db from "./db";
 import { barberSpec, pizzaSpec, TIMELINE_CART } from "./fixtures";
 import type { BuilderSessionRecord } from "./types";
 
-type Trace = AgentRunResponse["toolTrace"][number];
-
-const TOOL_CAPABILITY: Record<ToolName, CapabilityId> = {
-  read_catalog: "catalog.read",
-  read_business_facts: "business.facts.read",
-  quote_order: "order.quote",
-  propose_order: "order.propose",
-  get_order_status: "order.status.read",
-  read_calendar_availability: "calendar.availability.read",
-  propose_booking: "booking.propose",
-};
-
-function trace(tool: ToolName, input: unknown, output: unknown, mocked: boolean): Trace {
-  const capabilityId = TOOL_CAPABILITY[tool];
+function trace(tool: ToolName, input: unknown, output: unknown, mocked: boolean): ToolTraceEntry {
+  const capabilityId: CapabilityId = TOOL_CAPABILITY[tool];
   return {
     tool,
     capabilityId,
@@ -42,7 +43,7 @@ function trace(tool: ToolName, input: unknown, output: unknown, mocked: boolean)
 
 interface ScriptStep {
   reply: string;
-  patch: Partial<AgentSpec>;
+  patch: DraftAgentSpec;
   missing: string[];
   suggestions: string[];
 }
@@ -174,7 +175,7 @@ export function createBuilderSession(businessId: string, agentId?: string) {
   return view(rec);
 }
 
-function view(rec: BuilderSessionRecord) {
+function view(rec: BuilderSessionRecord): BuilderSession {
   return { ...rec.session, progress: rec.progress };
 }
 
@@ -214,11 +215,11 @@ const UNSUPPORTED: [RegExp, string][] = [
   [/\b(payroll|inventory)\b/i, "payroll or inventory tasks"],
 ];
 
-export function sendBuilderMessage(
+export async function sendBuilderMessage(
   businessId: string,
   sessionId: string,
   body: { text?: unknown; inputMode?: unknown },
-): BuilderTurnResponse {
+): Promise<BuilderTurnResponse> {
   if (typeof body.text !== "string" || !body.text.trim()) {
     throw new db.MockHttpError("VALIDATION_FAILED", "text is required.", { issues: [{ path: "text", message: "Required" }] });
   }
@@ -233,7 +234,7 @@ export function sendBuilderMessage(
   const unsupportedRequests = UNSUPPORTED.filter(([re]) => re.test(body.text as string)).map(([, label]) => label);
   let replyText: string;
   let proposedChange: BuilderTurnResponse["proposedChange"];
-  let specPatch: Partial<AgentSpec> | undefined;
+  let specPatch: DraftAgentSpec | undefined;
   let suggestions: string[] = [];
   let evidenceRefs: string[] | undefined;
 
@@ -243,7 +244,7 @@ export function sendBuilderMessage(
     const before = (current?.value ?? { open: "11:00", close: "21:00" }) as Record<string, unknown>;
     const after = { ...before, [hours.field]: hours.time };
     delete (after as { closed?: unknown }).closed;
-    const { approval } = db.proposeFact(businessId, { kind: "hours", key: hours.key, value: after }, "owner_chat");
+    const { approval } = await db.proposeFact(businessId, { kind: "hours", key: hours.key, value: after as JsonValue }, "owner_chat");
     proposedChange = { approvalId: approval.id, bundleType: "fact_edit" };
     evidenceRefs = current ? [current.id] : undefined;
     replyText = `That changes the ${hours.field === "close" ? "closing" : "opening"} time on ${hours.key} to ${hours.time}. Please confirm the change.`;
@@ -288,7 +289,7 @@ export function sendBuilderMessage(
 
 // -------------------------------------------------------------- preview
 
-export function previewFor(agent: Agent) {
+export function previewFor(agent: Agent): PreviewResponse {
   const caps = (agent.draftSpec.capabilities ?? []) as CapabilityId[];
   const unknown = caps.filter((c) => {
     try {
@@ -354,6 +355,15 @@ const GUARDRAILS: [RegExp, GuardrailRule, string][] = [
   [/other business|barbershop's|pizza shop's/i, "no_cross_business", "I can only help with this business."],
 ];
 
+/** The guardrail.refused event's reasonCode for each rule (mock values; the contract only fixes the format). */
+const REASON_CODES: Record<GuardrailRule, string> = {
+  no_fact_changes: "fact_change_forbidden",
+  no_secret_reveal: "secret_request",
+  no_approval_bypass: "approval_pending",
+  no_cross_business: "cross_business_request",
+  unsupported_request: "unsupported_request",
+};
+
 const CONFIRM = /\b(yes|yeah|confirm|send it|sounds good|that is right|correct)\b/i;
 
 function guardrailFor(text: string): [GuardrailRule, string] | null {
@@ -362,7 +372,7 @@ function guardrailFor(text: string): [GuardrailRule, string] | null {
 }
 
 /** POST /api/agents/:id/test. Reads fixtures only. apv_mock_ ids are never stored. */
-export function testTurn(businessId: string, agent: Agent, body: { message?: unknown; testSessionId?: unknown }): AgentRunResponse {
+export async function testTurn(businessId: string, agent: Agent, body: { message?: unknown; testSessionId?: unknown }): Promise<AgentRunResponse> {
   if (typeof body.message !== "string" || !body.message.trim()) {
     throw new db.MockHttpError("VALIDATION_FAILED", "message is required.", { issues: [{ path: "message", message: "Required" }] });
   }
@@ -401,7 +411,7 @@ export function testTurn(businessId: string, agent: Agent, body: { message?: unk
     };
   }
 
-  const quote = db.quoteFor(businessId);
+  const quote = await db.quoteFor(businessId);
   if (CONFIRM.test(text)) {
     return {
       testSessionId: session.id,
@@ -438,11 +448,11 @@ export function testTurn(businessId: string, agent: Agent, body: { message?: unk
 }
 
 /** POST /api/agents/:id/sim-call. A published agent with the scripted real tools. Writes a calls row and real approvals. */
-export function simCallTurn(
+export async function simCallTurn(
   businessId: string,
   agent: Agent,
   body: { message?: unknown; callId?: unknown; end?: unknown },
-): AgentRunResponse {
+): Promise<AgentRunResponse> {
   if (agent.state !== "live" || !agent.activeVersionId) {
     throw new db.MockHttpError("INVALID_STATE", "A simulated call needs a published, live agent.", { state: agent.state });
   }
@@ -463,14 +473,14 @@ export function simCallTurn(
 
   const guard = guardrailFor(text);
   if (guard) {
-    db.emit(businessId, "guardrail.refused", call.id, "deployed_agent", { callId: call.id, rule: guard[0] });
+    db.emit(businessId, "guardrail.refused", call.id, "deployed_agent", { callId: call.id, rule: guard[0], reasonCode: REASON_CODES[guard[0]] });
     return { callId: call.id, reply: guard[1], toolTrace: [], guardrail: { refused: true, rule: guard[0] } };
   }
 
   if (agent.template === "appointment_booker") {
     if (CONFIRM.test(text) && call.stage === "PROPOSAL") {
       db.setStage(call, "CUSTOMER_CONFIRMED");
-      const { booking, approval } = db.proposeBookingOnCall(call, { name: "Sim caller", messageRecipient: "+15555550140" });
+      const { booking, approval } = await db.proposeBookingOnCall(call, { name: "Sim caller", messageRecipient: "+15555550140" });
       return {
         callId: call.id,
         reply: "I have sent your booking request to the shop. Once they approve it, you will get a confirmation by text message. Your appointment is not booked until then.",
@@ -493,10 +503,10 @@ export function simCallTurn(
     };
   }
 
-  const quote = db.quoteFor(businessId);
+  const quote = await db.quoteFor(businessId);
   if (CONFIRM.test(text) && call.stage === "VALIDATING") {
     db.setStage(call, "CUSTOMER_CONFIRMED");
-    const { order, approval } = db.proposeOrderOnCall(call, { name: "Sim caller", messageRecipient: "+15555550140" });
+    const { order, approval } = await db.proposeOrderOnCall(call, { name: "Sim caller", messageRecipient: "+15555550140" });
     return {
       callId: call.id,
       reply: `Thank you. I have sent your order to the shop for approval. Your total is ${(order.totalMinor / 100).toFixed(2)} dollars. Once the shop approves it, we will send the payment link by text message to the number ending in 0140. Your order is not placed until you pay on that link.`,

@@ -114,8 +114,12 @@ function stringify(value: unknown): string {
   }
 }
 
-/** "phone ending 0136" for a phone number, "recipient ending abcd" for anything else. */
-export function recipientLabel(recipient: string): string {
+/**
+ * "phone ending 0136" for a phone number, "recipient ending abcd" for anything else.
+ * No recipient means the customer declined messages (SPEC 2.9): the payload is qr_only.
+ */
+export function recipientLabel(recipient: string | undefined): string {
+  if (recipient === undefined) return 'no one (the customer declined messages)';
   const looksLikePhone = /^\+?[0-9 ()-]{6,}$/.test(recipient);
   return `${looksLikePhone ? 'phone' : 'recipient'} ending ${lastFour(recipient)}`;
 }

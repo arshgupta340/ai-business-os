@@ -1,14 +1,14 @@
 'use client';
 
 import {createContext, useCallback, useContext, useMemo, useState, type ReactNode} from 'react';
-import {useBusinesses, type BusinessListItem} from '@/lib/api';
+import {useBusinesses, type ListBusinessesResponse} from '@/lib/api';
 import {useAuth} from './auth';
 import {BusinessProvider} from './BusinessProvider';
 import {SEEDED_BUSINESSES, type BusinessSummary} from './businesses';
 
-/** Maps GET /api/businesses items to the selector's BusinessSummary. Only fields the API returned are kept. */
-export function toBusinessSummaries(items: readonly BusinessListItem[]): BusinessSummary[] {
-  return items.map(({id, name, category, timezone, contact}) => (contact ? {id, name, category, timezone, contact} : {id, name, category, timezone}));
+/** Maps GET /api/businesses items to the selector's BusinessSummary. A list item carries no contact (contract BusinessSummarySchema). */
+export function toBusinessSummaries(items: ListBusinessesResponse['items']): BusinessSummary[] {
+  return items.map(({id, name, category, timezone}) => ({id, name, category, timezone}));
 }
 
 /**
@@ -17,7 +17,7 @@ export function toBusinessSummaries(items: readonly BusinessListItem[]): Busines
  * API list is kept as empty. Businesses the server refused are left out.
  */
 export function chooseBusinesses(
-  apiItems: readonly BusinessListItem[] | undefined,
+  apiItems: ListBusinessesResponse['items'] | undefined,
   forbidden: ReadonlySet<string>,
 ): readonly BusinessSummary[] {
   const base = apiItems ? toBusinessSummaries(apiItems) : SEEDED_BUSINESSES;

@@ -4,7 +4,7 @@ import * as api from "./client";
 import { configureApiClient } from "./client";
 import { ApiError } from "./errors";
 import { invalidationFor } from "./invalidation";
-import { activityEventFromRow } from "./useActivityFeed";
+import { activityEventFromRow } from "@abos/contracts";
 import { server } from "@/mocks/server";
 import { requests, TEST_BASE_URL, useMockServer } from "@/mocks/test-setup";
 
@@ -122,10 +122,11 @@ describe("realtime helpers", () => {
       correlation_id: "call_1",
       actor_type: "provider",
       occurred_at: "2026-11-14T19:06:30Z",
-      payload: { orderId: "ord_1", sandbox: true },
+      payload: { orderId: "ord_1", squarePaymentId: "SQ_PAY_1", amountMinor: 4731, currency: "USD", sandbox: true },
     });
-    expect(event?.businessId).toBe(PIZZA);
-    expect(activityEventFromRow({ id: "evt_2", type: "not.a.type" })).toBeNull();
+    expect(event.businessId).toBe(PIZZA);
+    // The contract's mapping throws on a row it cannot read (useActivityFeed catches it; see realtime-row.ts).
+    expect(() => activityEventFromRow({ id: "evt_2", type: "not.a.type" })).toThrow();
   });
 
   it("refetches orders on payment and order status events", () => {

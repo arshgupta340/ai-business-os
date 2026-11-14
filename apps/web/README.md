@@ -82,7 +82,7 @@ const {setPendingApprovalsCount} = useShellBadges(); // from '@/components/shell
 
 - Fact kinds (`FactKind`): `hours`, `policy`, `service`, `contact`, `faq`, `menu_item`. `menu_item` facts are upload drafts only and never a price source.
 - Hours facts use one key per weekday: `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`.
-- Take these and every other shape from `packages/contracts` (or `@/lib/api/pending-contracts` until it lands). Never invent a field name.
+- Take these and every other shape from `packages/contracts` (re-exported by `@/lib/api`). Never invent a field name.
 
 ## Astryx conventions
 

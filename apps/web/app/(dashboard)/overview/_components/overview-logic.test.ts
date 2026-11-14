@@ -147,7 +147,7 @@ describe('describeEvent', () => {
     actorType: 'system',
     occurredAt: '2026-11-13T20:00:00.000Z',
     payload,
-  });
+  }) as ActivityEvent;
   const opts = {timeZone: 'America/Los_Angeles'};
 
   it('labels payment events as sandbox payment data', () => {
@@ -176,8 +176,8 @@ describe('describeEvent', () => {
 
 describe('summarizeHealth', () => {
   const entry = (state: 'connected' | 'degraded' | 'disconnected') => ({state, lastCheckedAt: '2026-11-13T20:00:00.000Z'});
-  const health = (overrides: Partial<Record<keyof IntegrationHealth, ReturnType<typeof entry>>> = {}): IntegrationHealth => ({
-    square: {...entry('connected'), environment: 'sandbox'},
+  const health = (overrides: Partial<Record<Exclude<keyof IntegrationHealth, 'square'>, ReturnType<typeof entry>>> = {}): IntegrationHealth => ({
+    square: {...entry('connected'), environment: 'sandbox' as const},
     twilio: entry('connected'),
     openai: entry('connected'),
     google_calendar: entry('connected'),

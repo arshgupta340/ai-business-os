@@ -30,6 +30,7 @@ import {
   type Agent,
   type AgentVersion,
   type PublishResponse,
+  type ActivityEventType,
 } from '@/lib/api';
 import {formatDateTime} from '@/lib/format';
 import {useBusiness} from '@/lib/session';
@@ -39,7 +40,7 @@ import {RollbackDialog} from './RollbackDialog';
 import {VersionCompare} from './VersionCompare';
 
 const VERSIONS_QUERY = {limit: 200} as const;
-const ACTIVITY_QUERY = {types: ['agent.published'], limit: 200};
+const ACTIVITY_QUERY = {types: ['agent.published'] as ActivityEventType[], limit: 200};
 
 export function VersionsScreen({agentId}: {agentId: string}) {
   const {businessId, business} = useBusiness();

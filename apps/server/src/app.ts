@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import cors from '@fastify/cors';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { healthRoutes } from './api/health';
 import { builderPlugin } from './builder/index';
@@ -59,6 +60,14 @@ export async function buildApp(env: Env, options: { logger?: boolean } = {}): Pr
       retryable: false,
     };
     return reply.status(404).send(body);
+  });
+
+  // The web app runs on another origin. Allow exactly one origin, never a wildcard.
+  await app.register(cors, {
+    origin: env.WEB_ORIGIN ?? 'http://localhost:3000',
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'X-Correlation-Id', 'Idempotency-Key'],
+    exposedHeaders: ['X-Correlation-Id'],
   });
 
   await app.register(healthRoutes, { env });
