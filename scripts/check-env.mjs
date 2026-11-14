@@ -78,12 +78,15 @@ const get = (name) => (has(name) ? values[name].trim() : undefined);
 // ---------- format checks (each returns a problem string or null; never a value) ----------
 
 const E164 = /^\+[1-9]\d{6,14}$/;
-const CHANNELS = ['surge', 'android_gateway', 'whatsapp_sandbox', 'qr_only'];
+const CHANNELS = ['surge', 'android_gateway', 'whatsapp_sandbox', 'qr_only', 'agentphone'];
+const TELEPHONY = ['twilio', 'agentphone'];
 const CHANNEL_KEYS = {
   surge: ['SURGE_API_KEY'],
   android_gateway: ['ANDROID_GATEWAY_URL', 'ANDROID_GATEWAY_API_KEY'],
   whatsapp_sandbox: ['TWILIO_WHATSAPP_FROM', 'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN'],
   qr_only: [],
+  // D-12: outbound SMS to US numbers also needs AgentPhone's A2P 10DLC approval (docs/notes-agentphone.md).
+  agentphone: ['AGENTPHONE_API_KEY', 'AGENTPHONE_NUMBER_ID'],
 };
 
 function parseUrl(raw) {
@@ -131,6 +134,11 @@ const checks = {
   TWILIO_ACCOUNT_SID: (v) => (/^AC[0-9a-fA-F]{32}$/.test(v) ? null : 'not AC followed by 32 hex characters'),
   TWILIO_PHONE_NUMBER: (v) => (E164.test(v) ? null : 'not E.164 (for example +18055550100)'),
   MESSAGE_CHANNEL: (v) => (CHANNELS.includes(v) ? null : `not one of ${CHANNELS.join(', ')}`),
+  TELEPHONY_PROVIDER: (v) => (TELEPHONY.includes(v) ? null : `not one of ${TELEPHONY.join(', ')}`),
+  AGENTPHONE_PHONE_NUMBER: (v) => (E164.test(v) ? null : 'not E.164 (for example +18055550100)'),
+  // Untested guess: the vendor's example response shows "whsec_abc123..."; no page states the prefix as a rule.
+  // If a real secret has another shape, this reports a wrong format although the server would accept it.
+  AGENTPHONE_WEBHOOK_SECRET: (v) => (v.startsWith('whsec_') ? null : 'does not start with whsec_ (the secret POST /v1/webhooks returns)'),
   ANDROID_GATEWAY_URL: (v) => (/^https?:$/.test(parseUrl(v)?.protocol ?? '') ? null : 'not an http(s) URL'),
   TWILIO_WHATSAPP_FROM: (v) => (E164.test(v.replace(/^whatsapp:/, '')) ? null : 'not whatsapp:+E.164 or +E.164'),
   GOOGLE_SERVICE_ACCOUNT_JSON: (v) => {
@@ -189,6 +197,16 @@ const GROUPS = [
     ],
   ],
   ['Twilio voice', [['TWILIO_ACCOUNT_SID', 'both'], ['TWILIO_AUTH_TOKEN', 'both'], ['TWILIO_PHONE_NUMBER', 'both']]],
+  [
+    'Telephony provider and AgentPhone (D-12)',
+    [
+      ['TELEPHONY_PROVIDER', 'both'],
+      ['AGENTPHONE_API_KEY', 'both'],
+      ['AGENTPHONE_WEBHOOK_SECRET', 'both'],
+      ['AGENTPHONE_NUMBER_ID', 'both'],
+      ['AGENTPHONE_PHONE_NUMBER', 'both'],
+    ],
+  ],
   [
     'Message channel',
     [
@@ -270,7 +288,10 @@ const FEATURES = [
   {
     name: 'Phone calls',
     tier: 'MUST',
-    needs: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER', 'PUBLIC_SERVER_URL', 'OPENAI_API_KEY', 'OPENAI_REALTIME_MODEL'],
+    // D-12: TELEPHONY_PROVIDER=agentphone needs the AgentPhone keys and the text model instead of Twilio and Realtime.
+    needs: get('TELEPHONY_PROVIDER') === 'agentphone'
+      ? ['AGENTPHONE_API_KEY', 'AGENTPHONE_WEBHOOK_SECRET', 'AGENTPHONE_NUMBER_ID', 'AGENTPHONE_PHONE_NUMBER', 'PUBLIC_SERVER_URL', 'OPENAI_API_KEY', 'OPENAI_BUILDER_MODEL']
+      : ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER', 'PUBLIC_SERVER_URL', 'OPENAI_API_KEY', 'OPENAI_REALTIME_MODEL'],
   },
   { name: 'Checkout message', tier: 'MUST', needs: ['MESSAGE_CHANNEL', ...(CHANNEL_KEYS[channel] ?? [])] },
   { name: 'Calendar booking', tier: 'MUST', needs: ['GOOGLE_SERVICE_ACCOUNT_JSON', 'GOOGLE_CALENDAR_ID'] },

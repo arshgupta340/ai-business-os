@@ -254,7 +254,8 @@ In the order I would do them.
 | `npm run check-env` | Show which variables are set, by name only |
 | `npm run dev:server` | Run the server with reload |
 | `npm run migrate -w @abos/db` | Apply new migrations. The runner reads `DATABASE_URL`, which for this one command must hold the owner connection |
-| `npm run seed`, `npm run seed:square` | Seed the owner and demo data. Seed the Square sandbox catalog |
+| `npm run seed` | Seed the owner and demo data, then the Square sandbox catalog. Without Square keys the catalog step is skipped with a printed line |
+| `npm run seed:square` | Seed only the Square sandbox catalog |
 | `npm run reset -- --yes` | Clear run data and reseed |
 | `npm run register-webhooks` | Dry run: show what would change on the Twilio number and the Square sandbox subscription. Add `-- --apply` to change them |
 | `npx tsx scripts/live/run-demo.ts <flows> --base <server address>` | Drive the demo flows against a running server and the real backend. Flows are `pizza`, `pay`, `negative`, `booking`, `hours` and `health`, as a comma list, or `all`. It needs real credentials in `.env.local`. The `pay` flow writes to the Square sandbox directly (see `SECURITY_NOTES.md`, rule 1). I did not run it |
