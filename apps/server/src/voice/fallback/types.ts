@@ -1,6 +1,5 @@
 import type { ActivityEventOf, BusinessFact, CallEndReason, CallStatus } from '@abos/contracts';
 
-/** Internal routing reasons, not new contract states or event types. */
 export type FallbackReason =
   | 'caller_requested_person'
   | 'repeated_guardrail_refusals'
@@ -22,22 +21,21 @@ export type FallbackInput = {
 };
 
 export type FallbackDecision = { handoff: false } | { handoff: true; reason: FallbackReason };
-
-/** Populated by account configuration, never by a caller or the model. */
 export type OwnedCallerId = { number: string; accountOwned: boolean };
 
 export type FallbackTwimlInput = {
   reason: FallbackReason;
-  /** Already verified by the router's fact port. This pure builder still checks E.164. */
   fallbackNumber?: string;
   businessName: string;
   callerId?: OwnedCallerId;
 };
 
+/** IDs come from a signature-verified webhook or an already bound media stream, never caller text. */
 export type FallbackRequest = {
   businessId: string;
   callId: string;
   providerCallId: string;
+  /** Ignored by the router. The reservation routine returns the trusted business name. */
   businessName: string;
   mode: 'webhook' | 'stream';
   signals: FallbackInput;
@@ -46,26 +44,38 @@ export type FallbackRequest = {
 export type CallUpdateInstruction = {
   providerCallId: string;
   twiml: string;
-  /** Stable infrastructure operation key, including across timeouts and process restarts. */
+  /** One key returned by the durable reservation for this provider call. */
   idempotencyKey: string;
 };
 
 export type FallbackResult =
   | { kind: 'continue' }
   | { kind: 'duplicate' }
+  | { kind: 'blocked' }
   | { kind: 'webhook'; reason: FallbackReason; twiml: string }
   | { kind: 'redirect'; reason: FallbackReason; instruction: CallUpdateInstruction }
   | { kind: 'redirect_unknown'; reason: FallbackReason };
 
-export type FallbackAttempt = {
+/** A trusted database routine returns this only after reserving the unique provider-call operation. */
+export type FallbackReservation = {
+  businessId: string;
+  callId: string;
+  providerCallId: string;
+  businessName: string;
+  callStatus: 'IN_PROGRESS';
+  channel: 'phone';
+  /** Derived from the published version pinned to this stored call. */
+  humanFallbackEnabled: true;
+  /** The stored verified business fact returned by the same checked routine. */
+  fallbackFact: BusinessFact;
+  idempotencyKey: string;
+};
+
+export type ReserveFallbackInput = {
   businessId: string;
   callId: string;
   providerCallId: string;
   reason: FallbackReason;
-  mode: FallbackRequest['mode'];
-  disposition: 'dial' | 'hangup';
-  fallbackLast4?: string;
-  idempotencyKey: string;
 };
 
 /** Only call after signature verification, deduplication, and resolution of the trusted call row. */
@@ -81,34 +91,42 @@ export type ConfirmedFallbackEnd = {
 export type FallbackOutcome = ConfirmedFallbackEnd & {
   status: CallStatus;
   event: ActivityEventOf<'call.ended'>;
+  /** Stable provider-call key. The outcome routine resolves the bound reservation before changing state. */
   idempotencyKey: string;
 };
 
 export interface FallbackPorts {
-  facts: {
-    /** Return the business's contact/fallback_phone_number fact; absence means no destination. */
-    readFallbackNumber(businessId: string): Promise<BusinessFact | null>;
-  };
   callerId: {
-    /** Assert ownership using trusted Twilio account configuration. Absence disables dialing. */
-    readOwnedNumber(businessId: string): Promise<OwnedCallerId | null>;
+    /** Trusted account configuration only. Implementations must honor abort before any external work begins. */
+    readOwnedNumber(businessId: string, signal: AbortSignal): Promise<OwnedCallerId | null>;
   };
-  attempts: {
-    /** Durable atomic reservation. False means already attempted. Never release on unknown results. */
-    claim(idempotencyKey: string): Promise<boolean>;
-    /** Idempotent internal audit record; no full phone numbers, model text, or secrets. */
-    record(attempt: FallbackAttempt): Promise<void>;
+  fallback: {
+    /**
+     * One checked database routine: lock the active phone call, require matching business and provider SID,
+     * require the call's published version to enable fallback, read a verified contact/fallback_phone_number
+     * fact, and reserve one immutable operation per provider call. Null fails closed.
+     */
+    reserve(input: ReserveFallbackInput, signal: AbortSignal): Promise<FallbackReservation | null>;
+    /**
+     * One checked database routine: recheck that the reserved call remains IN_PROGRESS, persist the exact
+     * TwiML hash/material and mark dispatch started. It must return false after terminal handling wins.
+     */
+    beginDispatch(input: CallUpdateInstruction, signal: AbortSignal): Promise<boolean>;
   };
   calls: {
-    /** Adapter implements client.calls(providerCallId).update({ twiml }). Never retry blindly. */
-    update(instruction: CallUpdateInstruction): Promise<void>;
+    /** The adapter may call Twilio only while signal is not aborted. It must not log the instruction. */
+    update(instruction: CallUpdateInstruction, signal: AbortSignal): Promise<void>;
   };
   outcomes: {
     /**
-     * Atomically update the matching IN_PROGRESS call and insert its one call.ended event.
-     * Check businessId, callId and providerCallId against stored routing attempts. A replay or
-     * already terminal call changes nothing. The same transaction must deduplicate other end paths.
+     * One checked database routine: resolve the reservation, conditionally end its matching IN_PROGRESS call,
+     * and insert one call.ended event. Replays and competing end paths change nothing.
      */
     record(outcome: FallbackOutcome): Promise<void>;
   };
 }
+
+export type FallbackRouterOptions = {
+  now?: () => number;
+  routingDeadlineMs?: number;
+};
