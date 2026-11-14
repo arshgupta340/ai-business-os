@@ -29,8 +29,8 @@ describe('statusView', () => {
     }
   });
 
-  it('shows an unknown state as itself', () => {
-    expect(statusView('order', 'SOMETHING_NEW')).toEqual({label: 'SOMETHING_NEW', tone: 'neutral'});
+  it('shows an unknown state in a readable form, in neutral, never as the raw value', () => {
+    expect(statusView('order', 'SOMETHING_NEW')).toEqual({label: 'Something new', tone: 'neutral'});
   });
 
   it('marks a required open conflict as blocking', () => {
