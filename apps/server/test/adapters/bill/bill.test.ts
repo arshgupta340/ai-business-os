@@ -12,8 +12,8 @@ function setup() {
   let serial = 0;
   const row: CatalogRow = { businessId: 'biz_pizza_01', catalogItemId: 'pizza', id: 'large', name: 'Pizza', priceMinor: 101, currency: 'USD', available: true, modifierLists: [{ id: 'extras', name: 'Extras', selectionType: 'MULTIPLE', modifiers: [{ id: 'cheese', name: 'Cheese', priceMinor: 25 }] }] };
   const store: BillStore = {
-    findByKey: vi.fn(async (key) => saved.get(key)),
-    findById: vi.fn(async (id) => [...saved.values()].find((b) => b.billId === id)),
+    findByKey: vi.fn(async (businessId, key) => { const bill = saved.get(key); return bill?.businessId === businessId ? bill : undefined; }),
+    findById: vi.fn(async (businessId, id) => [...saved.values()].find((b) => b.businessId === businessId && b.billId === id)),
     findByTokenHash: vi.fn(async (hash) => [...saved.values()].find((b) => b.tokenHash === hash)),
     putIfAbsent: vi.fn(async (bill) => { const winner = saved.get(bill.idempotencyKey) ?? structuredClone(bill); saved.set(bill.idempotencyKey, winner); return winner; }),
   };
@@ -62,6 +62,10 @@ describe('local bill pricing', () => {
     const { provider, deps } = setup(); deps.facts.taxRateBps = async () => undefined;
     expect(await provider.quoteLocal({ businessId: 'biz_pizza_01', lines })).toMatchObject({ ok: false, code: 'INTEGRATION_UNAVAILABLE' });
   });
+  it.each([-1, 1.5, 10001, Number.MAX_SAFE_INTEGER + 1])('refuses an invalid tax rate of %s basis points', async (rate) => {
+    const { provider, deps } = setup(); deps.facts.taxRateBps = async () => rate;
+    expect(await provider.quoteLocal({ businessId: 'biz_pizza_01', lines })).toMatchObject({ ok: false, code: 'VALIDATION_FAILED' });
+  });
   it('rejects overflow without losing integer precision', async () => {
     const { provider, row } = setup(); row.priceMinor = Number.MAX_SAFE_INTEGER;
     expect(await provider.quoteLocal({ businessId: row.businessId, lines })).toMatchObject({ ok: false, code: 'VALIDATION_FAILED' });
@@ -86,7 +90,7 @@ describe('bill checkout', () => {
     deps.catalog.list = async () => { throw new Error('not read'); };
     expect(await provider.createCheckout(input)).toEqual(first);
     expect(await provider.resumeCheckout(input)).toEqual(first);
-    expect(await provider.resumeCheckout({ squareOrderId: first.squareOrderId, paymentLinkId: first.paymentLinkId, approvedTotalMinor: input.approvedTotalMinor, currency: input.currency })).toEqual(first);
+    expect(await provider.resumeCheckout({ businessId: input.businessId, orderId: input.orderId, squareOrderId: first.squareOrderId, paymentLinkId: first.paymentLinkId, approvedTotalMinor: input.approvedTotalMinor, currency: input.currency })).toEqual(first);
     expect(callback).toHaveBeenCalledTimes(2); expect(callback).toHaveBeenCalledWith(first);
     expect(deps.randomBytes).toHaveBeenCalledWith(32);
   });
@@ -103,14 +107,34 @@ describe('bill checkout', () => {
     const { provider, input } = setup(); await provider.createCheckout(input);
     await expect(provider.createCheckout({ ...input, orderId: 'ord_other' })).rejects.toMatchObject({ code: 'PAYLOAD_HASH_MISMATCH' });
   });
-  it('awaits the callback and safely resumes after its failure', async () => {
-    const { provider, input } = setup(); input.onLinkCreated = async () => { throw new Error('sensitive details'); };
+  it('awaits the callback and recovers after its failure across a provider restart', async () => {
+    const { provider, input, deps } = setup(); input.onLinkCreated = async () => { throw new Error('sensitive details'); };
     await expect(provider.createCheckout(input)).rejects.toMatchObject({ outcome: 'created_unverified', message: 'The demo bill could not be prepared.' });
-    expect((await provider.resumeCheckout(input)).billId).toMatch(/^bill_/);
+    const restarted = createBillCheckoutProvider(deps);
+    const recovered = await restarted.resumeCheckout(input);
+    expect(recovered.billId).toMatch(/^bill_/);
+    expect(await restarted.createCheckout({ ...input, onLinkCreated: undefined })).toEqual(recovered);
   });
-  it('uses an unknown outcome when durable insert acknowledgement fails', async () => {
+  it('uses an unknown outcome when an insert acknowledgement fails before persistence', async () => {
     const { provider, input, store } = setup(); store.putIfAbsent = async () => { throw new Error('secret'); };
     await expect(provider.createCheckout(input)).rejects.toMatchObject({ outcome: 'unknown' });
+  });
+  it('recovers the committed bill after an insert acknowledgement is lost', async () => {
+    const { input, store, deps, saved } = setup();
+    let throwAfterCommit = true;
+    const originalInsert = store.putIfAbsent;
+    store.putIfAbsent = async (bill) => {
+      const savedBill = await originalInsert(bill);
+      if (throwAfterCommit) { throwAfterCommit = false; throw new Error('acknowledgement lost'); }
+      return savedBill;
+    };
+    const firstProvider = createBillCheckoutProvider(deps);
+    await expect(firstProvider.createCheckout(input)).rejects.toMatchObject({ outcome: 'unknown' });
+    const restarted = createBillCheckoutProvider(deps);
+    const recovered = await restarted.resumeCheckout(input);
+    const repeated = await restarted.createCheckout(input);
+    expect(repeated).toEqual(recovered);
+    expect(saved.size).toBe(1);
   });
   it('does not create from resume', async () => {
     const { provider, input, store } = setup(); await expect(provider.resumeCheckout(input)).rejects.toMatchObject({ code: 'NOT_FOUND' }); expect(store.putIfAbsent).not.toHaveBeenCalled();
@@ -118,6 +142,37 @@ describe('bill checkout', () => {
   it('refuses changed totals on resume', async () => {
     const { provider, input } = setup(); await provider.createCheckout(input);
     await expect(provider.resumeCheckout({ ...input, approvedTotalMinor: 1 })).rejects.toMatchObject({ outcome: 'total_mismatch' });
+  });
+  it.each([
+    { businessId: 'biz_other', orderId: 'ord_test' },
+    { businessId: 'biz_pizza_01', orderId: 'ord_other' },
+  ])('does not reveal a bill to a foreign business or order through either private lookup', async (scope) => {
+    const { provider, input } = setup(); const created = await provider.createCheckout(input);
+    await expect(provider.resumeCheckout({ ...input, ...scope })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    await expect(provider.resumeCheckout({ ...input, ...scope, idempotencyKey: undefined, squareOrderId: created.squareOrderId })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+  it('rejects a reused generated token before storing another bill', async () => {
+    const { provider, input, deps, store } = setup();
+    await provider.createCheckout(input);
+    deps.randomBytes = () => new Uint8Array(32).fill(1);
+    await expect(provider.createCheckout({ ...input, idempotencyKey: 'b'.repeat(64) })).rejects.toMatchObject({ code: 'CONFLICT_UNRESOLVED' });
+    expect(store.putIfAbsent).toHaveBeenCalledTimes(1);
+  });
+  it('retains an expired key tombstone instead of creating a second bill', async () => {
+    const { provider, input, saved, store } = setup(); await provider.createCheckout(input);
+    saved.values().next().value!.expiresAt = time.toISOString();
+    await expect(provider.createCheckout(input)).rejects.toMatchObject({ outcome: 'created_unverified' });
+    expect(store.putIfAbsent).toHaveBeenCalledTimes(1); expect(saved.size).toBe(1);
+  });
+  it('rejects one of two concurrent creates that reuse a key for different material', async () => {
+    const { provider, input, saved } = setup();
+    const results = await Promise.allSettled([
+      provider.createCheckout(input),
+      provider.createCheckout({ ...input, orderId: 'ord_other' }),
+    ]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect(saved.size).toBe(1);
   });
   it('rejects an invalid idempotency key and random byte count', async () => {
     const { provider, input, deps } = setup(); await expect(provider.createCheckout({ ...input, idempotencyKey: 'bad' })).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
@@ -151,6 +206,21 @@ describe('bill page', () => {
       const oversized = await app.inject({ url: '/bill/' + 'long-secret'.repeat(20) });
       for (const response of [unknown, malformed, expired, malformedUri, oversized]) { expect(response.statusCode).toBe(404); expect(response.body).toBe('Bill not found.'); expect(response.headers['cache-control']).toBe('no-store'); }
       expect(logs).not.toContain(link.url.split('/').at(-1)); expect(logs).not.toContain(unknownToken); expect(logs).not.toContain('malformed-secret'); expect(logs).not.toContain('%ZZ-secret'); expect(logs).not.toContain('long-secret');
+    } finally { await app.close(); }
+  });
+  it.each(['POST', 'OPTIONS', 'PUT', 'PATCH', 'DELETE'] as const)('does not disclose bill tokens for unsupported %s requests', async (method) => {
+    const { provider, input, store } = setup(); const link = await provider.createCheckout(input);
+    let logs = ''; const stream = new Writable({ write(chunk: Buffer, _encoding, done) { logs += chunk.toString(); done(); } });
+    const app = Fastify({ rewriteUrl: rewriteBillUrl, logger: { level: 'trace', stream } });
+    await app.register(billPlugin, { store, now: () => new Date(time) });
+    const token = link.url.split('/').at(-1)!;
+    try {
+      for (const url of [link.url, `/bill/${Buffer.alloc(32, 99).toString('base64url')}`, '/bill/malformed-secret']) {
+        const response = await app.inject({ method, url });
+        expect(response.statusCode).toBe(404); expect(response.body).toBe('Bill not found.');
+        expect(response.headers['cache-control']).toBe('no-store'); expect(response.body).not.toContain(token);
+      }
+      expect(logs).not.toContain(token); expect(logs).not.toContain('malformed-secret');
     } finally { await app.close(); }
   });
 });

@@ -28,8 +28,10 @@ export interface Bill {
   expiresAt: string;
 }
 export interface BillStore {
-  findByKey(key: string): Promise<Bill | undefined>;
-  findById(id: string): Promise<Bill | undefined>;
+  /** Private lookups must apply this business predicate in the database query. */
+  findByKey(businessId: Order['businessId'], key: string): Promise<Bill | undefined>;
+  /** Private lookups must apply this business predicate in the database query. */
+  findById(businessId: Order['businessId'], id: string): Promise<Bill | undefined>;
   /** Indexed hash lookup, never a plain token comparison. */
   findByTokenHash(hash: string): Promise<Bill | undefined>;
   /** Atomic insert with unique idempotencyKey, billId and tokenHash. On key conflict return the stored winner.
@@ -60,6 +62,10 @@ export type CheckoutInput = (QuoteInput & { orderId: Order['id']; pickupAt?: Ord
   onLinkCreated?: (link: CheckoutResult) => Promise<void> | void;
 };
 export interface ResumeCheckoutInput {
+  /** Trusted execution context, not an arbitrary request field. */
+  businessId: Order['businessId'];
+  /** Trusted approved subject, bound to the same execution as businessId. */
+  orderId: Order['id'];
   idempotencyKey?: string;
   squareOrderId?: string;
   paymentLinkId?: string;

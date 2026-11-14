@@ -63,6 +63,7 @@ export function createBillCheckoutProvider(deps: BillDeps) {
   if (!Number.isSafeInteger(deps.billTtlMs) || deps.billTtlMs <= 0) throw new Error('A positive bill lifetime is required.');
   const result = (bill: Bill): CheckoutResult => ({ billId: bill.billId, squareOrderId: bill.billId, paymentLinkId: bill.billId, url: `${base.origin}/bill/${bill.token}` });
   const verify = (bill: Bill, input: ResumeCheckoutInput) => {
+    if (bill.businessId !== input.businessId || bill.orderId !== input.orderId) throw new BillCheckoutError('NOT_FOUND', 'created_unverified', input.idempotencyKey);
     if (bill.quote.totalMinor !== input.approvedTotalMinor || bill.quote.currency !== input.currency) throw new BillCheckoutError('INVALID_STATE', 'total_mismatch', input.idempotencyKey);
     if (!Number.isFinite(Date.parse(bill.expiresAt)) || Date.parse(bill.expiresAt) <= deps.now().getTime()) throw new BillCheckoutError('INVALID_STATE', 'created_unverified', input.idempotencyKey);
   };
@@ -79,10 +80,10 @@ export function createBillCheckoutProvider(deps: BillDeps) {
         const checkExisting = (bill: Bill) => {
           outcome = 'created_unverified';
           if (bill.materialHash !== materialHash) throw new BillCheckoutError('PAYLOAD_HASH_MISMATCH', outcome, key);
-          verify(bill, input);
+          verify(bill, { businessId: source.businessId, orderId: source.orderId, approvedTotalMinor: input.approvedTotalMinor, currency: input.currency, idempotencyKey: key });
           return bill;
         };
-        let bill = await deps.store.findByKey(key);
+        let bill = await deps.store.findByKey(source.businessId, key);
         if (bill) bill = checkExisting(bill);
         else {
           const priced = await quoteLocal(deps, source);
@@ -96,6 +97,7 @@ export function createBillCheckoutProvider(deps: BillDeps) {
           const candidate: Bill = { billId: `bill_${await sha256Hex(key)}`, businessId: source.businessId, orderId: source.orderId, idempotencyKey: key, materialHash,
             token, tokenHash: await sha256Hex(token), businessName: business.name, pickupAt: source.pickupAt,
             quote: priced.quote, createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + deps.billTtlMs).toISOString() };
+          if (await deps.store.findByTokenHash(candidate.tokenHash)) throw new BillCheckoutError('CONFLICT_UNRESOLVED', outcome, key);
           outcome = 'unknown';
           bill = checkExisting(await deps.store.putIfAbsent(candidate));
         }
@@ -109,8 +111,8 @@ export function createBillCheckoutProvider(deps: BillDeps) {
     },
     async resumeCheckout(input: ResumeCheckoutInput): Promise<CheckoutResult> {
       try {
-        if (!CurrencySchema.safeParse(input.currency).success || !MinorAmountSchema.safeParse(input.approvedTotalMinor).success || (input.idempotencyKey !== undefined && !IdempotencyKeySchema.safeParse(input.idempotencyKey).success)) throw new BillCheckoutError('VALIDATION_FAILED', 'not_created', input.idempotencyKey);
-        const bill = input.idempotencyKey ? await deps.store.findByKey(input.idempotencyKey) : input.squareOrderId ? await deps.store.findById(input.squareOrderId) : undefined;
+        if (!BusinessIdSchema.safeParse(input.businessId).success || !OrderIdSchema.safeParse(input.orderId).success || !CurrencySchema.safeParse(input.currency).success || !MinorAmountSchema.safeParse(input.approvedTotalMinor).success || (input.idempotencyKey !== undefined && !IdempotencyKeySchema.safeParse(input.idempotencyKey).success)) throw new BillCheckoutError('VALIDATION_FAILED', 'not_created', input.idempotencyKey);
+        const bill = input.idempotencyKey ? await deps.store.findByKey(input.businessId, input.idempotencyKey) : input.squareOrderId ? await deps.store.findById(input.businessId, input.squareOrderId) : undefined;
         if (!bill) throw new BillCheckoutError('NOT_FOUND', 'not_created', input.idempotencyKey);
         if ((input.squareOrderId && input.squareOrderId !== bill.billId) || (input.paymentLinkId && input.paymentLinkId !== bill.billId)) throw new BillCheckoutError('PAYLOAD_HASH_MISMATCH', 'created_unverified', input.idempotencyKey);
         verify(bill, input);
