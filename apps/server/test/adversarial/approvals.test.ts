@@ -6,11 +6,11 @@ import { APPROVAL_EXPIRY_MS, canonicalJson, cartHash, hashCanonical, idempotency
 import { ageApproval, currentRole, type TestDb } from '../support/db';
 import { OTHER, OWNER, createWorld, type World } from '../e2e/world';
 import {
-  BARBER, CART, NONE, filterCalendarListByProperty, OTHER_BIZ, PIZZA, RECIPIENT, approve, bookingProposal, count, counts, decide, delta, getApproval, order, pickupAt, pizzaOrder, statusOf, steps,
+  BARBER, CART, NONE, OTHER_BIZ, PIZZA, RECIPIENT, approve, bookingProposal, count, counts, decide, delta, getApproval, order, pickupAt, pizzaOrder, statusOf, steps,
 } from './helpers';
 
 let w: World;
-beforeAll(async () => { w = await createWorld();  filterCalendarListByProperty(w); }, 120_000);
+beforeAll(async () => { w = await createWorld(); }, 120_000);
 afterAll(async () => { await w?.close(); });
 
 /** Lets the executor and the jobs run, then asks the executor to look again, so "nothing ran" is a real result. */

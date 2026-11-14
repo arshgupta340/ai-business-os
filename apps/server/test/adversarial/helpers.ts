@@ -224,21 +224,6 @@ export async function phoneCall(w: World, businessId: string, providerCallId: st
   return { callId, providerCallId, businessId, businessName, agentId: agent.id, agentVersionId: agent.active_version_id, spec: agent.spec, facts, toolset, ctx, call, options: voice.options };
 }
 
-/**
- * Google returns from events.list only the events that carry the private property asked for. The
- * world's fake returns every event, which is right while a world holds one booking. Files that create
- * several bookings call this once so the fake filters as Google does.
- */
-export function filterCalendarListByProperty(w: World): void {
-  w.calendar.client.events.list = async (input) => {
-    const wanted = input.privateExtendedProperty.map((p) => { const at = p.indexOf('='); return [p.slice(0, at), p.slice(at + 1)] as const; });
-    const items = [...w.calendar.events.values()]
-      .filter((e) => wanted.every(([key, value]) => e.extendedProperties.private[key] === value))
-      .map((e) => ({ id: e.id, status: 'confirmed', htmlLink: `https://calendar.example.test/${e.id}` }));
-    return { data: { items } };
-  };
-}
-
 export type PhoneCall = Awaited<ReturnType<typeof phoneCall>>;
 
 /**

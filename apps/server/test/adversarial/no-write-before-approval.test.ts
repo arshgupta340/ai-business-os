@@ -6,11 +6,11 @@ import { APPROVAL_EXPIRY_MS, type ToolResult } from '@abos/contracts';
 import { ageApproval, currentRole } from '../support/db';
 import { createWorld, nextLocalDate, type World } from '../e2e/world';
 import {
-  BARBER, CART, NONE, filterCalendarListByProperty, PIZZA, RECIPIENT, VOICE_ENV, bookingProposal, count, counts, decide, delta, getApproval, phoneCall, pickupAt, pizzaOrder, statusOf, steps,
+  BARBER, CART, NONE, PIZZA, RECIPIENT, VOICE_ENV, bookingProposal, count, counts, decide, delta, getApproval, phoneCall, pickupAt, pizzaOrder, statusOf, steps,
 } from './helpers';
 
 let w: World;
-beforeAll(async () => { w = await createWorld({}, VOICE_ENV);  filterCalendarListByProperty(w); }, 120_000);
+beforeAll(async () => { w = await createWorld({}, VOICE_ENV); }, 120_000);
 afterAll(async () => { await w?.close(); });
 
 /** Everything that could run a step or verify a payment gets a turn. */

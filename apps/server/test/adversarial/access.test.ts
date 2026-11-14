@@ -10,7 +10,7 @@ import type { TokenVerifier } from '../../src/auth/verify';
 import { currentRole } from '../support/db';
 import { OTHER, OTHER_AUTH, OWNER, OWNER_AUTH, createWorld, type World } from '../e2e/world';
 import {
-  BARBER, NONE, OTHER_BIZ, PIZZA, RECIPIENT, VOICE_ENV, approve, bookingProposal, count, counts, delta, filterCalendarListByProperty, getApproval, order, pizzaOrder, statusOf,
+  BARBER, NONE, OTHER_BIZ, PIZZA, RECIPIENT, VOICE_ENV, approve, bookingProposal, count, counts, delta, getApproval, order, pizzaOrder, statusOf,
 } from './helpers';
 
 type Route = { method: string; url: string; auth: string | undefined };
@@ -54,7 +54,6 @@ function leaked(res: Res): string[] {
 
 beforeAll(async () => {
   w = await createWorld({}, VOICE_ENV);
-  filterCalendarListByProperty(w);
   await w.app.ready();
   routes = w.app.routeInventory();
   api = routes.filter((r) => r.url === '/api' || r.url.startsWith('/api/'));
@@ -399,8 +398,10 @@ describe('authentication', () => {
     expect(problems).toEqual([]);
   });
 
-  // DEFECT (see the pull request): the builder plugin registers GET /api/builder/ping with no auth
-  // check, and the global guard skips routes whose policy is `builder`. It answers 200 to anyone.
+  // DEFECT 3 (see the pull request), left open on purpose: the builder plugin registers GET
+  // /api/builder/ping with no auth check, and the global guard skips routes whose policy is `builder`.
+  // It answers 200 to anyone and returns nothing about a business. The route is in the UI lead's folder
+  // (apps/server/src/builder/) and her own test requires it open; tracked in issue #96.
   it.fails('GET /api/builder/ping without a token returns 401 like every other /api route', async () => {
     const res = await w.app.inject({ url: '/api/builder/ping' });
     expect(res.statusCode).toBe(401);

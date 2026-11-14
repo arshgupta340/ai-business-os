@@ -9,7 +9,7 @@ import { notWiredExecutor, type SeamDeps } from '../../src/compose/seams';
 import { currentRole } from '../support/db';
 import { LOCATION_ID, OWNER, createWorld, fakeSquareClient, nextLocalDate, zonedIso, type World } from '../e2e/world';
 import {
-  BARBER, NONE, PIZZA, TZ, approve, bookingProposal, count, counts, decide, delta, filterCalendarListByProperty, getApproval, order, paymentEvent, pizzaOrder, pizzaToPaymentPending, postSquare, sim, statusOf, steps, type Step,
+  BARBER, NONE, PIZZA, TZ, approve, bookingProposal, count, counts, decide, delta, getApproval, order, paymentEvent, pizzaOrder, pizzaToPaymentPending, postSquare, sim, statusOf, steps, type Step,
 } from './helpers';
 
 const silentLog: SeamDeps['log'] = { info() {}, warn() {}, error() {} };
@@ -145,7 +145,7 @@ describe('a worker that dies between claim and finish', () => {
 
 describe('provider timeouts and ambiguous replies', () => {
   let w: World;
-  beforeAll(async () => { w = await createWorld(); filterCalendarListByProperty(w); }, 120_000);
+  beforeAll(async () => { w = await createWorld(); }, 120_000);
   afterAll(async () => { await w?.close(); });
 
   it('checkout creation times out: NEEDS_REVIEW, order RECOVERY_REQUIRED, no link stored or sent, one create with the database key', async () => {
