@@ -148,20 +148,28 @@ begin
   return w;
 end $$;
 
--- 4b. Provider delivery receipts for a recorded dispatch. No worker lease: a receipt arrives after the
--- step finished. Forward only, SENT to DELIVERED or FAILED; DELIVERED, FAILED and UNKNOWN are terminal
--- here (UNKNOWN is settled by resolve_execution). A repeated, stale or out-of-order receipt returns the
--- row unchanged, since providers deliver receipts out of order. The dispatch routines write no events.
+-- 4b. Provider delivery receipts for a recorded dispatch. No worker lease. A receipt that arrives while
+-- the send step is still QUEUED or RUNNING (between the sender's SENT commit and its finish) changes
+-- nothing and raises a retryable 'RETRY: receipt deferred' error, so a FAILED receipt cannot void the
+-- sender's SUCCEEDED completion; the caller keeps the webhook unprocessed and retries it. For a finished
+-- step: forward only, SENT to DELIVERED or FAILED; DELIVERED, FAILED and UNKNOWN are terminal here
+-- (UNKNOWN is settled by resolve_execution). A repeated, stale or out-of-order receipt returns the row
+-- unchanged, since providers deliver receipts out of order. The dispatch routines write no events.
 create function private.update_dispatch_status(p_business text,p_id text,p_status text)
 returns public.message_dispatches language plpgsql security definer set search_path = '' as $$
-declare d public.message_dispatches;
+declare x public.action_executions; d public.message_dispatches;
 begin
   if p_status is null or p_status not in ('SENT','DELIVERED','FAILED') then raise exception 'TRANSITION: receipt status'; end if;
-  -- Same lock order as update_dispatch and resolve_execution: approval first.
+  -- Same lock order as update_dispatch: approval, then the dispatch's execution, then the dispatch.
   perform 1 from public.approval_requests a join public.message_dispatches m on m.approval_id=a.id
     where m.id=p_id and m.business_id=p_business and a.business_id=p_business for update of a;
+  select e.* into x from public.action_executions e join public.message_dispatches m on m.execution_id=e.id
+    where m.id=p_id and m.business_id=p_business for update of e;
+  if not found then raise exception 'SCOPE: dispatch not found'; end if;
   select * into d from public.message_dispatches where id=p_id and business_id=p_business for update;
   if not found then raise exception 'SCOPE: dispatch not found'; end if;
+  if x.status in ('QUEUED','RUNNING') then
+    raise exception 'RETRY: receipt deferred until the send step finishes'; end if;
   if d.provider_message_id is null then raise exception 'TRANSITION: receipt needs a sent dispatch with a provider message ID'; end if;
   if d.status<>'SENT' or p_status='SENT' then return d; end if;
   update public.message_dispatches set status=p_status,
@@ -171,14 +179,15 @@ begin
 end $$;
 
 -- 5. Startup self-check. SECURITY INVOKER on purpose: it reports the caller's own role and rights,
--- which a definer routine would replace with the owner's. It reads catalogs only.
+-- which a definer routine would replace with the owner's. It reads catalogs only. Restricted needs both
+-- current_user and session_user to be abos_app: another login behind SET ROLE can RESET ROLE.
 create function private.runtime_role_check()
 returns table(role_name text, session_role_name text, superuser boolean, bypass_rls boolean, other_roles integer,
   writes_approvals boolean, writes_executions boolean, writes_dispatches boolean, writes_sync_jobs boolean,
   writes_receipts boolean, restricted boolean)
 language sql stable security invoker set search_path = '' as $$
   select c.role_name, c.session_role_name, c.superuser, c.bypass_rls, c.other_roles, c.wa, c.we, c.wd, c.ws, c.wr,
-    c.role_name = 'abos_app' and not c.superuser and not c.bypass_rls and c.other_roles = 0
+    c.role_name = 'abos_app' and c.session_role_name = 'abos_app' and not c.superuser and not c.bypass_rls and c.other_roles = 0
       and not (c.wa or c.we or c.wd or c.ws or c.wr)
   from (select current_user::text role_name, session_user::text session_role_name, r.rolsuper superuser, r.rolbypassrls bypass_rls,
       (select count(*)::integer from pg_catalog.pg_roles o where o.oid<>r.oid and pg_catalog.pg_has_role(r.oid,o.oid,'MEMBER')) other_roles,
