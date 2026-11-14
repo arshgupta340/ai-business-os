@@ -1,8 +1,9 @@
-// Pure voice logic with no I/O, so it can be unit tested: TwiML, the stream token store,
+// Pure voice logic with no I/O, so it can be unit tested: TwiML, the per-call stream credential,
 // the playback tracker for barge-in, call timing and log redaction.
 import { randomBytes } from 'node:crypto';
 import { STREAM_TOKEN_TTL_MS } from '@abos/contracts';
 import { STREAM_TOKEN_PARAM, ULAW_BYTES_PER_MS, WS_PATH } from './constants';
+import type { VoiceLogger } from './types';
 
 // ---------- TwiML ----------
 
@@ -34,85 +35,131 @@ export function buildSayTwiml(message: string): string {
   return ['<?xml version="1.0" encoding="UTF-8"?>', '<Response>', `  <Say>${xmlEscape(message)}</Say>`, '  <Hangup />', '</Response>'].join('\n');
 }
 
-/** TwiML for a request we refuse outright (bad signature). */
+/** TwiML for a request we refuse outright (bad signature, replay). */
 export function buildRejectTwiml(): string {
   return '<?xml version="1.0" encoding="UTF-8"?>\n<Response>\n  <Reject />\n</Response>';
 }
 
 export const NOT_TAKING_CALLS_MESSAGE = 'Sorry, this line is not taking calls right now. Please try again later. Goodbye.';
+export const CANNOT_TAKE_ORDERS_MESSAGE = 'Sorry, we cannot take orders or bookings by phone right now. Please try again later. Goodbye.';
 export const CALL_SETUP_FAILED_MESSAGE = 'Sorry, we cannot take your call right now. Please try again later. Goodbye.';
 
-// ---------- Stream token ----------
+// ---------- Stream credential ----------
 
-export type TokenCheck<T> = { ok: true; value: T } | { ok: false; reason: 'unknown' | 'expired' | 'call_mismatch' };
+export type TokenCheck<T> = { ok: true; value: T } | { ok: false; reason: 'unknown' | 'expired' | 'call_mismatch' | 'malformed' };
+
+type Credential<T> = { token: string; value: T; expiresAt: number; state: 'pending' | 'claimed' | 'ended' };
+
+/** What a repeated webhook for the same CallSid gets. */
+export type CredentialLookup = { kind: 'none' } | { kind: 'pending'; token: string } | { kind: 'refused'; state: 'claimed' | 'expired' | 'ended' };
 
 /**
- * Single-use stream tokens (SPEC 2.9, API 5). The webhook mints one per call; the WebSocket
- * consumes it once. Each token carries what the webhook pinned for that call.
+ * One stream credential per call (SPEC 2.9, API 5), keyed by CallSid. The webhook mints it once;
+ * a repeated webhook gets the same pending token back and never a second one. The WebSocket claims
+ * it once, with the exact CallSid and a stream ID, before it expires. A claimed, expired or ended
+ * credential never opens a session, and its record is kept so a later retry is refused.
  */
 export class StreamTokenStore<T extends { providerCallId: string }> {
-  private tokens = new Map<string, { value: T; expiresAt: number }>();
+  private byToken = new Map<string, Credential<T>>();
+  private byCall = new Map<string, Credential<T>>();
 
-  constructor(private readonly ttlMs = STREAM_TOKEN_TTL_MS) {}
+  constructor(
+    private readonly ttlMs = STREAM_TOKEN_TTL_MS,
+    /** How long a used credential is remembered, to refuse late retries. */
+    private readonly retentionMs = 4 * 60 * 60 * 1000,
+  ) {}
 
-  mint(value: T, now = Date.now(), token = randomBytes(24).toString('base64url')): string {
+  lookup(providerCallId: string, now = Date.now()): CredentialLookup {
     this.prune(now);
-    this.tokens.set(token, { value, expiresAt: now + this.ttlMs });
+    const c = this.byCall.get(providerCallId);
+    if (c === undefined) return { kind: 'none' };
+    if (c.state === 'pending' && now < c.expiresAt) return { kind: 'pending', token: c.token };
+    return { kind: 'refused', state: c.state === 'pending' ? 'expired' : c.state };
+  }
+
+  /** Mints the call's one credential. Returns the existing pending token if one exists, or null if refused. */
+  mint(value: T, now = Date.now(), token = randomBytes(24).toString('base64url')): string | null {
+    const existing = this.lookup(value.providerCallId, now);
+    if (existing.kind === 'pending') return existing.token;
+    if (existing.kind === 'refused') return null;
+    const c: Credential<T> = { token, value, expiresAt: now + this.ttlMs, state: 'pending' };
+    this.byToken.set(token, c);
+    this.byCall.set(value.providerCallId, c);
     return token;
   }
 
-  /** A token is removed on any check, pass or fail. */
-  consume(token: string | undefined, providerCallId: string | undefined, now = Date.now()): TokenCheck<T> {
+  /** Claims a credential once. Any failed check also burns it. */
+  consume(token: string | undefined, providerCallId: string | undefined, streamSid: string | undefined, now = Date.now()): TokenCheck<T> {
     if (token === undefined || token === '') return { ok: false, reason: 'unknown' };
-    const entry = this.tokens.get(token);
-    if (entry === undefined) return { ok: false, reason: 'unknown' };
-    this.tokens.delete(token);
-    if (now > entry.expiresAt) return { ok: false, reason: 'expired' };
-    if (providerCallId !== undefined && providerCallId !== entry.value.providerCallId) return { ok: false, reason: 'call_mismatch' };
-    return { ok: true, value: entry.value };
+    const c = this.byToken.get(token);
+    if (c === undefined || c.state !== 'pending') return { ok: false, reason: 'unknown' };
+    this.byToken.delete(token);
+    c.state = 'claimed';
+    if (now >= c.expiresAt) return { ok: false, reason: 'expired' };
+    if (providerCallId === undefined || providerCallId === '' || streamSid === undefined || streamSid === '') return { ok: false, reason: 'malformed' };
+    if (providerCallId !== c.value.providerCallId) return { ok: false, reason: 'call_mismatch' };
+    return { ok: true, value: c.value };
+  }
+
+  /** The call ended: its credential can never be used or reissued. */
+  end(providerCallId: string): void {
+    const c = this.byCall.get(providerCallId);
+    if (c === undefined) return;
+    c.state = 'ended';
+    this.byToken.delete(c.token);
   }
 
   get size(): number {
-    return this.tokens.size;
+    return this.byCall.size;
   }
 
   private prune(now: number): void {
-    for (const [t, e] of this.tokens) if (now > e.expiresAt) this.tokens.delete(t);
+    for (const [sid, c] of this.byCall) {
+      if (now >= c.expiresAt + this.retentionMs) {
+        this.byCall.delete(sid);
+        this.byToken.delete(c.token);
+      }
+    }
   }
 }
 
-// ---------- Mark queue and truncate offset ----------
+// ---------- Mark queue and truncate offsets ----------
 
 /** Milliseconds of audio in a base64 G.711 u-law payload. */
 export function ulawBase64DurationMs(base64: string): number {
   return Buffer.from(base64, 'base64').length / ULAW_BYTES_PER_MS;
 }
 
+export type Interruption = {
+  /** The item the caller was hearing, cut at the last offset Twilio confirmed as played. */
+  heard: { itemId: string; audioEndMs: number };
+  /** Later items already sent to Twilio but not yet heard at all. */
+  unheard: string[];
+};
+
 /**
- * Tracks how much of the model's current audio item the caller has actually heard.
+ * Tracks, per model audio item and in playback order, how much the caller has heard.
  *
- * After each audio chunk we send Twilio a mark named for the item's cumulative end offset.
- * Twilio echoes a mark once the audio before it has played, so the last echoed mark tells us how
- * far playback got. On barge-in we truncate the item at that offset. After a `clear`, Twilio also
- * echoes the marks for audio it dropped; `interrupt()` empties the queue so those are ignored.
+ * After each audio chunk we send Twilio a mark carrying the item and its cumulative end offset.
+ * Twilio echoes marks in order once the audio before them has played. The item being heard is the
+ * item of the oldest unacknowledged mark, cut at that item's last acknowledged offset. Items behind
+ * it have not been heard at all. After a `clear`, Twilio echoes the marks for dropped audio too;
+ * `interrupt()` empties the queue so those are ignored, and audio still arriving for a cut item is
+ * refused by `isCut`.
  */
 export class PlaybackTracker {
-  private itemId: string | null = null;
-  private sentMs = 0;
-  private playedMs = 0;
   private seq = 0;
   private queue: { name: string; itemId: string; endMs: number }[] = [];
+  private sentMs = new Map<string, number>();
+  private playedMs = new Map<string, number>();
+  private cut = new Set<string>();
 
   /** Record an audio chunk about to be sent. Returns the mark name to send right after it. */
   onAudioSent(itemId: string, durationMs: number): string {
-    if (itemId !== this.itemId) {
-      this.itemId = itemId;
-      this.sentMs = 0;
-      this.playedMs = 0;
-    }
-    this.sentMs += durationMs;
+    const sent = (this.sentMs.get(itemId) ?? 0) + durationMs;
+    this.sentMs.set(itemId, sent);
     const name = `p${++this.seq}`;
-    this.queue.push({ name, itemId, endMs: this.sentMs });
+    this.queue.push({ name, itemId, endMs: sent });
     return name;
   }
 
@@ -120,8 +167,7 @@ export class PlaybackTracker {
   onMark(name: string): boolean {
     const idx = this.queue.findIndex((m) => m.name === name);
     if (idx === -1) return false;
-    const [mark] = this.queue.splice(0, idx + 1).slice(-1);
-    if (mark && mark.itemId === this.itemId) this.playedMs = Math.max(this.playedMs, mark.endMs);
+    for (const m of this.queue.splice(0, idx + 1)) this.playedMs.set(m.itemId, Math.max(this.playedMs.get(m.itemId) ?? 0, m.endMs));
     return true;
   }
 
@@ -129,13 +175,29 @@ export class PlaybackTracker {
     return this.queue.length > 0;
   }
 
-  /** Caller started speaking. If audio is pending, return the item and the whole-millisecond offset heard, then reset. */
-  interrupt(): { itemId: string; audioEndMs: number } | null {
-    const result = this.itemId && this.queue.length > 0 ? { itemId: this.itemId, audioEndMs: Math.floor(Math.min(this.playedMs, this.sentMs)) } : null;
+  get pendingMarks(): number {
+    return this.queue.length;
+  }
+
+  /** Audio for an item that was cut by barge-in must not be played. */
+  isCut(itemId: string): boolean {
+    return this.cut.has(itemId);
+  }
+
+  /** Caller started speaking. Returns what to truncate, or null when nothing is pending; then resets. */
+  interrupt(): Interruption | null {
+    const head = this.queue[0];
+    let result: Interruption | null = null;
+    if (head !== undefined) {
+      const order: string[] = [];
+      for (const m of this.queue) if (!order.includes(m.itemId)) order.push(m.itemId);
+      const heardMs = Math.floor(Math.min(this.playedMs.get(head.itemId) ?? 0, this.sentMs.get(head.itemId) ?? 0));
+      result = { heard: { itemId: head.itemId, audioEndMs: heardMs }, unheard: order.slice(1) };
+      for (const id of order) this.cut.add(id);
+    }
     this.queue = [];
-    this.itemId = null;
-    this.sentMs = 0;
-    this.playedMs = 0;
+    this.sentMs.clear();
+    this.playedMs.clear();
     return result;
   }
 }
@@ -148,6 +210,7 @@ export class TimingTracker {
   private firstAudioMs: number | null = null;
   private speechStoppedAt: number | null = null;
   readonly turns: number[] = [];
+  private static readonly MAX_TURNS = 200;
 
   onConnect(now: number): void {
     this.connectAt = now;
@@ -170,7 +233,7 @@ export class TimingTracker {
     if (this.speechStoppedAt !== null) {
       const ms = now - this.speechStoppedAt;
       this.speechStoppedAt = null;
-      this.turns.push(ms);
+      if (this.turns.length < TimingTracker.MAX_TURNS) this.turns.push(ms);
       return { kind: 'turn', turn: this.turns.length, ms };
     }
     return null;
@@ -183,14 +246,63 @@ export class TimingTracker {
   }
 }
 
-// ---------- Redaction ----------
+// ---------- Redaction: the one path every log line takes ----------
 
-/** Removes the given secrets and anything that looks like an OpenAI key from a log line. */
+const MAX_LOG_TEXT = 120;
+/** Keys whose values are server-owned identifiers or codes, kept when they look like one. */
+const ID_KEYS = new Set(['callId', 'agentVersionId', 'businessId', 'stage', 'tool', 'status', 'reason', 'endReason', 'state', 'model', 'errorName', 'errorCode', 'errorType', 'path', 'rule', 'reasonCode', 'callerLast4']);
+const SAFE_ID = /^[A-Za-z0-9_.:-]{1,64}$/;
+
+/**
+ * Makes any text safe to log: removes configured secrets, OpenAI-style keys, phone numbers (kept as
+ * the last four digits), token-like runs (stream tokens, base64) and caps the length.
+ */
 export function redact(text: string, secrets: readonly string[] = []): string {
   let out = text;
   for (const s of secrets) if (s.length > 0) out = out.split(s).join('[redacted]');
   out = out.replace(/sk-[A-Za-z0-9_\-*]{4,}/g, '[redacted]');
-  return out.replace(/(Incorrect API key provided: )[^.]*\./, '$1[redacted].');
+  out = out.replace(/(Incorrect API key provided: )[^.]*\./, '$1[redacted].');
+  out = out.replace(/\+?\d[\d\s().-]{5,}\d/g, (m) => `[number ***${m.replace(/\D/g, '').slice(-4)}]`);
+  out = out.replace(/[A-Za-z0-9_-]{20,}/g, '[token]');
+  out = out.replace(/\s+/g, ' ');
+  return out.length > MAX_LOG_TEXT ? `${out.slice(0, MAX_LOG_TEXT)}...[truncated]` : out;
+}
+
+function sanitizeValue(key: string, value: unknown, secrets: readonly string[], depth: number): unknown {
+  if (typeof value === 'number' || typeof value === 'boolean' || value === null || value === undefined) return value;
+  if (typeof value === 'string') {
+    if (ID_KEYS.has(key) && SAFE_ID.test(value) && !/\d{7,}/.test(value) && !secrets.some((s) => s.length > 0 && value.includes(s))) return value;
+    return redact(value, secrets);
+  }
+  if (depth > 3) return '[omitted]';
+  if (Array.isArray(value)) return value.slice(0, 20).map((v) => sanitizeValue(key, v, secrets, depth + 1));
+  if (typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value).slice(0, 30)) out[k] = sanitizeValue(k, v, secrets, depth + 1);
+    return out;
+  }
+  return '[omitted]';
+}
+
+/** Redacts every field of a log record. */
+export function sanitizeLogData(data: Record<string, unknown>, secrets: readonly string[] = []): Record<string, unknown> {
+  return sanitizeValue('', data, secrets, 0) as Record<string, unknown>;
+}
+
+/** Wraps a logger so every message and field passes through `redact`. */
+export function safeLogger(logger: VoiceLogger, secrets: readonly string[] = []): VoiceLogger {
+  return {
+    info: (data, msg) => logger.info(sanitizeLogData(data, secrets), redact(msg, secrets)),
+    warn: (data, msg) => logger.warn(sanitizeLogData(data, secrets), redact(msg, secrets)),
+    error: (data, msg) => logger.error(sanitizeLogData(data, secrets), redact(msg, secrets)),
+  };
+}
+
+/** An error as allowlisted metadata only: its class name and a code, never its message. */
+export function errorInfo(err: unknown): { errorName: string; errorCode?: string } {
+  const name = err instanceof Error && /^[A-Za-z]{1,40}$/.test(err.name) ? err.name : 'Error';
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(code) ? { errorName: name, errorCode: code } : { errorName: name };
 }
 
 /** The last four digits of a phone number, the only form that may be logged or stored. */

@@ -1,12 +1,15 @@
 // Fakes shared by the voice tests. No network, no provider.
 import { vi } from 'vitest';
 import type { AgentSpec, CallStatus, ToolHandler } from '@abos/contracts';
-import type { CallsPort, DuplexSocket, VoiceLogger } from '../../src/voice/types';
+import { pizzaVerifiedFacts } from '@abos/contracts/fixtures';
+import type { CallsPort, DuplexSocket, FactsSnapshot, VoiceEventsPort, VoiceLogger, VoiceToolset } from '../../src/voice/types';
 
 export type Json = Record<string, unknown>;
 
 export class FakeSocket implements DuplexSocket {
   isOpen = true;
+  bufferedAmount = 0;
+  terminated = false;
   readonly sent: Json[] = [];
   private readonly handlers = {
     open: [] as (() => void)[],
@@ -22,6 +25,10 @@ export class FakeSocket implements DuplexSocket {
     if (!this.isOpen) return;
     this.isOpen = false;
     for (const f of this.handlers.close) f(1000);
+  }
+  terminate(): void {
+    this.terminated = true;
+    this.isOpen = false;
   }
   onOpen(fn: () => void): void {
     this.handlers.open.push(fn);
@@ -42,6 +49,9 @@ export class FakeSocket implements DuplexSocket {
   }
   emit(msg: Json): void {
     for (const f of this.handlers.message) f(JSON.stringify(msg));
+  }
+  fail(err: Error): void {
+    for (const f of this.handlers.error) f(err);
   }
   /** The other side closed the socket. */
   remoteClose(code = 1000): void {
@@ -65,6 +75,7 @@ export function fakeLogger() {
 
 export function fakeCalls(status: CallStatus | null = 'IN_PROGRESS') {
   const calls = {
+    findByProviderCallId: vi.fn<CallsPort['findByProviderCallId']>(async () => null),
     startCall: vi.fn<CallsPort['startCall']>(async () => ({ callId: 'call_test_01' })),
     getStatus: vi.fn<CallsPort['getStatus']>(async () => status),
     updateStage: vi.fn<CallsPort['updateStage']>(async () => undefined),
@@ -73,14 +84,29 @@ export function fakeCalls(status: CallStatus | null = 'IN_PROGRESS') {
   return calls satisfies CallsPort;
 }
 
-export function fakeHandler(result: unknown = { ok: true, items: [] }) {
-  const call = vi.fn(async () => result);
-  return { handler: { toolset: 'real', call } as unknown as ToolHandler, call };
+export function fakeEvents() {
+  const events = {
+    webhookRejected: vi.fn<VoiceEventsPort['webhookRejected']>(async () => undefined),
+    guardrailRefused: vi.fn<VoiceEventsPort['guardrailRefused']>(async () => undefined),
+  };
+  return events satisfies VoiceEventsPort;
+}
+
+export function fakeToolset(result: unknown = { ok: true, items: [] }) {
+  const call = vi.fn(async (..._args: unknown[]): Promise<unknown> => result);
+  const dispose = vi.fn();
+  const toolset: VoiceToolset = { handler: { toolset: 'real', call } as unknown as ToolHandler, dispose };
+  return { toolset, call, dispose };
 }
 
 export function specWith(spec: AgentSpec, patch: Partial<AgentSpec>): AgentSpec {
   return { ...spec, ...patch };
 }
+
+export const PIZZA_SNAPSHOT: FactsSnapshot = {
+  facts: pizzaVerifiedFacts.flatMap((f) => (f.kind === 'menu_item' ? [] : [{ kind: f.kind, key: f.key, value: f.value, version: f.version }])),
+  timezone: 'America/Los_Angeles',
+};
 
 /** Base64 G.711 u-law of `ms` milliseconds of silence. */
 export function ulaw(ms: number): string {

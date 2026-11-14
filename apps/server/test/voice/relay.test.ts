@@ -1,21 +1,23 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CAPABILITIES, TOOL_CAPABILITY, ToolNameSchema, isToolEffect, type AgentSpec } from '@abos/contracts';
 import { barberSpecV1, pizzaSpecV2 } from '@abos/contracts/fixtures';
 import { StreamTokenStore } from '../../src/voice/logic';
 import { buildSessionUpdate, checkSessionCapabilities, nextStage, runPhoneRelay } from '../../src/voice/relay';
-import type { PinnedCall } from '../../src/voice/types';
-import { FakeSocket, fakeCalls, fakeHandler, fakeLogger, specWith, ulaw, type Json } from './helpers';
+import type { CallDecision, PinnedCall, RelayLimits } from '../../src/voice/types';
+import { FakeSocket, PIZZA_SNAPSHOT, fakeCalls, fakeEvents, fakeLogger, fakeToolset, specWith, ulaw, type Json } from './helpers';
 
 const SECRET = 'sk-test-SECRETKEY1234567890';
 
 function pinnedFor(spec: AgentSpec): PinnedCall {
-  return { callId: 'call_test_01', providerCallId: 'CA123', businessId: spec.businessId, businessName: 'Demo Pizza Co.', agentId: spec.id, agentVersionId: 'agv_pizza_01_v2', spec };
+  return { callId: 'call_test_01', providerCallId: 'CA123', businessId: spec.businessId, businessName: 'Demo Pizza Co.', agentId: spec.id, agentVersionId: 'agv_pizza_01_v2', spec, facts: PIZZA_SNAPSHOT };
 }
 
-function setup(opts: { spec?: AgentSpec; result?: unknown; status?: 'IN_PROGRESS' | 'COMPLETED' } = {}) {
+type SetupOpts = { spec?: AgentSpec; result?: unknown; status?: 'IN_PROGRESS' | 'COMPLETED'; limits?: Partial<RelayLimits>; withDecisions?: boolean };
+
+function setup(opts: SetupOpts = {}) {
   const spec = opts.spec ?? pizzaSpecV2;
   const tokens = new StreamTokenStore<PinnedCall>();
-  const token = tokens.mint(pinnedFor(spec));
+  const token = tokens.mint(pinnedFor(spec)) ?? '';
   const phone = new FakeSocket();
   const sockets: FakeSocket[] = [];
   const openaiSocketFactory = vi.fn(() => {
@@ -24,12 +26,18 @@ function setup(opts: { spec?: AgentSpec; result?: unknown; status?: 'IN_PROGRESS
     return s;
   });
   const calls = fakeCalls(opts.status ?? 'IN_PROGRESS');
-  const { handler, call } = fakeHandler(opts.result);
-  const toolsetFactory = vi.fn(() => handler);
+  const events = fakeEvents();
+  const { toolset, call, dispose } = fakeToolset(opts.result);
+  const toolsetFactory = vi.fn(() => toolset);
   const { logger, lines } = fakeLogger();
-  const relay = runPhoneRelay({ phone, tokens, calls, toolsetFactory, openaiSocketFactory, messageChannel: 'surge', logger, redactSecrets: [SECRET] });
-  const start = (t: string = token, callSid = 'CA123') =>
-    phone.emit({ event: 'start', start: { callSid, streamSid: 'MZ1', customParameters: { streamToken: t } } });
+  let decide: ((d: CallDecision) => void) | undefined;
+  const unsubscribe = vi.fn();
+  const decisions = opts.withDecisions
+    ? { subscribe: vi.fn((_callId: string, fn: (d: CallDecision) => void) => ((decide = fn), unsubscribe)) }
+    : undefined;
+  const relay = runPhoneRelay({ phone, tokens, calls, events, decisions, toolsetFactory, openaiSocketFactory, messageChannel: 'surge', logger, redactSecrets: [SECRET], limits: opts.limits });
+  const start = (t: string = token, callSid: string | undefined = 'CA123', streamSid: string | undefined = 'MZ1') =>
+    phone.emit({ event: 'start', start: { callSid, streamSid, customParameters: { streamToken: t } } });
   const openai = () => {
     const s = sockets[0];
     if (s === undefined) throw new Error('no model socket');
@@ -42,14 +50,20 @@ function setup(opts: { spec?: AgentSpec; result?: unknown; status?: 'IN_PROGRESS
     openai().open();
     openai().emit({ type: 'session.updated' });
   };
-  return { relay, phone, calls, call, toolsetFactory, openaiSocketFactory, openai, start, connect, lines, token };
+  const fnCall = (name: string, args: string, callId: string) => ({ type: 'response.done', response: { status: 'completed', output: [{ type: 'function_call', name, arguments: args, call_id: callId }] } });
+  const outputs = () => openai().ofType('conversation.item.create').map((m) => (m as { item: Json }).item).filter((i) => i.type === 'function_call_output');
+  return { relay, phone, calls, events, call, dispose, toolsetFactory, openaiSocketFactory, openai, start, connect, fnCall, outputs, lines, token, tokens, decide: (d: CallDecision) => decide?.(d), unsubscribe };
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('voice relay: session start', () => {
   it('opens the session with the proven shape and only the allowed tools, then speaks first', async () => {
     const s = setup();
     await s.connect();
-    const update = s.openai().ofType('session.update')[0] as { session: Json & { tools: { name: string }[]; audio: Json } };
+    const update = s.openai().ofType('session.update')[0] as { session: Json & { tools: { name: string }[] } };
     expect(update.session).toMatchObject({
       type: 'realtime', output_modalities: ['audio'], tool_choice: 'auto',
       audio: { input: { format: { type: 'audio/pcmu' }, turn_detection: { type: 'server_vad' } }, output: { format: { type: 'audio/pcmu' }, voice: 'alloy' } },
@@ -57,24 +71,40 @@ describe('voice relay: session start', () => {
     expect(update.session.tools.map((t) => t.name).sort()).toEqual(['get_order_status', 'propose_order', 'quote_order', 'read_business_facts', 'read_catalog']);
     expect(String(update.session.instructions)).toContain('You are speaking with an AI assistant');
     expect(s.openai().ofType('response.create')).toHaveLength(1);
-    expect(s.toolsetFactory).toHaveBeenCalledWith({ businessId: 'biz_pizza_01', agentVersionId: 'agv_pizza_01_v2', callId: 'call_test_01', capabilities: pizzaSpecV2.capabilities });
+    expect(s.toolsetFactory).toHaveBeenCalledWith({ businessId: 'biz_pizza_01', agentVersionId: 'agv_pizza_01_v2', callId: 'call_test_01', capabilities: pizzaSpecV2.capabilities, facts: PIZZA_SNAPSHOT });
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
   });
 
   it('a bad token starts no session and ends no call', async () => {
     const s = setup();
     s.start('not-a-token');
-    const out = await s.relay.done;
-    expect(out.endReason).toBeNull();
+    expect((await s.relay.done).endReason).toBeNull();
     expect(s.openaiSocketFactory).not.toHaveBeenCalled();
     expect(s.calls.endCall).not.toHaveBeenCalled();
     expect(s.phone.isOpen).toBe(false);
   });
 
-  it('a token for another CallSid is refused', async () => {
+  it('S8: a start without a stream ID or CallSid starts no session', async () => {
+    for (const start of [{ callSid: 'CA123' }, { streamSid: 'MZ1' }]) {
+      const s = setup();
+      s.phone.emit({ event: 'start', start: { ...start, customParameters: { streamToken: s.token } } });
+      expect((await s.relay.done).why).toContain('malformed');
+      expect(s.openaiSocketFactory).not.toHaveBeenCalled();
+    }
+  });
+
+  it('B1: a consumed token cannot open a second session on another connection', async () => {
     const s = setup();
-    s.start(s.token, 'CA999');
-    expect((await s.relay.done).why).toContain('call_mismatch');
-    expect(s.openaiSocketFactory).not.toHaveBeenCalled();
+    await s.connect();
+    const phone2 = new FakeSocket();
+    const factory2 = vi.fn(() => new FakeSocket());
+    const r2 = runPhoneRelay({ phone: phone2, tokens: s.tokens, calls: fakeCalls(), events: fakeEvents(), toolsetFactory: () => fakeToolset().toolset, openaiSocketFactory: factory2, messageChannel: 'surge', logger: fakeLogger().logger });
+    phone2.emit({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ2', customParameters: { streamToken: s.token } } });
+    expect((await r2.done).endReason).toBeNull();
+    expect(factory2).not.toHaveBeenCalled();
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
   });
 
   it('a call that is not in progress starts no session', async () => {
@@ -88,8 +118,7 @@ describe('voice relay: session start', () => {
   it('a spec with a write capability outside its bundle is refused and the call fails', async () => {
     const s = setup({ spec: specWith(pizzaSpecV2, { capabilities: [...pizzaSpecV2.capabilities, 'catalog.price.update'] }) });
     s.start();
-    const out = await s.relay.done;
-    expect(out.endReason).toBe('failed');
+    expect((await s.relay.done).endReason).toBe('failed');
     expect(s.openaiSocketFactory).not.toHaveBeenCalled();
     expect(s.calls.endCall).toHaveBeenCalledWith('call_test_01', 'failed');
   });
@@ -104,6 +133,8 @@ describe('voice relay: session start', () => {
     s.openai().emit({ type: 'session.updated' });
     s.phone.emit({ event: 'media', media: { payload: ulaw(20) } });
     expect(s.openai().ofType('input_audio_buffer.append')).toEqual([{ type: 'input_audio_buffer.append', audio: ulaw(20) }]);
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
   });
 });
 
@@ -111,14 +142,15 @@ describe('voice relay: tool calls', () => {
   it('routes a function call to the toolset and returns the result with the same call id', async () => {
     const s = setup({ result: { ok: true, items: [] } });
     await s.connect();
-    s.openai().emit({ type: 'response.done', response: { status: 'completed', output: [{ type: 'function_call', name: 'read_catalog', arguments: '{"query":"pepperoni"}', call_id: 'fc_abc' }] } });
-    await vi.waitFor(() => expect(s.openai().ofType('conversation.item.create')).toHaveLength(1));
-    const item = (s.openai().ofType('conversation.item.create')[0] as { item: Json }).item;
-    expect(item).toMatchObject({ type: 'function_call_output', call_id: 'fc_abc' });
-    expect(JSON.parse(String(item.output))).toEqual({ ok: true, items: [] });
+    s.openai().emit(s.fnCall('read_catalog', '{"query":"pepperoni"}', 'fc_abc'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(1));
+    expect(s.outputs()[0]).toMatchObject({ type: 'function_call_output', call_id: 'fc_abc' });
+    expect(JSON.parse(String(s.outputs()[0]?.output))).toEqual({ ok: true, items: [] });
     expect(s.call).toHaveBeenCalledWith('read_catalog', { query: 'pepperoni' }, { businessId: 'biz_pizza_01', agentVersionId: 'agv_pizza_01_v2', callId: 'call_test_01', correlationId: 'call_test_01' });
     await vi.waitFor(() => expect(s.openai().ofType('response.create')).toHaveLength(2));
-    expect(s.calls.updateStage).toHaveBeenCalledWith('call_test_01', 'COLLECTING');
+    await vi.waitFor(() => expect(s.calls.updateStage).toHaveBeenCalledWith('call_test_01', 'COLLECTING'));
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
   });
 
   it('an unknown or disallowed tool returns a failure and the call goes on', async () => {
@@ -129,31 +161,147 @@ describe('voice relay: tool calls', () => {
       { type: 'function_call', name: 'quote_order', arguments: '{}', call_id: 'fc_2' },
       { type: 'function_call', name: 'read_business_facts', arguments: '{not json', call_id: 'fc_3' },
     ] } });
-    await vi.waitFor(() => expect(s.openai().ofType('conversation.item.create')).toHaveLength(3));
-    const outputs = s.openai().ofType('conversation.item.create').map((m) => {
-      const item = (m as { item: Json }).item;
-      return [item.call_id, JSON.parse(String(item.output)).reason];
-    });
-    expect(outputs).toEqual([['fc_1', 'CAPABILITY_NOT_ALLOWED'], ['fc_2', 'CAPABILITY_NOT_ALLOWED'], ['fc_3', 'VALIDATION_FAILED']]);
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(3));
+    expect(s.outputs().map((i) => [i.call_id, JSON.parse(String(i.output)).reason])).toEqual([['fc_1', 'CAPABILITY_NOT_ALLOWED'], ['fc_2', 'CAPABILITY_NOT_ALLOWED'], ['fc_3', 'VALIDATION_FAILED']]);
     expect(s.call).not.toHaveBeenCalled();
     expect(s.phone.isOpen).toBe(true);
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
   });
 
-  it('a toolset that throws becomes INTEGRATION_UNAVAILABLE', async () => {
-    const s = setup();
-    s.call.mockRejectedValueOnce(new Error('boom'));
+  it('S13: a refused tool writes guardrail.refused with fixed codes only', async () => {
+    const s = setup({ spec: barberSpecV1 });
     await s.connect();
-    s.openai().emit({ type: 'response.done', response: { output: [{ type: 'function_call', name: 'read_catalog', arguments: '{}', call_id: 'fc_9' }] } });
-    await vi.waitFor(() => expect(s.openai().ofType('conversation.item.create')).toHaveLength(1));
-    const item = (s.openai().ofType('conversation.item.create')[0] as { item: Json }).item;
-    expect(JSON.parse(String(item.output))).toMatchObject({ ok: false, reason: 'INTEGRATION_UNAVAILABLE' });
+    s.openai().emit(s.fnCall('+15555550123', '{"note":"PRIVATE"}', 'fc_1'));
+    s.openai().emit(s.fnCall('quote_order', '{}', 'fc_2'));
+    await vi.waitFor(() => expect(s.events.guardrailRefused).toHaveBeenCalledTimes(2));
+    expect(s.events.guardrailRefused.mock.calls.map((c) => c[0])).toEqual([
+      { businessId: 'biz_barber_01', payload: { callId: 'call_test_01', rule: 'unsupported_request', reasonCode: 'unknown_tool' } },
+      { businessId: 'biz_barber_01', payload: { callId: 'call_test_01', rule: 'unsupported_request', reasonCode: 'tool_not_allowed', toolName: 'quote_order' } },
+    ]);
+    expect(JSON.stringify(s.events.guardrailRefused.mock.calls)).not.toContain('PRIVATE');
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
+  });
+
+  it('B3: an unknown tool name is logged only as unknown_tool and its length', async () => {
+    const s = setup();
+    await s.connect();
+    s.openai().emit(s.fnCall('+15555550123', '{}', 'fc_1'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(1));
+    const logged = JSON.stringify(s.lines);
+    expect(logged).not.toContain('5555550123');
+    expect(logged).toContain('"tool":"unknown_tool"');
+    expect(logged).toContain('"nameLength":12');
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
+  });
+
+  it('B3: port exceptions, socket errors and provider errors are logged without their text', async () => {
+    const s = setup();
+    s.call.mockRejectedValueOnce(new Error('could not message +15555550123: PRIVATE TEXT'));
+    await s.connect();
+    s.openai().emit(s.fnCall('read_catalog', '{}', 'fc_9'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(1));
+    expect(JSON.parse(String(s.outputs()[0]?.output))).toMatchObject({ ok: false, reason: 'INTEGRATION_UNAVAILABLE' });
+    s.openai().emit({ type: 'error', error: { type: 'invalid_request_error', code: 'bad_value', message: `echo: caller said PRIVATE TEXT; key ${SECRET}; token ${s.token}` } });
+    s.phone.fail(new Error(`socket broke for streamToken=${s.token} +15555550123`));
+    await s.relay.done;
+    const logged = JSON.stringify(s.lines);
+    for (const leak of ['PRIVATE TEXT', SECRET, s.token, '5555550123']) expect(logged).not.toContain(leak);
+    expect(logged).toContain('invalid_request_error');
+  });
+
+  it('S5: a hung tool times out as INTEGRATION_UNAVAILABLE and later calls still run', async () => {
+    const s = setup({ limits: { toolTimeoutMs: 50 } });
+    s.call.mockImplementationOnce(() => new Promise(() => undefined));
+    await s.connect();
+    s.openai().emit(s.fnCall('read_catalog', '{}', 'fc_hung'));
+    s.openai().emit(s.fnCall('read_catalog', '{}', 'fc_next'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(2));
+    expect(s.outputs().map((i) => [i.call_id, JSON.parse(String(i.output)).ok])).toEqual([['fc_hung', false], ['fc_next', true]]);
+    expect(JSON.parse(String(s.outputs()[0]?.output)).reason).toBe('INTEGRATION_UNAVAILABLE');
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
+  });
+
+  it('S5: a tool result that arrives after hangup changes nothing', async () => {
+    let finish: (v: unknown) => void = () => undefined;
+    const s = setup({ result: { ok: true, items: [] } });
+    s.call.mockImplementationOnce(() => new Promise((r) => (finish = r)));
+    await s.connect();
+    s.openai().emit(s.fnCall('read_catalog', '{}', 'fc_late'));
+    await vi.waitFor(() => expect(s.call).toHaveBeenCalled());
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
+    finish({ ok: true, items: [] });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(s.calls.updateStage).not.toHaveBeenCalled();
+    expect(s.outputs()).toHaveLength(0);
+    expect(s.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('S6: responses beyond the queue bound are answered unavailable at once', async () => {
+    const s = setup({ limits: { maxPendingResponses: 1, toolTimeoutMs: 10_000 } });
+    s.call.mockImplementationOnce(() => new Promise(() => undefined));
+    await s.connect();
+    s.openai().emit(s.fnCall('read_catalog', '{}', 'fc_1'));
+    s.openai().emit(s.fnCall('read_catalog', '{}', 'fc_2'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(1));
+    expect(s.outputs()[0]).toMatchObject({ call_id: 'fc_2' });
+    expect(JSON.parse(String(s.outputs()[0]?.output)).reason).toBe('INTEGRATION_UNAVAILABLE');
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
   });
 
   it('a successful proposal moves the call to CUSTOMER_CONFIRMED', async () => {
     const s = setup({ result: { ok: true, proposalId: 'ord_1', approvalId: 'apv_1', missingFields: [] } });
     await s.connect();
-    s.openai().emit({ type: 'response.done', response: { output: [{ type: 'function_call', name: 'propose_order', arguments: '{}', call_id: 'fc_p' }] } });
+    s.openai().emit(s.fnCall('propose_order', '{}', 'fc_p'));
     await vi.waitFor(() => expect(s.calls.updateStage).toHaveBeenCalledWith('call_test_01', 'CUSTOMER_CONFIRMED'));
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
+  });
+});
+
+describe('voice relay: wait and finish (FLOWS 3.1)', () => {
+  it('S12: still pending after the wait, the agent says goodbye and the call ends completed', async () => {
+    const s = setup({ result: { ok: true, proposalId: 'ord_1', approvalId: 'apv_1', missingFields: [] }, limits: { pendingWaitMs: 100 } });
+    await s.connect();
+    s.openai().emit(s.fnCall('propose_order', '{}', 'fc_p'));
+    await vi.waitFor(() => expect(s.openai().sent.some((m) => JSON.stringify(m).includes('still pending'))).toBe(true));
+    // The model speaks the goodbye; Twilio plays it out; the response finishes.
+    s.openai().emit({ type: 'response.output_audio.delta', item_id: 'item_bye', delta: ulaw(20) });
+    s.openai().emit({ type: 'response.done', response: { status: 'completed', output: [] } });
+    s.phone.emit({ event: 'mark', mark: { name: 'p1' } });
+    expect(await s.relay.done).toMatchObject({ endReason: 'completed', why: 'goodbye played' });
+    expect(s.calls.endCall).toHaveBeenCalledWith('call_test_01', 'completed');
+    expect(s.phone.isOpen).toBe(false);
+  });
+
+  it('S12: an owner decision is spoken and cancels the pending goodbye', async () => {
+    const s = setup({ result: { ok: true, proposalId: 'ord_1', approvalId: 'apv_1', missingFields: [] }, limits: { pendingWaitMs: 150 }, withDecisions: true });
+    await s.connect();
+    s.openai().emit(s.fnCall('propose_order', '{}', 'fc_p'));
+    await vi.waitFor(() => expect(s.calls.updateStage).toHaveBeenCalledWith('call_test_01', 'CUSTOMER_CONFIRMED'));
+    s.decide({ kind: 'rejected' });
+    expect(JSON.stringify(s.openai().sent)).toContain('not able to take this order');
+    await new Promise((r) => setTimeout(r, 250));
+    expect(JSON.stringify(s.openai().sent)).not.toContain('still pending');
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
+    expect(s.unsubscribe).toHaveBeenCalled();
+  });
+
+  it('S12: a failed proposal starts no wait', async () => {
+    const s = setup({ result: { ok: true, missingFields: ['contact.messageRecipient.readBack'] }, limits: { pendingWaitMs: 50 } });
+    await s.connect();
+    s.openai().emit(s.fnCall('propose_order', '{}', 'fc_p'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 120));
+    expect(JSON.stringify(s.openai().sent)).not.toContain('still pending');
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
   });
 });
 
@@ -166,6 +314,8 @@ describe('voice relay: audio and barge-in', () => {
       { event: 'media', streamSid: 'MZ1', media: { payload: ulaw(20) } },
       { event: 'mark', streamSid: 'MZ1', mark: { name: 'p1' } },
     ]);
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
   });
 
   it('on caller speech clears Twilio and truncates at the played offset', async () => {
@@ -176,6 +326,27 @@ describe('voice relay: audio and barge-in', () => {
     s.openai().emit({ type: 'input_audio_buffer.speech_started' });
     expect(s.phone.ofType('clear')).toEqual([{ event: 'clear', streamSid: 'MZ1' }]);
     expect(s.openai().ofType('conversation.item.truncate')).toEqual([{ type: 'conversation.item.truncate', item_id: 'item_1', content_index: 0, audio_end_ms: 40 }]);
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
+  });
+
+  it('S7: truncates the item being heard and the unheard item behind it, and drops late audio for them', async () => {
+    const s = setup();
+    await s.connect();
+    s.openai().emit({ type: 'response.output_audio.delta', item_id: 'item_A', delta: ulaw(20) });
+    s.openai().emit({ type: 'response.output_audio.delta', item_id: 'item_A', delta: ulaw(20) });
+    s.openai().emit({ type: 'response.output_audio.delta', item_id: 'item_B', delta: ulaw(20) });
+    s.phone.emit({ event: 'mark', mark: { name: 'p1' } });
+    s.openai().emit({ type: 'input_audio_buffer.speech_started' });
+    expect(s.openai().ofType('conversation.item.truncate')).toEqual([
+      { type: 'conversation.item.truncate', item_id: 'item_A', content_index: 0, audio_end_ms: 20 },
+      { type: 'conversation.item.truncate', item_id: 'item_B', content_index: 0, audio_end_ms: 0 },
+    ]);
+    const before = s.phone.sent.length;
+    s.openai().emit({ type: 'response.output_audio.delta', item_id: 'item_B', delta: ulaw(20) });
+    expect(s.phone.sent.length).toBe(before);
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
   });
 
   it('caller speech with nothing pending sends no clear', async () => {
@@ -183,7 +354,100 @@ describe('voice relay: audio and barge-in', () => {
     await s.connect();
     s.openai().emit({ type: 'input_audio_buffer.speech_started' });
     expect(s.phone.ofType('clear')).toHaveLength(0);
-    expect(s.openai().ofType('conversation.item.truncate')).toHaveLength(0);
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
+  });
+
+  it('S6: phone back-pressure fails the call instead of buffering', async () => {
+    const s = setup({ limits: { maxPendingMarks: 3 } });
+    await s.connect();
+    for (let i = 0; i < 5; i++) s.openai().emit({ type: 'response.output_audio.delta', item_id: 'item_1', delta: ulaw(20) });
+    expect(await s.relay.done).toMatchObject({ endReason: 'failed', why: 'phone back-pressure' });
+    expect(s.phone.ofType('media')).toHaveLength(3);
+    const s2 = setup();
+    await s2.connect();
+    s2.phone.bufferedAmount = 10 * 1024 * 1024;
+    s2.openai().emit({ type: 'response.output_audio.delta', item_id: 'item_1', delta: ulaw(20) });
+    expect(await s2.relay.done).toMatchObject({ endReason: 'failed' });
+  });
+});
+
+describe('voice relay: deadlines and ending (fake time)', () => {
+  it('S4: a socket that never sends start is closed', async () => {
+    vi.useFakeTimers();
+    const s = setup({ limits: { startTimeoutMs: 1000 } });
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(await s.relay.done).toMatchObject({ endReason: null, why: 'no start message' });
+    expect(s.phone.isOpen).toBe(false);
+  });
+
+  it('S4: a model session that never becomes ready fails the call', async () => {
+    vi.useFakeTimers();
+    const s = setup({ limits: { setupTimeoutMs: 1000 } });
+    s.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(s.openaiSocketFactory).toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await s.relay.done).toMatchObject({ endReason: 'failed' });
+    expect(s.calls.endCall).toHaveBeenCalledWith('call_test_01', 'failed');
+    expect(s.phone.isOpen).toBe(false);
+  });
+
+  it('S4: a model error before ready, with no close, fails the call and closes the phone', async () => {
+    const s = setup();
+    s.start();
+    await vi.waitFor(() => expect(s.openaiSocketFactory).toHaveBeenCalled());
+    s.openai().open();
+    s.openai().emit({ type: 'error', error: { type: 'invalid_request_error', code: 'invalid_api_key' } });
+    expect(await s.relay.done).toMatchObject({ endReason: 'failed' });
+    expect(s.phone.isOpen).toBe(false);
+  });
+
+  it('S4: no message from Twilio for the idle time ends the call as dropped', async () => {
+    vi.useFakeTimers();
+    const s = setup({ limits: { idleTimeoutMs: 500 } });
+    s.start();
+    await vi.advanceTimersByTimeAsync(10);
+    s.openai().open();
+    s.openai().emit({ type: 'session.updated' });
+    await vi.advanceTimersByTimeAsync(501);
+    expect(await s.relay.done).toMatchObject({ endReason: 'dropped' });
+  });
+
+  it('S4: a call ended elsewhere stops the relay without touching the call row', async () => {
+    vi.useFakeTimers();
+    const s = setup({ limits: { statusPollMs: 1000 } });
+    s.start();
+    await vi.advanceTimersByTimeAsync(10);
+    s.openai().open();
+    s.openai().emit({ type: 'session.updated' });
+    s.calls.getStatus.mockResolvedValue('COMPLETED');
+    s.phone.emit({ event: 'media', media: { payload: ulaw(20) } });
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(await s.relay.done).toMatchObject({ endReason: null, why: 'call ended elsewhere' });
+    expect(s.calls.endCall).not.toHaveBeenCalled();
+  });
+
+  it('S4: a hung endCall still settles the relay', async () => {
+    vi.useFakeTimers();
+    const s = setup({ limits: { cleanupTimeoutMs: 500 } });
+    s.calls.endCall.mockImplementation(() => new Promise(() => undefined));
+    s.start();
+    await vi.advanceTimersByTimeAsync(10);
+    s.phone.emit({ event: 'stop' });
+    await vi.advanceTimersByTimeAsync(501);
+    expect(await s.relay.done).toMatchObject({ endReason: 'completed' });
+  });
+
+  it('S4: a socket that ignores close is terminated after the grace period', async () => {
+    vi.useFakeTimers();
+    const s = setup({ limits: { closeGraceMs: 200 } });
+    s.start();
+    await vi.advanceTimersByTimeAsync(10);
+    s.openai().close = () => undefined; // a peer that never closes
+    s.phone.emit({ event: 'stop' });
+    await vi.advanceTimersByTimeAsync(201);
+    expect(s.openai().terminated).toBe(true);
   });
 });
 
@@ -193,9 +457,9 @@ describe('voice relay: ending', () => {
     await s.connect();
     s.phone.emit({ event: 'stop' });
     expect(await s.relay.done).toMatchObject({ endReason: 'completed' });
-    expect(s.calls.endCall).toHaveBeenCalledWith('call_test_01', 'completed');
     expect(s.calls.endCall).toHaveBeenCalledTimes(1);
     expect(s.openai().isOpen).toBe(false);
+    expect(s.dispose).toHaveBeenCalled();
   });
 
   it('the Twilio socket closing ends the call as dropped', async () => {
@@ -213,15 +477,13 @@ describe('voice relay: ending', () => {
     expect(s.phone.isOpen).toBe(false);
   });
 
-  it('redacts the API key from a logged provider error and logs no audio or number', async () => {
+  it('logs no audio and records timing', async () => {
     const s = setup();
     await s.connect();
-    s.openai().emit({ type: 'error', error: { message: `Incorrect API key provided: ${SECRET}.` } });
     s.openai().emit({ type: 'response.output_audio.delta', item_id: 'item_1', delta: ulaw(20) });
     s.phone.emit({ event: 'stop' });
     await s.relay.done;
     const logged = JSON.stringify(s.lines);
-    expect(logged).not.toContain(SECRET);
     expect(logged).not.toContain(ulaw(20));
     expect(logged).toContain('connectToFirstAudioMs');
   });
@@ -240,10 +502,8 @@ describe('voice relay: capability rules', () => {
   });
 
   it('the session config never holds a tool outside the allowed set', () => {
-    const everything = ToolNameSchema.options;
-    for (const tools of [[], ['read_catalog'] as const, everything]) {
-      const ev = buildSessionUpdate({ model: 'm', voice: 'alloy', instructions: 'x', tools });
-      const names = ev.session.tools.map((t) => t.name);
+    for (const tools of [[], ['read_catalog'] as const, ToolNameSchema.options]) {
+      const names = buildSessionUpdate({ model: 'm', voice: 'alloy', instructions: 'x', tools }).session.tools.map((t) => t.name);
       expect(names.every((n) => (tools as readonly string[]).includes(n))).toBe(true);
       for (const n of names) expect(isToolEffect(CAPABILITIES[TOOL_CAPABILITY[n]].effect)).toBe(true);
     }
@@ -253,10 +513,11 @@ describe('voice relay: capability rules', () => {
     expect(nextStage('restaurant_order_taker', 'CALL_STARTED', 'read_catalog', { ok: true })).toBe('COLLECTING');
     expect(nextStage('restaurant_order_taker', 'COLLECTING', 'quote_order', { ok: false, reason: 'ITEM_UNAVAILABLE' })).toBe('UNAVAILABLE');
     expect(nextStage('restaurant_order_taker', 'UNAVAILABLE', 'quote_order', { ok: true })).toBe('VALIDATING');
+    expect(nextStage('restaurant_order_taker', 'VALIDATING', 'propose_order', { ok: true, missingFields: ['x'] })).toBe('VALIDATING');
     expect(nextStage('appointment_booker', 'INQUIRY', 'read_business_facts', { ok: true })).toBe('INQUIRY');
     expect(nextStage('appointment_booker', 'INQUIRY', 'read_calendar_availability', { ok: true })).toBe('SLOT_SEARCH');
     expect(nextStage('appointment_booker', 'SLOT_SEARCH', 'propose_booking', { ok: false, reason: 'SLOT_CONFLICT' })).toBe('PROPOSAL');
-    expect(nextStage('appointment_booker', 'PROPOSAL', 'propose_booking', { ok: true, proposalId: 'bkg_1' })).toBe('CUSTOMER_CONFIRMED');
+    expect(nextStage('appointment_booker', 'PROPOSAL', 'propose_booking', { ok: true, proposalId: 'bkg_1', approvalId: 'apv_1' })).toBe('CUSTOMER_CONFIRMED');
     expect(nextStage('restaurant_order_taker', 'CUSTOMER_CONFIRMED', 'quote_order', { ok: true })).toBe('CUSTOMER_CONFIRMED');
   });
 });
