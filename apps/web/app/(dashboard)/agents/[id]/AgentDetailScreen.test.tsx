@@ -158,9 +158,10 @@ describe('AgentDetailScreen', {timeout: 20_000}, () => {
   });
 
   it('does not offer the live switch or pause for a draft agent', async () => {
-    renderDetail('agt_barber_faq_01', 'biz_barber_01');
+    // The shared draft is the pizza FAQ line; the pizza order assistant holds the number.
+    renderDetail('agt_pizza_faq_01');
     expect(await screen.findByText('Draft')).toBeTruthy();
-    await screen.findByText(/answers the phone number, not an agent of this business/);
+    await screen.findByText('Pizza Order Assistant answers the phone number.');
     expect(screen.queryByRole('button', {name: 'Make this agent answer the phone'})).toBeNull();
     expect(screen.queryByRole('button', {name: 'Pause agent'})).toBeNull();
     expect(screen.getByText('Publish this agent before it can answer the phone number.')).toBeTruthy();
@@ -178,7 +179,7 @@ describe('AgentDetailScreen', {timeout: 20_000}, () => {
   it('treats an agent of the other business as not found', async () => {
     renderDetail('agt_barber_01', 'biz_pizza_01');
     expect(await screen.findByRole('heading', {name: 'Agent not found'})).toBeTruthy();
-    expect(screen.queryByText('Barber Booking Assistant')).toBeNull();
+    expect(screen.queryByText('Booking Assistant')).toBeNull();
   });
 
   it('shows the phone number only for the agent that answers it, and links the last calls to Live operations', async () => {

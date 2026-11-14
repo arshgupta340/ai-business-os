@@ -89,7 +89,7 @@ function RecentCallsCard({businessId, agentId, timeZone}: {businessId: string; a
   const calls = useCalls(businessId, {agentId, limit: RECENT_CALLS});
   let body;
   if (calls.isPending) body = <LoadingState label="Loading calls" />;
-  else if (calls.error) body = <ErrorNotice error={calls.error} context="load" onRetry={() => void calls.refetch()} />;
+  else if (calls.error) body = <ErrorNotice error={calls.error} context="load" title="Could not load the last calls" onRetry={() => void calls.refetch()} />;
   else if (calls.data.items.length === 0) body = <Text type="body">No calls for this agent yet.</Text>;
   else {
     body = (
@@ -145,7 +145,7 @@ export function AgentDetailScreen({agentId}: {agentId: string}) {
     return (
       <VStack gap={6}>
         <PageHeader title="Agent" />
-        <ErrorNotice error={agent.error} context="load" onRetry={() => void agent.refetch()} />
+        <ErrorNotice error={agent.error} context="load" title="Could not load this agent" onRetry={() => void agent.refetch()} />
       </VStack>
     );
   }

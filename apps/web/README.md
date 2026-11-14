@@ -34,7 +34,7 @@ Real mode without `NEXT_PUBLIC_SUPABASE_URL` or `NEXT_PUBLIC_SUPABASE_ANON_KEY`:
 | `lib/session/` | `useBusiness()`, `BusinessProvider`, `ApiBusinessProvider`, seeded businesses, the sign-in notice. |
 | `lib/session/auth/` | `useAuth()`, `getAccessToken()`. |
 | `lib/supabase/client.ts` | `getSupabaseBrowserClient()`, null when not configured. |
-| `lib/api/`, `mocks/` | Typed API client, React Query hooks and the MSW mock layer. Read `lib/api/README.md`. |
+| `lib/api/`, `mocks/` | Typed API client, React Query hooks and the MSW mock layer. The mock data is the shared demo world from `@abos/contracts/fixtures` (`mocks/seed.ts`); `apps/web` keeps no fixture copies. Read `lib/api/README.md`. |
 
 ## Shared components
 
@@ -47,6 +47,7 @@ Import from `@/components` (or the single file).
 - `StatusBadge` `{label, tone}`, tone `neutral | info | warning | danger | success`. `success` (green) is only for states the server or provider confirmed. Never green before the provider confirms.
 - `SandboxBadge`. Put it next to any payment data: totals, payment links, payment status.
 - `SessionNotice`. Shows once why the owner landed on /sign-in (for example "Your session ended"). The sign-in page renders it.
+- `RefreshFailedNotice` `{businessId}`. One line under the page header when a background refetch failed and the screen still shows the old data: "Could not refresh. Showing the last data we have." with "Try again". Overview and My Agents use it; their blocks show an error only when there is no data at all.
 
 ## Shell on narrow screens
 
@@ -71,12 +72,12 @@ Hooks still return their errors, so a screen can show its own error state as bef
 ## Hooks
 
 ```tsx
-const {businesses, business, businessId, setBusinessId} = useBusiness(); // from '@/lib/session'
+const {businesses, business, businessId, isReady, setBusinessId} = useBusiness(); // from '@/lib/session'
 const {status, owner, signIn, signOut, isMock, configError} = useAuth(); // from '@/lib/session/auth'
 const {setPendingApprovalsCount} = useShellBadges(); // from '@/components/shell'
 ```
 
-`businesses` comes from `GET /api/businesses` once the owner is signed in. While it loads, when it fails, or when signed out, it is the seeded list. `businessId` defaults to `biz_pizza_01` and is kept in localStorage. `business` has `id`, `name`, `category`, `timezone` and an optional `contact: { phone?, email?, address? }` (the location is `contact.address`). Pass it to every business-scoped API call. `status` is `loading | signed_in | signed_out`. Screens under `(dashboard)` only render when `signed_in`, so they can assume an owner.
+`businesses` comes from `GET /api/businesses` once the owner is signed in. In mock mode the seeded list stands in while it loads, when it fails, or when signed out; in real mode the list is empty until the server answers, and `DashboardShell` shows a loading, error or empty state (`BusinessListGate`) instead of the screen. `businessId` is null until localStorage has been read after mount (`isReady` turns true then), so no business-scoped call goes out with the default before the stored business is known. After that it is the stored business, else `biz_pizza_01`, else the first in the list. `business` has `id`, `name`, `category`, `timezone` and an optional `contact: { phone?, email?, address? }` (the location is `contact.address`). Pass it to every business-scoped API call. `status` is `loading | signed_in | signed_out`. Screens under `(dashboard)` only render when `signed_in`, so they can assume an owner.
 
 ## Domain names to reuse
 
@@ -114,4 +115,4 @@ npm run astryx -- docs layout
 - No StyleX compiler is set up. Do not call `stylex.create()` and do not pass `xstyle`. Some templates use `stylex.create`. If you scaffold one, replace those styles with component props (or an inline `style` with tokens) or you get "Unexpected stylex.create call at runtime".
 - Theme mode is `system`, so light and dark both work.
 - The neutral theme loads the Figtree font from Google Fonts (`fonts.css`). Offline, text falls back to the system font.
-- Auth and business selection are read from localStorage after mount. Server HTML always shows the default business and a "Checking sign-in" state.
+- Auth and business selection are read from localStorage after mount. Server HTML shows no business selected and a "Checking sign-in" state.

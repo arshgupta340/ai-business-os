@@ -9,7 +9,8 @@ import type { AgentSpec, AgentTemplate, CapabilityId, IntegrationHealth, Integra
 export type IntegrationKey = keyof IntegrationHealth;
 
 export interface IntegrationHealthReader {
-  // The last known state of each provider. A provider left out is not checked.
+  // The last known state of each provider. A required provider left out of
+  // the result is taken as down (see unavailableIntegrations).
   read(): Promise<Partial<Record<IntegrationKey, { state: IntegrationState }>>>;
 }
 

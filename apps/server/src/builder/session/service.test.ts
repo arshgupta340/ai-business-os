@@ -77,7 +77,9 @@ describe('builder interview on recorded responses', () => {
 
     expect(second!.missingFields).toEqual([]);
     expect(second!.progress.answered).toBe(second!.progress.required);
-    expect(second!.stopConditions).toEqual([]);
+    // The chat answer is a draft, not a verified fact, so publish would still
+    // refuse on it: the turn keeps the stop condition until it is confirmed.
+    expect(second!.stopConditions).toEqual([{ code: 'missing_message_consent_policy' }]);
     const facts = await draftFacts.listBySession('biz_pizza_01', session.id);
     expect(facts).toEqual([expect.objectContaining({ kind: 'policy', key: 'message_consent', status: 'draft', sourceType: 'owner_chat', sourceRef: session.id })]);
 

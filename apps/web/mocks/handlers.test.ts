@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest";
 import * as api from "@/lib/api/client";
 import { ApiError } from "@/lib/api/errors";
 import { ApprovalRequestSchema, payloadHash, type PublishBody } from "@abos/contracts";
+import {
+  approvalBookingPending,
+  approvalOrderExpired,
+  approvalOrderPending,
+  bookingAwaitingApproval,
+  faqDraftAgent,
+  menuItemDraftFact,
+  orderAwaitingApproval,
+} from "@abos/contracts/fixtures";
 import { advanceMockClock, getState, mockControls, whenIdle } from "./server";
 import { useMockServer } from "./test-setup";
 
@@ -9,6 +18,11 @@ useMockServer();
 
 const PIZZA = "biz_pizza_01";
 const BARBER = "biz_barber_01";
+// Shared fixture ids (@abos/contracts/fixtures).
+const PENDING_ORDER_APV = approvalOrderPending.id;
+const PENDING_BOOKING_APV = approvalBookingPending.id;
+/** The draft FAQ agent of the pizza business. The shared world has no barbershop draft. */
+const DRAFT_AGENT = faqDraftAgent.id;
 
 async function code(p: Promise<unknown>): Promise<string> {
   try {
@@ -20,11 +34,11 @@ async function code(p: Promise<unknown>): Promise<string> {
   return "OK";
 }
 
-describe("fixtures", () => {
+describe("seeded approvals", () => {
   it("validate against the contract schemas and use the payload hash recipe", async () => {
     for (const apv of getState().approvals) {
       expect(ApprovalRequestSchema.safeParse(apv).success).toBe(true);
-      expect(apv.payloadHash).toBe(await payloadHash(apv.payload));
+      expect(apv.payloadHash).toBe(await payloadHash(apv.payload, apv.bundleType));
     }
   });
 
@@ -38,14 +52,14 @@ describe("fixtures", () => {
 
 describe("approval rules", () => {
   it("refuses a payload hash that does not match", async () => {
-    expect(await code(api.decideApproval(PIZZA, "apv_pizza_pending", { decision: "approve", payloadHash: "sha256:wrong" }))).toBe(
+    expect(await code(api.decideApproval(PIZZA, PENDING_ORDER_APV, { decision: "approve", payloadHash: "sha256:wrong" }))).toBe(
       "PAYLOAD_HASH_MISMATCH",
     );
-    expect(getState().approvals.find((a) => a.id === "apv_pizza_pending")!.state).toBe("PENDING");
+    expect(getState().approvals.find((a) => a.id === PENDING_ORDER_APV)!.state).toBe("PENDING");
   });
 
   it("treats the same decision twice as safe and a different second decision as already decided", async () => {
-    const apv = await api.getApproval(PIZZA, "apv_pizza_pending");
+    const apv = await api.getApproval(PIZZA, PENDING_ORDER_APV);
     const first = await api.decideApproval(PIZZA, apv.id, { decision: "approve", payloadHash: apv.payloadHash });
     const second = await api.decideApproval(PIZZA, apv.id, { decision: "approve", payloadHash: apv.payloadHash });
     expect(first.approval.state).toBe("APPROVED");
@@ -59,20 +73,20 @@ describe("approval rules", () => {
   });
 
   it("refuses to decide an expired approval", async () => {
-    const apv = await api.getApproval(PIZZA, "apv_pizza_expired");
+    const apv = await api.getApproval(PIZZA, approvalOrderExpired.id);
     expect(await code(api.decideApproval(PIZZA, apv.id, { decision: "approve", payloadHash: apv.payloadHash }))).toBe("APPROVAL_EXPIRED");
   });
 
   it("expires a pending approval once expiresAt passes and closes its order", async () => {
-    const apv = getState().approvals.find((a) => a.id === "apv_pizza_pending")!;
+    const apv = getState().approvals.find((a) => a.id === PENDING_ORDER_APV)!;
     advanceMockClock(11 * 60_000);
     expect(await code(api.decideApproval(PIZZA, apv.id, { decision: "approve", payloadHash: apv.payloadHash }))).toBe("APPROVAL_EXPIRED");
     expect(apv.state).toBe("EXPIRED");
-    expect((await api.getOrder(PIZZA, "ord_pizza_pending")).status).toBe("APPROVAL_EXPIRED");
+    expect((await api.getOrder(PIZZA, orderAwaitingApproval.id)).status).toBe("APPROVAL_EXPIRED");
   });
 
   it("replays an Idempotency-Key and refuses it with a different body", async () => {
-    const apv = await api.getApproval(BARBER, "apv_barber_pending");
+    const apv = await api.getApproval(BARBER, PENDING_BOOKING_APV);
     const a = await api.decideApproval(BARBER, apv.id, { decision: "reject", payloadHash: apv.payloadHash }, { idempotencyKey: "k1" });
     const b = await api.decideApproval(BARBER, apv.id, { decision: "reject", payloadHash: apv.payloadHash }, { idempotencyKey: "k1" });
     expect(b).toEqual(a);
@@ -82,15 +96,15 @@ describe("approval rules", () => {
   });
 
   it("rejects without any external step", async () => {
-    const apv = await api.getApproval(BARBER, "apv_barber_pending");
+    const apv = await api.getApproval(BARBER, PENDING_BOOKING_APV);
     await api.decideApproval(BARBER, apv.id, { decision: "reject", payloadHash: apv.payloadHash });
     await whenIdle();
-    expect((await api.getBooking(BARBER, "bkg_barber_pending")).status).toBe("REJECTED");
+    expect((await api.getBooking(BARBER, bookingAwaitingApproval.id)).status).toBe("REJECTED");
     expect(getState().executions.filter((e) => e.approvalId === apv.id)).toHaveLength(0);
   });
 
   it("refuses after the stored payload changed (mock control)", async () => {
-    const apv = await api.getApproval(PIZZA, "apv_pizza_pending");
+    const apv = await api.getApproval(PIZZA, PENDING_ORDER_APV);
     await mockControls.simulatePayloadChanged(apv.id);
     expect(await code(api.decideApproval(PIZZA, apv.id, { decision: "approve", payloadHash: apv.payloadHash }))).toBe("PAYLOAD_HASH_MISMATCH");
   });
@@ -117,9 +131,50 @@ describe("fact edits", () => {
   });
 });
 
+describe("fact edits for a new key and conflicts", () => {
+  it("proposes a fact for a key with no verified fact (fromVersion 0, before null) and confirms it", async () => {
+    const { approval } = await api.proposeFact(PIZZA, { kind: "faq", key: "vegan_cheese", value: { question: "Do you have vegan cheese?", answer: "Yes, on request." } });
+    expect(approval.payload).toMatchObject({ kind: "faq", key: "vegan_cheese", fromVersion: 0, before: null });
+    const draft = getState().facts.find((f) => f.id === approval.subjectId)!;
+    expect(draft).toMatchObject({ status: "draft", kind: "faq", key: "vegan_cheese", version: 1 });
+    const res = await api.decideApproval(PIZZA, approval.id, { decision: "approve", payloadHash: approval.payloadHash });
+    expect(res.approval.state).toBe("APPROVED");
+    await whenIdle();
+    const verified = (await api.getFacts(PIZZA, { kind: "faq", status: "verified" })).items.find((f) => f.key === "vegan_cheese")!;
+    expect(verified).toMatchObject({ id: approval.subjectId, version: 1 });
+    const changed = (await api.listActivity(PIZZA, { correlationId: approval.id, types: ["fact.changed"] })).items[0];
+    expect(changed?.type === "fact.changed" && changed.payload).toMatchObject({ fromVersion: 0, toVersion: 1 });
+  });
+
+  it("confirms the seeded pending Friday hours edit", async () => {
+    const apv = await api.getApproval(PIZZA, "apv_demo_f01");
+    expect(apv.state).toBe("PENDING");
+    await api.decideApproval(PIZZA, apv.id, { decision: "approve", payloadHash: apv.payloadHash });
+    await whenIdle();
+    const fri = (await api.getFacts(PIZZA, { kind: "hours", status: "verified" })).items.find((f) => f.key === "fri")!;
+    expect(fri).toMatchObject({ id: apv.subjectId, value: { open: "11:00", close: "23:00" }, version: 2 });
+  });
+
+  it("resolving a conflict emits fact.changed with resolvedConflictId", async () => {
+    await api.resolveConflict(PIZZA, "cfl_pizza_01");
+    const events = (await api.listActivity(PIZZA, { types: ["fact.changed"] })).items;
+    const resolved = events.find((e) => e.type === "fact.changed" && e.payload.resolvedConflictId === "cfl_pizza_01");
+    expect(resolved?.payload).toMatchObject({ factId: menuItemDraftFact.id, kind: "menu_item", fromVersion: 1, toVersion: 1, sourceType: "upload" });
+  });
+
+  it("resolving the non-required conflict through a fact edit marks it resolved by the new fact", async () => {
+    const { approval } = await api.proposeFact(PIZZA, { resolvesConflictId: "cfl_pizza_02", value: { minutes: 25 } });
+    await api.decideApproval(PIZZA, approval.id, { decision: "approve", payloadHash: approval.payloadHash });
+    await whenIdle();
+    expect(getState().conflicts.find((c) => c.id === "cfl_pizza_02")).toMatchObject({ state: "resolved", resolvedFactId: approval.subjectId });
+    const changed = (await api.listActivity(PIZZA, { correlationId: approval.id, types: ["fact.changed"] })).items[0];
+    expect(changed?.type === "fact.changed" && changed.payload.resolvedConflictId).toBe("cfl_pizza_02");
+  });
+});
+
 describe("publish rules", () => {
   it("needs confirm: true", async () => {
-    expect(await code(api.publishAgent(BARBER, "agt_barber_faq_01", { confirm: false } as unknown as PublishBody))).toBe("VALIDATION_FAILED");
+    expect(await code(api.publishAgent(PIZZA, DRAFT_AGENT, { confirm: false } as unknown as PublishBody))).toBe("VALIDATION_FAILED");
   });
 
   it("is blocked by an open required conflict until it is resolved", async () => {
@@ -127,7 +182,7 @@ describe("publish rules", () => {
     const { conflict } = await api.resolveConflict(PIZZA, "cfl_pizza_01");
     expect(conflict.state).toBe("resolved");
     const facts = await api.getFacts(PIZZA, { kind: "menu_item", status: "superseded" });
-    expect(facts.items.map((f) => f.id)).toContain("fact_pizza_menu_marg_lg");
+    expect(facts.items.map((f) => f.id)).toContain(menuItemDraftFact.id);
     const res = await api.publishAgent(PIZZA, "agt_pizza_01", { confirm: true });
     expect(res.agent.state).toBe("live");
     expect(res.version.id).toBe("agv_pizza_01_v2"); // unchanged draft reactivates the current version
@@ -138,16 +193,29 @@ describe("publish rules", () => {
   });
 
   it("writes a new immutable version for a draft agent and can make it live", async () => {
-    const res = await api.publishAgent(BARBER, "agt_barber_faq_01", { confirm: true, makeLive: true });
+    // The pizza business has the required menu price conflict; keep the Square price first.
+    expect(await code(api.publishAgent(PIZZA, DRAFT_AGENT, { confirm: true, makeLive: true }))).toBe("CONFLICT_UNRESOLVED");
+    await api.resolveConflict(PIZZA, "cfl_pizza_01");
+    const res = await api.publishAgent(PIZZA, DRAFT_AGENT, { confirm: true, makeLive: true });
     expect(res.version.version).toBe(1);
     expect(res.agent.isLiveAgent).toBe(true);
     const live = await api.getLiveAgent();
-    expect(live).toMatchObject({ businessId: BARBER, agentId: "agt_barber_faq_01", agentVersionId: res.version.id });
+    expect(live).toMatchObject({ businessId: PIZZA, agentId: DRAFT_AGENT, agentVersionId: res.version.id });
+  });
+
+  it("keeps a paused agent paused when it rolls back (API.md 3.4)", async () => {
+    await api.resolveConflict(PIZZA, "cfl_pizza_01");
+    await api.pauseAgent(PIZZA, "agt_pizza_01");
+    const res = await api.rollbackAgent(PIZZA, "agt_pizza_01", { toVersionId: "agv_pizza_01_v1", confirm: true });
+    expect(res.agent).toMatchObject({ state: "paused", activeVersionId: "agv_pizza_01_v1" });
+    expect((await api.getLiveAgent()).agentVersionId).toBe("agv_pizza_01_v2");
+    // The seeded paused agent is listed as paused too.
+    expect((await api.listAgents(PIZZA, { state: "paused" })).items.map((a) => a.id)).toContain("agt_pizza_paused_88");
   });
 
   it("refuses to pause a draft and to run a simulated call on an unpublished agent", async () => {
-    expect(await code(api.pauseAgent(BARBER, "agt_barber_faq_01"))).toBe("INVALID_STATE");
-    expect(await code(api.simCall(BARBER, "agt_barber_faq_01", { message: "Hi" }))).toBe("INVALID_STATE");
+    expect(await code(api.pauseAgent(PIZZA, DRAFT_AGENT))).toBe("INVALID_STATE");
+    expect(await code(api.simCall(PIZZA, DRAFT_AGENT, { message: "Hi" }))).toBe("INVALID_STATE");
   });
 
   it("rolls back to an earlier version without editing it", async () => {
@@ -206,7 +274,7 @@ describe("live agent", () => {
   it("switches to a live agent and can be left unanswered", async () => {
     const live = await api.setLiveAgent({ agentId: "agt_barber_01" });
     expect(live.businessId).toBe(BARBER);
-    expect(await code(api.setLiveAgent({ agentId: "agt_barber_faq_01" }))).toBe("INVALID_STATE");
+    expect(await code(api.setLiveAgent({ agentId: DRAFT_AGENT }))).toBe("INVALID_STATE");
     mockControls.simulateNoLiveAgent();
     const empty = await api.getLiveAgent();
     expect(empty.agentId).toBeUndefined();

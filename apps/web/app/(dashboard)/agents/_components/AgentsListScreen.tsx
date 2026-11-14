@@ -13,6 +13,7 @@ import {VStack} from '@astryxdesign/core/VStack';
 import {EmptyState} from '@/components/EmptyState';
 import {LoadingState} from '@/components/LoadingState';
 import {PageHeader} from '@/components/PageHeader';
+import {RefreshFailedNotice} from '@/components/RefreshFailedNotice';
 import {StatusBadge} from '@/components/StatusBadge';
 import {useActivityFeed, useAgents, useLiveAgent, type Agent, type LiveAgent} from '@/lib/api';
 import {formatRelative} from '@/lib/format';
@@ -65,8 +66,9 @@ export function AgentsListScreen() {
   let body;
   if (agents.isPending) {
     body = <LoadingState label="Loading agents" />;
-  } else if (agents.error) {
-    body = <ErrorNotice error={agents.error} context="load" onRetry={() => void agents.refetch()} />;
+  } else if (!agents.data) {
+    // The first load failed. A failed refetch keeps the list and the line under the header says so.
+    body = <ErrorNotice error={agents.error} context="load" title="Could not load your agents" onRetry={() => void agents.refetch()} />;
   } else if (agents.data.items.length === 0) {
     body = (
       <EmptyState
@@ -81,7 +83,7 @@ export function AgentsListScreen() {
     body = (
       <VStack gap={3}>
         {owner ? <Text type="body">{numberOwnerSentence(owner)}</Text> : null}
-        {liveAgent.error ? <ErrorNotice error={liveAgent.error} context="load" onRetry={() => void liveAgent.refetch()} /> : null}
+        {liveAgent.error && !liveAgent.data ? <ErrorNotice error={liveAgent.error} context="load" title="Could not check which agent answers the phone" onRetry={() => void liveAgent.refetch()} /> : null}
         <Card padding={2}>
           <List hasDividers edge="outset" header={<Text type="label">{`${sorted.length} ${sorted.length === 1 ? 'agent' : 'agents'}`}</Text>}>
             {sorted.map((agent) => (
@@ -96,6 +98,7 @@ export function AgentsListScreen() {
   return (
     <VStack gap={6}>
       <PageHeader title="My Agents" description={business.name} actions={buildAction} />
+      <RefreshFailedNotice businessId={businessId} />
       {body}
     </VStack>
   );

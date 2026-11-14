@@ -2,13 +2,23 @@
  * Drift guard: one request to every endpoint in ENDPOINTS through the mock
  * test server, each answer parsed with that endpoint's response schema from
  * @abos/contracts. A new endpoint in the contract fails the typecheck here
- * until it gets a case. The second block reads every fixture row through the
- * list endpoints, so every seeded record is checked too.
+ * until it gets a case. The second block reads every seeded row through the
+ * list endpoints, so every seeded record is checked too. The third proves the
+ * seed is the shared world from @abos/contracts/fixtures.
  */
 import { describe, expect, it } from "vitest";
-import { buildPath, ENDPOINTS, type EndpointName } from "@abos/contracts";
-import { pizzaSpec } from "./fixtures";
-import { getState, mockControls, whenIdle } from "./server";
+import { ActivityEventSchema, buildPath, ENDPOINTS, payloadHash, type EndpointName } from "@abos/contracts";
+import {
+  approvalOrderPending,
+  bookingVerified,
+  calls as sharedCalls,
+  materializeFixtures,
+  orderPaid,
+  orderPaymentPending,
+  pizzaSpecV2,
+  pizzaVersionV1,
+} from "@abos/contracts/fixtures";
+import { getState, mockControls, resetDb, whenIdle } from "./server";
 import { TEST_BASE_URL, useMockServer } from "./test-setup";
 
 useMockServer();
@@ -76,7 +86,7 @@ const CASES: Record<EndpointName, () => Req | Promise<Req>> = {
   getBuilderSession: async () => ({ params: { id: await newBuilderSession() }, query: biz() }),
   sendBuilderMessage: async () => ({ params: { id: await newBuilderSession() }, query: biz(), body: { text: "Take pizza orders", inputMode: "text" } }),
   listAgents: () => ({ query: biz() }),
-  createAgent: () => ({ query: biz(), body: { spec: pizzaSpec({ status: "draft", version: 1 }) } }),
+  createAgent: () => ({ query: biz(), body: { spec: { ...pizzaSpecV2, status: "draft", version: 1 } } }),
   getAgent: () => ({ params: { id: "agt_pizza_01" }, query: biz() }),
   previewAgent: () => ({ params: { id: "agt_pizza_01" }, query: biz(), body: {} }),
   testAgent: () => ({ params: { id: "agt_pizza_01" }, query: biz(), body: { message: "How much is it?" } }),
@@ -87,15 +97,15 @@ const CASES: Record<EndpointName, () => Req | Promise<Req>> = {
   rollbackAgent: async () => {
     // The required conflict blocks a rollback; keep the Square price first.
     await expectContract("resolveConflict", { params: { id: "cfl_pizza_01" }, query: biz(), body: { resolution: "keep_authoritative" } });
-    return { params: { id: "agt_pizza_01" }, query: biz(), body: { toVersionId: "agv_pizza_01_v1", confirm: true } };
+    return { params: { id: "agt_pizza_01" }, query: biz(), body: { toVersionId: pizzaVersionV1.id, confirm: true } };
   },
   createRealtimeClientSecret: async () => ({ query: biz(), body: { builderSessionId: await newBuilderSession() } }),
   getLiveAgent: () => ({}),
   putLiveAgent: () => ({ body: { agentId: "agt_barber_01" } }),
   listApprovals: () => ({ query: biz() }),
-  getApproval: () => ({ params: { id: "apv_pizza_pending" }, query: biz() }),
+  getApproval: () => ({ params: { id: approvalOrderPending.id }, query: biz() }),
   decideApproval: () => {
-    const apv = getState().approvals.find((a) => a.id === "apv_pizza_pending")!;
+    const apv = getState().approvals.find((a) => a.id === approvalOrderPending.id)!;
     return {
       params: { id: apv.id },
       query: biz(),
@@ -104,19 +114,18 @@ const CASES: Record<EndpointName, () => Req | Promise<Req>> = {
     };
   },
   listOrders: () => ({ query: biz() }),
-  getOrder: () => ({ params: { id: "ord_pizza_paid" }, query: biz() }),
-  getOrderCheckout: () => ({ params: { id: "ord_pizza_link" }, query: biz() }),
-  cancelOrder: () => ({ params: { id: "ord_pizza_link" }, query: biz(), body: {} }),
+  getOrder: () => ({ params: { id: orderPaid.id }, query: biz() }),
+  getOrderCheckout: () => ({ params: { id: orderPaymentPending.id }, query: biz() }),
+  cancelOrder: () => ({ params: { id: orderPaymentPending.id }, query: biz(), body: {} }),
   resolveExecution: () => {
-    // No seeded step needs review, so mark one the way the executor would.
-    const exe = getState().executions.find((e) => e.approvalId === "apv_pizza_link" && e.actionType === "message.checkout.send")!;
-    exe.status = "NEEDS_REVIEW";
-    return { params: { id: exe.id }, query: biz(), body: { action: "retry" } };
+    // The shared world has a calendar step in NEEDS_REVIEW (exe_demo_b88t_0).
+    const exe = getState().executions.find((e) => e.businessId === BARBER && e.status === "NEEDS_REVIEW")!;
+    return { params: { id: exe.id }, query: biz(BARBER), body: { action: "retry" } };
   },
   listBookings: () => ({ query: biz(BARBER) }),
-  getBooking: () => ({ params: { id: "bkg_barber_booked" }, query: biz(BARBER) }),
+  getBooking: () => ({ params: { id: bookingVerified.id }, query: biz(BARBER) }),
   listCalls: () => ({ query: biz() }),
-  getCall: () => ({ params: { id: "call_pizza_ready" }, query: biz() }),
+  getCall: () => ({ params: { id: sharedCalls[0].id }, query: biz() }),
   listActivity: () => ({ query: biz() }),
   getIntegrationsHealth: () => ({ query: biz() }),
   getTelemetry: () => ({ query: biz() }),
@@ -175,5 +184,68 @@ describe("every seeded row parses under the contract", () => {
       await expectContract("listApprovals", { query: { ...q, state: "APPROVED" } });
     }
     await expectContract("getOrderCheckout", { params: { id: pizza.orderId }, query: biz() });
+  });
+});
+
+describe("the seed is the shared world", () => {
+  it("holds the rows materializeFixtures(now) returns, with the approval hashes it computed", async () => {
+    const now = Date.now();
+    await resetDb(now);
+    const w = await materializeFixtures(new Date(now));
+    const s = getState();
+
+    // Approvals: the same rows, ids and recomputed hashes, and each hash is the contract recipe.
+    expect(s.approvals).toEqual(w.approvals);
+    expect(s.approvals.map((a) => [a.id, a.payloadHash])).toEqual(w.approvals.map((a) => [a.id, a.payloadHash]));
+    for (const apv of s.approvals) expect(apv.payloadHash).toBe(await payloadHash(apv.payload, apv.bundleType));
+
+    expect(s.businesses).toEqual(w.businesses);
+    expect(s.facts).toEqual(w.allFacts);
+    expect(s.conflicts).toEqual(w.factConflicts);
+    expect(s.files).toEqual(w.files);
+    expect(s.catalog).toEqual(w.pizzaCatalog);
+    expect(s.versions).toEqual(w.agentVersions);
+    expect(s.agents).toEqual(w.agents.map(({ isLiveAgent: _l, activeVersion: _a, ...rest }) => rest));
+    expect(s.orders).toEqual(w.orders);
+    expect(s.executions).toEqual(w.executions);
+    expect(s.dispatches).toEqual(w.messageDispatches);
+    expect(s.syncJobs).toEqual(w.syncJobs);
+    expect(s.liveAgent).toEqual(w.liveAgent);
+    expect(s.health).toEqual(w.integrationHealth);
+
+    // The one documented change: a booking that reuses another booking's call gets its own copy of that call.
+    expect(s.calls.slice(0, w.calls.length)).toEqual(w.calls);
+    for (const [i, booking] of s.bookings.entries()) {
+      const shared = w.bookings[i];
+      expect({ ...booking, callId: shared.callId }).toEqual(shared);
+      if (booking.callId !== shared.callId) {
+        const copy = s.calls.find((c) => c.id === booking.callId)!;
+        const source = w.calls.find((c) => c.id === shared.callId)!;
+        expect(copy).toMatchObject({ businessId: source.businessId, agentId: source.agentId, agentVersionId: source.agentVersionId, channel: source.channel });
+      }
+    }
+    const callIds = s.calls.map((c) => c.id);
+    expect(new Set(callIds).size).toBe(callIds.length);
+    expect(new Set(s.bookings.map((b) => b.callId)).size).toBe(s.bookings.length);
+
+    // Every shared event is stored (except the resolve response event), and every derived one parses.
+    const stored = new Set(s.activity.map((e) => e.id));
+    for (const e of w.allActivityEvents) expect(stored.has(e.id)).toBe(e.id !== w.factConflictResolvedEvent.id);
+    for (const e of s.activity) expect(ActivityEventSchema.safeParse(e).success, e.id).toBe(true);
+  });
+
+  it("derives the activity that shows each seeded recovery state", async () => {
+    const s = getState();
+    const failed = s.activity.filter((e) => e.type === "execution.failed").map((e) => [e.payload.executionId, e.payload.nextStatus]);
+    for (const exe of s.executions.filter((x) => x.status === "NEEDS_REVIEW")) expect(failed).toContainEqual([exe.id, "NEEDS_REVIEW"]);
+    const unknown = s.dispatches.filter((d) => d.status === "UNKNOWN").map((d) => d.id);
+    expect(unknown.length).toBeGreaterThan(0);
+    for (const id of unknown) {
+      expect(s.activity.some((e) => e.type === "message.failed" && e.payload.dispatchId === id && e.payload.status === "UNKNOWN")).toBe(true);
+    }
+    const retrying = s.syncJobs.find((j) => j.state === "RETRYING")!;
+    const syncFails = s.activity.filter((e) => e.type === "sync.failed" && e.payload.target === "google_sheets" && e.payload.syncJobId === retrying.id);
+    expect(syncFails.map((e) => e.type === "sync.failed" && e.payload.attempts)).toEqual([1, retrying.attempts]);
+    expect(syncFails.every((e) => e.type === "sync.failed" && !e.payload.final)).toBe(true);
   });
 });

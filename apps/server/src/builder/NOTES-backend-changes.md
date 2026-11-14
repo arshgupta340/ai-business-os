@@ -76,3 +76,19 @@ No store was constructed internally without an option. The publish lock and the 
 - A turn reports only the first approval when several drafts are proposed in one turn.
 - Opening hours that cross midnight, and lengths like "an hour and a half", are refused rather than guessed.
 - The SPEC 2.9 rows for the paused-rollback and publish rulings are not in this checkout's SPEC.
+
+## Changes after Saina's review
+
+- `session/requirements.ts`: one `stopConditions(spec, context)` for the turn and publish, on verified facts only. Every required fact left missing (hours, pickup window, special requests, notice, services) is now `{ code: 'missing_required_fact', path: <field> }`; name and goal stay with spec validation. `publishStopConditions` is the same list without `open_conflict`.
+- `publish/service.ts`: each `missing_required_fact` issue has the field as `path` and a sentence from `missingFactMessage`. The other three codes keep `path` equal to the code.
+- `session/service.ts`: a turn opens at most one approval; the other drafts are proposed on later turns.
+- `session/service.ts`: the turn's `stopConditions` is the shared list (what publish would refuse on, plus `open_conflict`). `missingFields` and `progress` still count chat drafts.
+- `publish/service.ts`: rollback of a paused agent no longer touches the live agent pointer or writes `live_agent.changed`. The next publish moves the pointer.
+- `session/service.ts`: a failed proposal logs its error code only. `INVALID_STATE` and `NOT_FOUND` are recorded as refused: the reply says the change could not be sent for confirmation, and it is retried only if the owner repeats or corrects it. Other errors keep the retry.
+- `session/service.ts`: if the write that records approval IDs fails, the turn still returns `proposedChange`, and the records are kept in the process and written with the next turn. A restart before that still allows a duplicate.
+- `session/fact-values.ts`: a length with a second bare number ("15 to 20 minutes", "between 1 and 2 hours") is refused with the minutes hint.
+- `publish/integrations.ts`: comment fixed. A required provider left out of the health result is taken as down.
+- `route-auth.test.ts` now calls every registered route with no token and expects 401 `UNAUTHENTICATED`. `GET /api/builder/ping` is the one listed exception. It should be removed, but two server tests outside this folder (`apps/server/test/app.test.ts` and `apps/server/test/adversarial/access.test.ts`) call it, so the route and those tests have to go in one pull request.
+- `session/service.ts`: `VALIDATION_FAILED` and `CAPABILITY_NOT_ALLOWED` from the engine are treated as refused, like `INVALID_STATE` and `NOT_FOUND`, so the chat does not promise a retry that cannot work.
+- `publish/service.ts`: rollback also checks open required conflicts from the business knowledge (the database), like publish.
+- `index.ts`: the session service gets `app.log` for those error codes.

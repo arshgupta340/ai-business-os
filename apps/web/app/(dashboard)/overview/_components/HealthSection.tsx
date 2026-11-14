@@ -26,7 +26,8 @@ const CHANNEL_LABEL: Record<NonNullable<IntegrationHealthEntry['channel']>, stri
 
 function describeEntry(provider: IntegrationProvider, entry: IntegrationHealthEntry, timeZone: string): string {
   const parts: string[] = [];
-  if (entry.detail) parts.push(entry.detail);
+  // A server note may end with its own period; the parts are joined with one.
+  if (entry.detail) parts.push(entry.detail.replace(/\.+$/, ''));
   if (provider === 'message_channel' && entry.channel) parts.push(CHANNEL_LABEL[entry.channel] ?? entry.channel);
   parts.push(`Checked ${formatRelative(entry.lastCheckedAt, timeZone)}`);
   return parts.join('. ');
@@ -38,7 +39,8 @@ export function HealthSection({businessId, timeZone}: {businessId: string; timeZ
   let body;
   if (health.isPending) {
     body = <LoadingState label="Checking integrations" />;
-  } else if (health.error) {
+  } else if (!health.data) {
+    // No data at all: the first load failed. A failed refetch keeps the old data and the page header says so.
     body = (
       <BlockError title="Could not load integration health" error={health.error} onRetry={() => void health.refetch()} />
     );

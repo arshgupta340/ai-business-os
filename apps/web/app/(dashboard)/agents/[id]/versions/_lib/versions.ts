@@ -24,6 +24,7 @@ import {
   WRITE_POLICY_LABELS,
   type CapabilityGroupKey,
 } from '../../../../build/_lib/spec';
+import {unavailableSentence} from '../../preview/_lib/preview';
 
 export const NOT_SET = 'Not set';
 
@@ -317,12 +318,24 @@ export function rollbackErrorView(error: ApiError): RollbackErrorView {
       };
     case 'INVALID_STATE': {
       const state = typeof error.details?.state === 'string' ? error.details.state : undefined;
+      // A paused agent asked to take the number (makeLive). "Already the active
+      // version" also carries state "paused" for a paused agent, but with activeVersionId.
+      if (state === 'paused' && error.details?.activeVersionId === undefined) {
+        return {
+          title: 'This agent is paused',
+          message: 'A paused agent cannot take the number. Publish it first. Nothing changed.',
+          next: 'none',
+          correlationId,
+        };
+      }
       return {
         title: state === 'draft' ? 'This agent was never published' : 'This version cannot be rolled back to',
         message:
           state === 'draft'
             ? 'A draft agent has no published version to go back to. Nothing changed.'
-            : 'It may already be the active version. Nothing changed. Reload the history to see the current state.',
+            : error.details?.activeVersionId !== undefined
+              ? 'That version is already the active one. Nothing changed. Reload the history to see the current state.'
+              : 'It may already be the active version. Nothing changed. Reload the history to see the current state.',
         next: 'reload',
         correlationId,
       };
@@ -345,9 +358,8 @@ export function rollbackErrorView(error: ApiError): RollbackErrorView {
         correlationId,
       };
     case 'INTEGRATION_UNAVAILABLE': {
-      const provider = typeof error.details?.provider === 'string' ? error.details.provider : undefined;
       return {
-        title: provider ? `${provider} is not responding` : 'A connected service is not responding',
+        title: unavailableSentence(error, 'A connected service').replace(/\.$/, ''),
         message: 'Nothing changed. Try again in a moment.',
         next: 'retry',
         correlationId,
@@ -356,7 +368,7 @@ export function rollbackErrorView(error: ApiError): RollbackErrorView {
     case 'VALIDATION_FAILED':
       return {
         title: 'The rollback request was not accepted',
-        message: 'Nothing changed. Close this and try again.',
+        message: `${error.message ? `${error.message} ` : ''}Nothing changed.`,
         next: 'none',
         correlationId,
       };

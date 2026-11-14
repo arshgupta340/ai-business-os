@@ -130,15 +130,17 @@ export const builderPlugin: FastifyPluginAsync<BuilderPluginOptions> = async (ap
   // get a guarded store, so a draft write cannot undo a publish or a pause.
   const publish = createPublishStores(options.publish, source);
   const draftAgents = publish.guardDraftWrites(agents);
-  const builder = new BuilderSessionService({ sessions, agents: draftAgents, draftFacts, knowledge, model: builderModel, now,
+  const builder = new BuilderSessionService({ sessions, agents: draftAgents, draftFacts, knowledge, model: builderModel, now, log: app.log,
     ...(options.proposeFactFromChat ? { proposeFactFromChat: options.proposeFactFromChat } : {}) });
   const agentService = new AgentService({ agents: draftAgents, sessions, liveAgent: options.liveAgent ?? publish.liveAgentReader, activeVersions: publish.versions, now });
   const runs = new AgentRunService({ agents, knowledge, runner: new MockTextRunner(toolset, agentModel, now), toolset });
 
   registerVoiceRoutes(app, { auth, sessions, env: source, now, minter: options.realtimeMinter });
 
+  // The one route with no owner check. It returns nothing about any business.
+  // It stays until the server tests that call it (apps/server/test) are changed
+  // in the same pull request that removes it.
   app.get('/api/builder/ping', async () => ({ ok: true, lane: 'builder' }));
-
 
   // ---- 3.3 Builder sessions
   app.post('/api/builder/sessions', async (request, reply) => {

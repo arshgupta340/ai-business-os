@@ -6,7 +6,7 @@ import { getResponse } from "msw";
 import { setupWorker } from "msw/browser";
 import { registerMockControls } from "@/lib/api/mock-bridge";
 import { handlers } from "./handlers";
-import { sweepExpired } from "./db";
+import { ready, sweepExpired } from "./db";
 import { mockControls } from "./timeline";
 
 let started: Promise<void> | null = null;
@@ -77,8 +77,13 @@ export function startMockWorker(): Promise<void> {
         console.warn("[mock] Service worker did not register. Using the in-page mock instead.", err);
         installInPageMock();
       })
+      // Seeding is async (materializeFixtures hashes with Web Crypto). The app renders
+      // only after this promise, so the first screen already reads the seeded world.
+      .then(() => ready())
       .then(() => {
         registerMockControls(mockControls);
+        // For Playwright scripts and the browser console: the same controls, in mock mode only.
+        (window as unknown as { __abosMock?: typeof mockControls }).__abosMock = mockControls;
         // The real server expires approvals with a job; the mock checks every 5 seconds.
         setInterval(() => sweepExpired(), 5000);
       });

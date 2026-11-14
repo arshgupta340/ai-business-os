@@ -6,6 +6,7 @@ import {useState, type ReactNode} from 'react';
 import {afterAll, afterEach, beforeAll, describe, expect, it, vi} from 'vitest';
 import {createApiQueryClient} from '@/lib/api/provider';
 import {BusinessProvider} from '@/lib/session';
+import {approvalFactEditPending} from '@abos/contracts/fixtures';
 import * as db from '@/mocks/db';
 import {server} from '@/mocks/server';
 import {requests, useMockServer} from '@/mocks/test-setup';
@@ -71,7 +72,17 @@ function setTime(label: string, value: string) {
   fireEvent.blur(input);
 }
 
+/**
+ * The shared world already has a pending Friday edit (apv_demo_f01, close at 23:00). The editor tests
+ * start from a Friday with no pending change, so they reject that one first, as the owner could.
+ */
+async function rejectSeededFridayEdit() {
+  const apv = db.getState().approvals.find((a) => a.id === approvalFactEditPending.id)!;
+  await db.decideApproval(PIZZA, apv.id, {decision: 'reject', payloadHash: apv.payloadHash}, null);
+}
+
 async function openFridayEditor() {
+  await rejectSeededFridayEdit();
   renderSettings();
   fireEvent.click(await screen.findByRole('button', {name: 'Edit Friday'}));
   await screen.findByLabelText('Friday closes');
@@ -90,9 +101,10 @@ describe('opening hours', () => {
 
   it('shows a change the server still has pending, with a way back to the confirmation', async () => {
     renderSettings();
-    expect(await screen.findByText('Change waiting for your confirmation: 12:00 PM to 10:00 PM')).toBeTruthy();
-    // Sunday still shows its verified hours.
-    expect(screen.getByText('12:00 PM to 9:00 PM')).toBeTruthy();
+    // The shared pending edit: Friday closes at 11 pm instead of 10 pm.
+    expect(await screen.findByText('Change waiting for your confirmation: 11:00 AM to 11:00 PM')).toBeTruthy();
+    // Friday still shows its verified hours (Saturday has the same hours).
+    expect(screen.getAllByText('11:00 AM to 10:00 PM')).toHaveLength(2);
     fireEvent.click(button('Review and confirm'));
     expect(await screen.findByText('Confirm your change')).toBeTruthy();
   });
@@ -116,8 +128,9 @@ describe('opening hours', () => {
     expect(body).toEqual({kind: 'hours', key: 'fri', value: {open: '11:00', close: '23:00'}});
     const created = db.getState().approvals.find((a) => a.bundleType === 'fact_edit' && a.state === 'PENDING' && (a.payload as {key: string}).key === 'fri');
     expect(created?.actorType).toBe('owner');
+    expect(created?.id).not.toBe(approvalFactEditPending.id);
 
-    // Nothing changed yet: Thursday and Friday both still close at 10 pm.
+    // Nothing changed yet: Friday and Saturday both still close at 10 pm.
     expect(screen.getAllByText('11:00 AM to 10:00 PM')).toHaveLength(2);
     expect(screen.queryByText('11:00 AM to 11:00 PM')).toBeNull();
     expect(screen.getByText('Change waiting for your confirmation: 11:00 AM to 11:00 PM')).toBeTruthy();
@@ -127,7 +140,7 @@ describe('opening hours', () => {
     expect(screen.getAllByText('11:00 AM to 10:00 PM')).toHaveLength(1);
     expect(screen.getByText('Your change to 11:00 AM to 11:00 PM is saved.')).toBeTruthy();
     // The verified fact is the new version, written by the owner from the dashboard.
-    expect(screen.getByText('You, in the dashboard, version 3')).toBeTruthy();
+    expect(screen.getByText('You, in the dashboard, version 2')).toBeTruthy();
     // The change log picks it up without a reload.
     expect(await screen.findByText('From 11:00 AM to 10:00 PM, to 11:00 AM to 11:00 PM')).toBeTruthy();
   });

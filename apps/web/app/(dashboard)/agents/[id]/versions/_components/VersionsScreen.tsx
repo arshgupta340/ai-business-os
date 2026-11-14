@@ -32,7 +32,7 @@ import {
   type PublishResponse,
   type ActivityEventType,
 } from '@/lib/api';
-import {formatDateTime} from '@/lib/format';
+import {formatDateTime, actorName} from '@/lib/format';
 import {useBusiness} from '@/lib/session';
 import {statusView} from '@/lib/status';
 import {canRollBack, defaultPair, rollbackMarks, versionLabel, type RollbackMark} from '../_lib/versions';
@@ -215,7 +215,7 @@ function LoadedVersions({businessId, agent, versions, marks, timeZone, back, rel
                   }
                   description={
                     <VStack gap={0.5}>
-                      <Text type="supporting">{`Published ${formatDateTime(v.publishedAt, timeZone)} by ${v.createdBy}`}</Text>
+                      <Text type="supporting">{`Published ${formatDateTime(v.publishedAt, timeZone)} by ${actorName(v.createdBy)}`}</Text>
                       {mark ? (
                         <Text type="supporting">{`Made active again ${formatDateTime(mark.occurredAt, timeZone)}`}</Text>
                       ) : null}

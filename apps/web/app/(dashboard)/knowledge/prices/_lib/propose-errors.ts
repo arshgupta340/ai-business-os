@@ -14,6 +14,14 @@ export type ProposeErrorView = {
   correlationId?: string;
 };
 
+/**
+ * True for the server's not-found handler (an unregistered route), which also
+ * answers NOT_FOUND, with a message that starts "No route for".
+ */
+export function isMissingRoute(error: unknown): boolean {
+  return isApiError(error) && error.code === 'NOT_FOUND' && error.message.startsWith('No route for');
+}
+
 export function proposeErrorView(error: unknown): ProposeErrorView {
   if (!isApiError(error)) {
     return {title: 'The change was not proposed', message: error instanceof Error ? error.message : 'Something went wrong.', retryable: true};
@@ -21,6 +29,14 @@ export function proposeErrorView(error: unknown): ProposeErrorView {
   const base = {retryable: error.retryable, correlationId: error.correlationId};
   switch (error.code) {
     case 'NOT_FOUND':
+      if (isMissingRoute(error)) {
+        return {
+          ...base,
+          retryable: false,
+          title: 'The price editor is not available on this server',
+          message: 'This server cannot take price changes yet. Nothing was proposed and the price in Square is unchanged.',
+        };
+      }
       return {
         ...base,
         title: 'This variation is not in the catalog',
