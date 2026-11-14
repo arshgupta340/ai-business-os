@@ -46,3 +46,33 @@ describe('builder routes through the composed app', () => {
     } finally { await app.close(); }
   });
 });
+
+describe('the live agent routes without TWILIO_PHONE_NUMBER', () => {
+  let w: World;
+  beforeAll(async () => { w = await createWorld({}, { TWILIO_PHONE_NUMBER: '' }); }, 120_000);
+  afterAll(async () => { await w?.close(); });
+
+  it('GET and PUT answer the contract error INTEGRATION_UNAVAILABLE with a plain message', async () => {
+    const get = await w.app.inject({ url: '/api/live-agent', headers: OWNER });
+    expect(get.json()).toMatchObject({ code: 'INTEGRATION_UNAVAILABLE', message: 'Phone number is not configured.' });
+    const put = await w.app.inject({ method: 'PUT', url: '/api/live-agent', headers: OWNER, payload: { agentId: 'agt_pizza_01' } });
+    expect(put.json()).toMatchObject({ code: 'INTEGRATION_UNAVAILABLE', message: 'Phone number is not configured.' });
+  });
+});
+
+describe('issue #96 item 3: a database conflict on the in-memory extraction route', () => {
+  let w: World;
+  beforeAll(async () => { w = await createWorld(); }, 120_000);
+  afterAll(async () => { await w?.close(); });
+
+  it('answers a contract error that names the working path, not a 404', async () => {
+    const row = (await w.t.db.query("select id, business_id from fact_conflicts where state = 'open' limit 1", [])).rows[0] as { id: string; business_id: string } | undefined;
+    if (!row) {
+      await w.t.admin((q) => q.query(`insert into public.fact_conflicts (id, business_id, kind, key, candidates, required, state) values ('cfl_e2e_96', $1, 'policy', 'parking', '[{"value":"a"},{"value":"b"}]'::jsonb, true, 'open')`, [PIZZA]));
+    }
+    const id = row?.id ?? 'cfl_e2e_96';
+    const biz = row?.business_id ?? PIZZA;
+    const res = await w.app.inject({ method: 'POST', url: `/api/conflicts/${id}/resolve?businessId=${biz}`, headers: OWNER, payload: { value: 'x' } });
+    expect(res.json()).toMatchObject({ code: 'INTEGRATION_UNAVAILABLE', details: { use: 'POST /api/businesses/:id/facts/propose with resolvesConflictId' } });
+  });
+});

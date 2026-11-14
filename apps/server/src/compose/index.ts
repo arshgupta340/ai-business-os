@@ -323,6 +323,9 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       sweep.unref();
       executor.start();
       webhooks?.start();
+      // Review finding 4: one bounded, read-only health refresh in the background at startup, so the
+      // health screens show checked results on a fresh deploy. It never blocks listen; publish refreshes too.
+      void health.read({ refresh: true }).catch(() => log.warn({ job: 'health' }, 'startup integration check failed'));
     },
     async stopJobs() {
       if (sweep) clearInterval(sweep);

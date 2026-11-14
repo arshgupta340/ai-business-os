@@ -109,6 +109,25 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
   }));
   // The builder authenticates its own routes through BuilderAuth (composed.builder.auth). Every builder
   // route declares config { auth: 'builder' } itself, which the default-deny guard reads.
+  // Issue #96 item 3: uploads and their conflicts are still held in memory by the builder (no database
+  // stores for files, upload facts and conflicts yet), while the facts list reads fact_conflicts. A
+  // database conflict sent to the in-memory resolve route would be a silent 404, so it gets a contract
+  // error naming the route that resolves it on the database instead.
+  if (composed.databaseProbe) {
+    app.addHook('preHandler', async (request) => {
+      const match = /^\/api\/conflicts\/([^/?]+)\/resolve$/.exec(request.url.split('?')[0] ?? '');
+      if (!match || request.method !== 'POST') return;
+      // Only for an authenticated owner of that conflict's business; anything else goes on to the
+      // builder's own auth and handler, so a conflict's existence is never shown to anyone else.
+      const auth = composed.builder.auth;
+      const owner = auth ? await auth.authenticate(request).catch(() => null) : null;
+      if (!auth || !owner) return;
+      const found = (await composed.db.query('select business_id from public.fact_conflicts where id = $1', [decodeURIComponent(match[1]!)])).rows[0] as { business_id: string } | undefined;
+      if (!found || !(await auth.ownsBusiness(owner, found.business_id))) return;
+      throw new AppError('INTEGRATION_UNAVAILABLE', 'This conflict is resolved from the facts list on this server.', undefined, false,
+        { use: 'POST /api/businesses/:id/facts/propose with resolvesConflictId' });
+    });
+  }
   await app.register(builderPlugin, composed.builder);
 
   // Phone calls (B-15). Off, with a log line naming the missing settings, when a key is absent.
