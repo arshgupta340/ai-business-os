@@ -348,6 +348,8 @@ create table public.action_executions (
   -- A double click on Approve cannot queue the same bundle twice.
   unique (approval_id, action_type),
   unique (approval_id, step_index),
+  -- Target of the message_dispatches composite key below.
+  unique (id, approval_id, business_id),
   check (status <> 'SUCCEEDED' or finished_at is not null)
 );
 
@@ -376,6 +378,10 @@ create table public.message_dispatches (
   created_at          timestamptz not null default now(),
   updated_at          timestamptz not null default now(),
   check (num_nonnulls(order_id, booking_id) = 1),
+  -- Never-broken rule 1: a dispatch belongs to the same approval and business as the execution that sends it.
+  constraint message_dispatches_execution_approval_fk
+    foreign key (execution_id, approval_id, business_id)
+    references public.action_executions (id, approval_id, business_id),
   -- Never-broken rule 5: nothing is marked sent without the provider's message ID.
   constraint message_dispatches_sent_needs_provider_id check (status not in ('SENT', 'DELIVERED') or provider_message_id is not null)
 );
