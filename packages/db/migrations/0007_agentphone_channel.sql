@@ -4,19 +4,27 @@
 -- to one webhook (webhook_events.source 'agentphone').
 
 -- 1. A dispatch may be sent on the agentphone channel. qr_only still never has a dispatch row.
-alter table public.message_dispatches drop constraint message_dispatches_channel_check;
-alter table public.message_dispatches add constraint message_dispatches_channel_check
-  check (channel in ('surge', 'android_gateway', 'whatsapp_sandbox', 'agentphone'));
+-- The old check is dropped and the wider one added in ONE statement, so the table is never without a
+-- channel check, however this file is run (the repo's runner also wraps the file in one transaction).
+-- The new check is validated against the existing rows, all of which the old check already accepted.
+alter table public.message_dispatches
+  drop constraint message_dispatches_channel_check,
+  add constraint message_dispatches_channel_check
+    check (channel in ('surge', 'android_gateway', 'whatsapp_sandbox', 'agentphone'));
 
 -- 2. Signature-verified AgentPhone webhook rows are stored and deduplicated like the others
 -- (never-broken rule 2): unique (source, provider_event_id), the provider event ID being X-Webhook-ID.
-alter table public.webhook_events drop constraint webhook_events_source_check;
-alter table public.webhook_events add constraint webhook_events_source_check
-  check (source in ('square', 'twilio_voice', 'twilio_status', 'agentphone'));
+-- One statement, for the same reason as above.
+alter table public.webhook_events
+  drop constraint webhook_events_source_check,
+  add constraint webhook_events_source_check
+    check (source in ('square', 'twilio_voice', 'twilio_status', 'agentphone'));
 
 -- 3. Approval material: an order or booking approval may name agentphone as its message channel.
--- The body is 0004's private.material with that one value added to the routing check. Replacing the
--- function keeps its owner and privileges.
+-- The body is 0004's private.material (0005 and 0006 do not redefine it) with that one value added to the
+-- routing check; no other line differs. Replacing the function keeps its owner and privileges: it stays
+-- SECURITY INVOKER with an empty search_path and no EXECUTE for any role but its owner, as 0004 left it.
+-- Only the SECURITY DEFINER routines call it, and none of them is touched here.
 -- Material projection is constructed here, never supplied as a list of keys by the caller.
 create or replace function private.material(p_type text, p jsonb) returns jsonb language plpgsql immutable set search_path = '' as $$
 declare keys text[]; k text; result jsonb := '{}';
