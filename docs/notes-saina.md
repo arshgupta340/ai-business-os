@@ -87,3 +87,22 @@ The builder was built before the contracts package (S-02), the mock toolset (S-0
 - Test runs pass `agentVersionId: "draft:<agt_id>"` to the tools. It is deliberately not an `agv_` ID.
 - `POST /api/builder/sessions` and `POST /api/agents` return 201.
 - Mock toolset: tax is 8.75% (it reproduces the CONTRACTS example of 4350, 381, 4731), 12:00 to 13:00 is busy every day, and an unknown quote ID is treated as `QUOTE_EXPIRED` with a fresh quote. The opening hours in `fixtures.ts` are placeholders.
+
+## B-24 owner voice session (2026-11-13)
+
+`POST /api/realtime/client-secret` mints a short-lived OpenAI Realtime client secret for a signed-in owner. The session it mints has no tools, `tool_choice: "none"`, and does not answer on its own (`create_response: false`), following API.md 3.5 and FLOWS A3. The browser sends each finished transcript to the builder messages endpoint with `inputMode: "voice"`, so speech goes through the same registry check and spec validation as typed chat.
+
+### Choices made where the docs were silent
+
+- With no `OPENAI_API_KEY`, the endpoint answers `INTEGRATION_UNAVAILABLE`. It does not return a fake secret, because `RealtimeClientSecret` has no field to mark one as fake. The browser falls back to typed chat.
+- `OPENAI_REALTIME_MODEL` must be exactly `gpt-realtime-2.1` (the contract literal). If a key is set and the model is missing or different, voice answers `INTEGRATION_UNAVAILABLE` and the server keeps running.
+- The secret expires after 60 seconds. The transcription model is `whisper-1`. SPEC names neither.
+- Rate limit: 5 mints per 60 seconds per owner, across both businesses. The error is `RATE_LIMITED` with a `Retry-After` header.
+- A minted session that OpenAI reports back with any tools is discarded.
+
+### Not verified
+
+- The real OpenAI path has never run. The request body and the response shape come from the official reference, read on 2026-11-13, and are tested against a fake only.
+- Whether the secret must stay valid after the WebRTC connection is set up. The 60 second expiry assumes it does not.
+- Whether a browser holding the secret can send `session.update` and add tools. If it can, the server-bound session limits a well-behaved client only. Check this once a key exists.
+- The data channel event names the browser will use (U-12) are from the docs and are untested.

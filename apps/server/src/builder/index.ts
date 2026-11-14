@@ -24,6 +24,7 @@ import {
   type DraftFactStore,
 } from './session/stores';
 import { parseOrThrow } from './util';
+import { registerVoiceRoutes, type RealtimeMinter } from './voice/index';
 
 // The builder on the server. Owner: Saina (decision D-07 in docs/SPEC.md).
 //
@@ -50,6 +51,7 @@ export interface BuilderPluginOptions {
   knowledge?: BusinessKnowledge;
   liveAgent?: LiveAgentReader;
   now?: () => Date;
+  realtimeMinter?: RealtimeMinter;
 }
 
 const SessionIdParams = z.object({ id: z.string().regex(/^bld_[A-Za-z0-9_]{1,64}$/) });
@@ -106,6 +108,8 @@ export const builderPlugin: FastifyPluginAsync<BuilderPluginOptions> = async (ap
   const builder = new BuilderSessionService({ sessions, agents, draftFacts, knowledge, model: builderModel, now });
   const agentService = new AgentService({ agents, sessions, liveAgent: options.liveAgent ?? noLiveAgent, now });
   const runs = new AgentRunService({ agents, knowledge, runner: new MockTextRunner(toolset, agentModel, now), toolset });
+
+  registerVoiceRoutes(app, { auth, sessions, env: source, now, minter: options.realtimeMinter });
 
   app.get('/api/builder/ping', async () => ({ ok: true, lane: 'builder' }));
 
