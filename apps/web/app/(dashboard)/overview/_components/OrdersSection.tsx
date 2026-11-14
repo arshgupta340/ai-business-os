@@ -23,7 +23,8 @@ export function OrdersSection({businessId, timeZone}: {businessId: string; timeZ
   let body;
   if (orders.isPending) {
     body = <LoadingState label="Loading orders" />;
-  } else if (orders.error) {
+  } else if (!orders.data) {
+    // No data at all: the first load failed. A failed refetch keeps the old data and the page header says so.
     body = <BlockError title="Could not load orders" error={orders.error} onRetry={() => void orders.refetch()} />;
   } else if (orders.data.items.length === 0) {
     body = (

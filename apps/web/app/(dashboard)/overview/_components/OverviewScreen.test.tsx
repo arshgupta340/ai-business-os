@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import {cleanup, render, screen, waitFor} from '@testing-library/react';
-import {QueryClientProvider} from '@tanstack/react-query';
+import {act, cleanup, fireEvent, render, screen, waitFor} from '@testing-library/react';
+import {QueryClientProvider, type QueryClient} from '@tanstack/react-query';
 import {afterEach, beforeAll, describe, expect, it} from 'vitest';
 import {createApiQueryClient} from '@/lib/api';
 import {BusinessProvider} from '@/lib/session';
@@ -21,8 +21,11 @@ afterEach(() => {
   window.localStorage.clear();
 });
 
+let lastClient: QueryClient | null = null;
+
 function renderOverview() {
   const client = createApiQueryClient();
+  lastClient = client;
   render(
     <QueryClientProvider client={client}>
       <BusinessProvider>
@@ -81,5 +84,28 @@ describe('OverviewScreen', () => {
     expect(await screen.findByText('No activity yet')).toBeTruthy();
     await waitFor(() => expect(countText('overview-pending-approvals-count')).toBe('0'));
     expect(screen.queryByText(/Could not load/)).toBeNull();
+  });
+
+  it('keeps the blocks when a background refetch fails, says so in one line, and Try again refreshes', async () => {
+    renderOverview();
+    await screen.findAllByRole('link', {name: /^Open /});
+    expect(screen.queryByText('Could not refresh. Showing the last data we have.')).toBeNull();
+    mockControls.simulateRequestFailure?.({path: '/api/'});
+    await act(async () => {
+      await lastClient!.refetchQueries({type: 'active'});
+    });
+    expect(await screen.findByText('Could not refresh. Showing the last data we have.', {}, {timeout: 10_000})).toBeTruthy();
+    expect(screen.getAllByText('Could not refresh. Showing the last data we have.')).toHaveLength(1);
+    // The old data stays: the agent cards and the counts are still there, with no block error.
+    const hrefs = screen.getAllByRole('link', {name: /^Open /}).map((c) => c.getAttribute('href'));
+    expect(hrefs).toEqual(expect.arrayContaining(['/agents/agt_pizza_01', '/agents/agt_pizza_faq_01', '/agents/agt_pizza_paused_88']));
+    expect(countText('overview-pending-approvals-count')).not.toBeNull();
+    expect(screen.queryByText('Could not load agents')).toBeNull();
+
+    mockControls.clearRequestFailures?.();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', {name: 'Try again'}));
+    });
+    await waitFor(() => expect(screen.queryByText('Could not refresh. Showing the last data we have.')).toBeNull());
   });
 });

@@ -9,7 +9,7 @@
 import {createContext, useCallback, useContext, useEffect, useRef, useState} from 'react';
 import {ApiError, isApiError, useBuilderSession, useSendBuilderMessage} from '@/lib/api';
 import {readNotes, rememberSession, writeNotes} from '../_lib/memory';
-import {EMPTY_NOTES, mergeTurn, type TurnNotes} from '../_lib/spec';
+import {builderSendErrorView, EMPTY_NOTES, mergeTurn, type TurnNotes} from '../_lib/spec';
 
 export type InputMode = 'text' | 'voice';
 
@@ -32,6 +32,7 @@ export function useBuilderThread(businessId: string | null, sessionId: string | 
   const query = useBuilderSession(businessId, sessionId);
   const sendMutation = useSendBuilderMessage(businessId, sessionId);
   const {mutateAsync} = sendMutation;
+  const {refetch} = query;
   const [pending, setPending] = useState<PendingTurn | null>(null);
   const [notes, setNotes] = useState<TurnNotes>(EMPTY_NOTES);
   const notesRef = useRef<TurnNotes>(EMPTY_NOTES);
@@ -73,15 +74,20 @@ export function useBuilderThread(businessId: string | null, sessionId: string | 
         }
         return true;
       } catch (err) {
+        const error = asApiError(err);
         if (currentSession.current === target) {
-          setPending({status: 'failed', text: trimmed, inputMode, error: asApiError(err)});
+          setPending({status: 'failed', text: trimmed, inputMode, error});
+          // The server changed or closed the session while the turn ran. Show it
+          // as it is now before the owner sends again. The session stays
+          // remembered: it is not forgotten or marked broken here.
+          if (builderSendErrorView(error).refreshSession) void refetch();
         }
         return false;
       } finally {
         sendingRef.current = false;
       }
     },
-    [sessionId, mutateAsync],
+    [sessionId, mutateAsync, refetch],
   );
 
   /** Sends the failed message again, unchanged. */

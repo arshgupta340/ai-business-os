@@ -73,7 +73,8 @@ export function AgentsSection({businessId}: {businessId: string}) {
   let body;
   if (agents.isPending) {
     body = <LoadingState label="Loading agents" />;
-  } else if (agents.error) {
+  } else if (!agents.data) {
+    // No data at all: the first load failed. A failed refetch keeps the old data and the page header says so.
     body = <BlockError title="Could not load agents" error={agents.error} onRetry={() => void agents.refetch()} />;
   } else if (agents.data.items.length === 0) {
     body = (

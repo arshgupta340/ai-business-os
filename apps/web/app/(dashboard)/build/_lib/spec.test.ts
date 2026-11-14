@@ -4,6 +4,7 @@ import {
   builderSendErrorView,
   continueState,
   EMPTY_NOTES,
+  groupStopConditions,
   groupCapabilities,
   humanizeKey,
   mergeTurn,
@@ -84,6 +85,42 @@ describe('continueState', () => {
     expect(state.reasons).toContain('One issue blocks the draft.');
   });
 
+  it('is disabled by an open conflict', () => {
+    const state = continueState({...ready, stopConditions: [{code: 'open_conflict'}]});
+    expect(state.canContinue).toBe(false);
+    expect(state.reasons).toEqual(['One issue blocks the draft.']);
+  });
+
+  it('is not blocked by stop conditions that only block publish', () => {
+    const stopConditions = [
+      {code: 'missing_required_fact'},
+      {code: 'missing_required_fact'},
+      {code: 'missing_required_fact'},
+      {code: 'missing_message_consent_policy'},
+      {code: 'empty_catalog'},
+    ];
+    expect(continueState({...ready, stopConditions})).toEqual({canContinue: true, reasons: []});
+  });
+
+  it('counts only the blocking stop conditions in the reason', () => {
+    const stopConditions = [
+      {code: 'missing_timezone'},
+      {code: 'open_conflict'},
+      {code: 'missing_required_fact'},
+      {code: 'missing_required_fact'},
+      {code: 'empty_catalog'},
+    ];
+    const state = continueState({...ready, stopConditions});
+    expect(state.canContinue).toBe(false);
+    expect(state.reasons).toEqual(['2 issues block the draft.']);
+  });
+
+  it('still blocks on a missing field when only publish stop conditions are present', () => {
+    const state = continueState({...ready, missingFields: ['hours.mon'], stopConditions: [{code: 'missing_required_fact'}]});
+    expect(state.canContinue).toBe(false);
+    expect(state.reasons).toEqual(['One question is still open.']);
+  });
+
   it('is disabled for a brand new session that reports nothing missing yet', () => {
     const state = continueState({draftSpec: {}, missingFields: [], stopConditions: [], progress: {answered: 0, required: 6}, hasOwnerTurn: false});
     expect(state.canContinue).toBe(false);
@@ -143,6 +180,8 @@ describe('builder turn answers from the real server', () => {
       expect(stopConditionLink(code)?.href).toMatch(/^\/(settings|knowledge)$/);
     }
     expect(stopConditionLink('open_conflict')?.href).toBe('/knowledge');
+    expect(stopConditionLink('missing_required_fact')?.href).toBe('/approvals');
+    expect(stopConditionLabel('missing_required_fact')).not.toMatch(/_/);
     expect(stopConditionLink('brand_new_code')).toBeNull();
   });
 
@@ -193,5 +232,35 @@ describe('builder turn answers from the real server', () => {
     const view = builderSendErrorView(err('INTERNAL', 'Something went wrong.', {}, 500, true));
     expect(view.description).toBe('Something went wrong.');
     expect(view.canRetry).toBe(true);
+  });
+});
+
+describe('groupStopConditions', () => {
+  it('collapses every missing_required_fact into one counted line under before publish', () => {
+    const groups = groupStopConditions([
+      {code: 'missing_required_fact'},
+      {code: 'empty_catalog'},
+      {code: 'missing_required_fact'},
+      {code: 'missing_required_fact'},
+    ]);
+    expect(groups.blocking).toEqual([]);
+    expect(groups.beforePublish.map((l) => l.label)).toEqual([
+      '3 required answers are not confirmed yet. Confirm each one in the chat or in Approvals.',
+      stopConditionLabel('empty_catalog'),
+    ]);
+    expect(groups.beforePublish[0].link).toEqual({label: 'Open Approvals', href: '/approvals'});
+    expect(new Set(groups.beforePublish.map((l) => l.key)).size).toBe(2);
+  });
+
+  it('uses the singular for one required answer', () => {
+    const {beforePublish} = groupStopConditions([{code: 'missing_required_fact'}]);
+    expect(beforePublish[0].label).toBe('1 required answer is not confirmed yet. Confirm it in the chat or in Approvals.');
+  });
+
+  it('puts the timezone and an open conflict under blocking, once each', () => {
+    const groups = groupStopConditions([{code: 'open_conflict'}, {code: 'missing_timezone'}, {code: 'open_conflict'}]);
+    expect(groups.blocking.map((l) => l.code)).toEqual(['open_conflict', 'missing_timezone']);
+    expect(groups.blocking[0].link?.href).toBe('/knowledge');
+    expect(groups.beforePublish).toEqual([]);
   });
 });

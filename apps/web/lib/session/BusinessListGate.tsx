@@ -6,6 +6,7 @@ import {EmptyState} from '@/components/EmptyState';
 import {ErrorState} from '@/components/ErrorState';
 import {LoadingState} from '@/components/LoadingState';
 import {useBusinessList, type BusinessListValue} from './ApiBusinessProvider';
+import {useBusiness} from './BusinessProvider';
 import type {BusinessListStatus} from './business-list';
 
 /** Owner-facing text for the selector itself, for each list state. */
@@ -60,12 +61,15 @@ export function BusinessListNotice({list}: {list: BusinessListValue}) {
 }
 
 /**
- * Renders the page only once the server has confirmed at least one business.
- * Otherwise it shows the loading, error or empty state, so no screen mounts
- * without a business. Mount it around the dashboard content.
+ * Renders the page only once the server has confirmed at least one business
+ * and the stored selection has been read. Otherwise it shows the loading,
+ * error or empty state, so no screen mounts without a business. Mount it
+ * around the dashboard content.
  */
 export function BusinessListGate({children}: {children: ReactNode}) {
   const list = useBusinessList();
-  if (list.status === 'ready' || list.status === 'signed_out') return <>{children}</>;
+  const {isReady} = useBusiness();
+  if (list.status === 'signed_out') return <>{children}</>;
+  if (list.status === 'ready') return isReady ? <>{children}</> : <LoadingState label="Loading your businesses" />;
   return <BusinessListNotice list={list} />;
 }
