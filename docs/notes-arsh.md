@@ -97,3 +97,14 @@ These statements under `docs/` also disagree with migration 0004 or SPEC 2.9. Th
 - **Webhook processing columns:** DATA-MODEL 2.19 lists `processed_at` and `process_error`. Migration 0004 gives `abos_app` select and insert on `webhook_events` but no update, so the server cannot set them.
 - **Fallback jobs table:** DATA-MODEL section 7 defines a `jobs` table with the comment "service role only". No migration creates it and `abos_app` has no grant on it.
 - **SQL blocks in DATA-MODEL section 2:** the block in 2.14 leaves out `payload_canonical` and its three constraints, 2.15 and 2.16 leave out `unique (id, business_id)`, 2.17 leaves out `unique (id, approval_id, business_id)`, and 2.18 leaves out the unique `execution_id` and the composite foreign keys. Section 0 already says the migrations win, but it does not name these.
+
+## Server follow-ups from the reviews in #93 to #96 (2026-11-14)
+
+Assumptions made in that work that no test here can check. Each one needs a real provider, a real call or the deployed model.
+
+- **Limit lines on a phone call.** At the per-call caps the relay injects a fixed server instruction and, for the tool-call cap, ends the call after the goodbye plays (`voice/relay.ts`, `voice/prompt.ts`). Tests show the instruction is sent and the call ends. Whether the Realtime model speaks the line as written, and how it reacts to `response.cancel` when no response is active, is not verified on a live call.
+- **A stream that has not started in 60 seconds never starts.** An unused stream credential ends its call as `dropped` when the credential expires. This assumes Twilio does not open the Media Stream later than the credential's life after the voice webhook. If it did, the token would be refused anyway; the assumption is only about the call's recorded end.
+- **Paused agent and the status callback.** The webhook ends a paused agent's call itself. Twilio's later status callback for that CallSid then finds the call already ended and changes nothing. Not exercised with a real callback.
+- **The phone prompt on the text model.** A simulated call now runs the phone prompt. The scripted model in tests does not read instructions, so how the deployed builder text model behaves under that prompt (for example whether it opens with the disclosure line when the caller speaks first) is not verified.
+- **A process that stops mid-call.** Relay state and the credential timers are in memory. After a restart a phone call left `IN_PROGRESS` ends only when Twilio's status callback arrives. No sweep was added: a call handed to a person has no relay either, and no column tells the two apart.
+- **A non-material field in `approval_requests.payload`.** `resolvesConflictId` is stored beside the hashed fields. The migrations allow it (containment check, material rebuilt from the payload, column frozen by the guard). It was run on the in-process test database as `abos_app`, not on the real database.
