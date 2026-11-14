@@ -1,0 +1,32 @@
+{
+  "name": "spike-google",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Spike B-05: Google Calendar and Sheets with one service account. Not part of the root workspaces.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "whoami": "tsx src/whoami.ts",
+    "freebusy": "tsx src/freebusy.ts",
+    "slots": "tsx src/slots-cli.ts",
+    "create-event": "tsx src/create-event-cli.ts",
+    "delete-event": "tsx src/delete-event-cli.ts",
+    "append-row": "tsx src/append-row-cli.ts",
+    "roundtrip": "tsx src/roundtrip.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@googleapis/calendar": "^20.2.0",
+    "@googleapis/sheets": "^18.1.3",
+    "google-auth-library": "^11.3.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.0"
+  }
+}
