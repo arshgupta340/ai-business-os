@@ -118,7 +118,9 @@ For an existing value, `subjectId` is the existing verified fact's `fact_` ID, `
 { "variationId": "SQ_VAR_PEP_LG", "newPriceMinor": 1900, "currency": "USD" }
 ```
 
-Response `201 { "approval": {...} }` with `payload` holding the `price_edit` fields of CONTRACTS.md section 4.
+Response `201 { "approval": {...} }` with `payload` holding the `price_edit` fields of CONTRACTS.md section 4. Beside the payload, the approval carries `itemName` and `variationName` when the catalog cache has them (section 3.13).
+
+The body may also carry `resolvesConflictId` (a `cfl_` ID, section 3.13). The field is in the contract, but the server cannot link a price approval to a conflict yet. A proposal that carries it is refused with `VALIDATION_FAILED` and nothing is created. To settle a price conflict with the uploaded price: propose the price without the field, confirm it, sync, then keep the current value on the conflict.
 
 ### 3.2 Files and extraction (owner: Saina)
 
@@ -156,11 +158,11 @@ Response `201 { "approval": {...} }` with `payload` holding the `price_edit` fie
   "unsupportedRequests": [] }
 ```
 
-Every builder message carries `sessionId` and `inputMode`; the server fills them on assistant messages (SPEC 2.9). `unsupportedRequests` is always present and may be empty (SPEC 2.9, section 3.12). `stopConditions` lists PRD section 6 stop conditions that block a draft, for example `{ "code": "missing_timezone" }`.
+Every builder message carries `sessionId` and `inputMode`; the server fills them on assistant messages (SPEC 2.9). `unsupportedRequests` is always present and may be empty (SPEC 2.9, section 3.12). `stopConditions` lists PRD section 6 stop conditions that block a draft, for example `{ "code": "missing_timezone" }`. An entry may carry `path` or `conflictIds` (section 3.13): `{ "code": "missing_required_fact", "path": "hours.mon" }` names one missing fact, and `{ "code": "open_conflict", "conflictIds": ["cfl_01"] }` names the open required conflicts.
 
 ### 3.4 Agents (owner: Saina, except `sim-call`: Arsh)
 
-Agent summary: `{ id, businessId, name, template, state, activeVersionId?, activeVersion?, draftSpec, isLiveAgent, createdAt, updatedAt }`. `state` is `draft`, `live` or `paused`. AgentVersion: `{ id, agentId, version, spec, knowledgeSnapshotRef, createdBy, publishedAt }`, immutable.
+Agent summary: `{ id, businessId, name, template, state, activeVersionId?, activeVersion?, draftSpec, isLiveAgent, createdAt, updatedAt }`. `state` is `draft`, `live` or `paused`. AgentVersion: `{ id, agentId, version, spec, knowledgeSnapshotRef, createdBy, createdByName?, publishedAt }`, immutable. `createdByName` is display only and is not sent yet (section 3.13).
 
 **`GET /api/agents?businessId=`**. Query: `state`, `limit`, `cursor`. Screens: Overview, Agent details.
 
@@ -236,7 +238,7 @@ One phone number serves both businesses, so this route is owner-scoped (P-06).
 
 ### 3.7 Approvals (owner: Arsh)
 
-**`GET /api/approvals?businessId=`**. Query: `state` (default `PENDING`), `bundleType` (`order_bundle`, `booking_bundle`, `fact_edit`, `price_edit`), `limit`, `cursor`. Returns ApprovalRequests. `payload` holds exactly the hashed material fields and never `messageConsent` (CONTRACTS.md section 4); the Approvals screen fetches the subject (`GET /api/orders/:id`, `/api/bookings/:id` or the fact) for itemized lines. Screens: Approvals, Overview (count), Live operations.
+**`GET /api/approvals?businessId=`**. Query: `state` (default `PENDING`), `bundleType` (`order_bundle`, `booking_bundle`, `fact_edit`, `price_edit`), `limit`, `cursor`. Returns ApprovalRequests. `payload` holds exactly the hashed material fields and never `messageConsent` (CONTRACTS.md section 4); the Approvals screen fetches the subject (`GET /api/orders/:id`, `/api/bookings/:id` or the fact) for itemized lines. Beside the payload, a decided approval carries `decidedByName` and a `price_edit` carries `itemName` and `variationName`, when the server has them (section 3.13). These are display fields: they are not hashed. Screens: Approvals, Overview (count), Live operations.
 
 **`GET /api/approvals/:id?businessId=`**. Returns one ApprovalRequest. Errors: `NOT_FOUND`.
 
@@ -259,8 +261,10 @@ One phone number serves both businesses, so this route is owner-scoped (P-06).
 Response `200`. Execution progress arrives only as activity events; the response never waits for a provider.
 
 ```json
-{ "approval": { "id": "apv_123", "state": "APPROVED", "decidedBy": "usr_owner_01", "decidedAt": "2026-11-13T19:44:10Z" } }
+{ "approval": { "id": "apv_123", "state": "APPROVED", "decidedBy": "usr_owner_01", "decidedByName": "Demo Owner", "decidedAt": "2026-11-13T19:44:10Z" } }
 ```
+
+`decidedByName` is absent when the owner has no display name (section 3.13).
 
 Errors: `NOT_FOUND`, `PAYLOAD_HASH_MISMATCH`, `APPROVAL_ALREADY_DECIDED`, `APPROVAL_EXPIRED`, `ENVIRONMENT_MISMATCH` (approve of an `order_bundle` or `price_edit`). Events: `approval.decided` when the decision is recorded (an identical repeat writes no second one), plus `order.status_changed` or `booking.status_changed` on every transition of the subject. Then from the executor:
 - `order_bundle`: `execution.started`, `checkout.created`, `message.sent` or `message.failed`, `execution.succeeded` or `execution.failed`, later `payment.verified` or `payment.failed` from the webhook job, then `sync.queued` and `sync.succeeded` or `sync.failed` once the order is `PAID_VERIFIED` (SPEC 2.3).
@@ -361,6 +365,23 @@ Response shapes have named schemas in `packages/contracts`, so the UI never rede
 
 `GET /api/live-agent` returns `phoneNumber` and `businessId` always. `agentId` and `agentVersionId` are absent when no agent answers the number.
 
+### 3.13 Added after the freeze (issue #108)
+
+All optional. A client that ignores them keeps working. Types and rules are in CONTRACTS.md section 12.
+
+| Field | On | Sent today |
+|---|---|---|
+| `stopConditions[].path` | `POST /api/builder/sessions/:id/messages` response | Yes. One `missing_required_fact` entry per missing fact; `path` is the field name used in `missingFields`, for example `hours.mon` |
+| `stopConditions[].conflictIds` | the same response | Yes, on `open_conflict`: the `cfl_` ID of every open required conflict of the business |
+| `decidedByName` | ApprovalRequest (`GET /api/approvals`, `GET /api/approvals/:id`) and the decision response | Yes, when the approval has a `decidedBy` and that user has a display name |
+| `itemName`, `variationName` | a `price_edit` ApprovalRequest (the two reads above and the `prices/propose` response) | Yes, when the catalog cache still has the `cat_` row in `subjectId` |
+| `createdByName` | AgentVersion (`publish`, `rollback`, `versions`, and `activeVersion` on an agent) | No. The builder builds this object and does not fill the field yet |
+| `resolvesConflictId` | `POST /api/businesses/:id/catalog/prices/propose` body | Accepted by the schema, refused by the server with `VALIDATION_FAILED` (section 3.1) |
+
+- The names are labels. They are outside `payload`, so `payloadHash` does not cover them, and the decision still sends the hash of the payload the UI displayed.
+- `itemName` and `variationName` are the names in the catalog cache when the approval is read, not the names when the edit was proposed. A row stays in the cache after its item leaves Square, so the name of a removed item is still sent. A renamed item shows its new name.
+- When a name is absent, the UI keeps its current wording ("by the owner", "An item in the Square catalog").
+
 ## 4. Webhooks (owner: Arsh)
 
 Webhooks are called by providers, never by the browser, and carry no Supabase JWT. Each one verifies the signature on the raw body, deduplicates, persists, enqueues a job and responds fast. Slow work (Square API reads, state transitions, events) runs in the job. Fastify keeps the raw body for `/webhooks/*` with a content-type parser that stores the buffer before parsing. Only signature-verified events are stored in `webhook_events`, so a forged request can never claim a real event ID. A request that fails verification gets `401 SIGNATURE_INVALID` and writes one `webhook.rejected` activity event and nothing else (SPEC 2.9).
@@ -447,6 +468,7 @@ Paths, fields and values that SPEC v1.1 does not define. Error codes are defined
 | Request fields: `reason`, `resolvesConflictId` (facts propose); `variationId`, `newPriceMinor` (prices propose); `scenarios` (preview); `message`, `end` (test, sim-call); `makeLive`, `confirm` (publish, rollback); `toVersionId` (rollback); `builderSessionId` (client secret) | section 3 |
 | Response fields: `conflicts`, `suggestions`, `stopConditions`, `progress`, `toolTrace` (`tool`, `capabilityId`, `effect`, `input`, `output`, `mocked`, `durationMs`), `guardrail`, `permissions`, `examples`, `specRevision`, `isLiveAgent`, `phoneNumber`, `ready`, `qrText`, `environment`, `message` (checkout), the `knowledgeSnapshotRef` keys `facts` and `catalogSyncedAt` | section 3 |
 | Accepted upload MIME types | section 3.2 |
+| Issue #108: response fields `path` and `conflictIds` (stop conditions), `decidedByName`, `createdByName`, `itemName`, `variationName`; request field `resolvesConflictId` (prices propose) | section 3.13 |
 | `streamToken` recipe (HMAC with `TWILIO_AUTH_TOKEN`, 60 seconds, single use); Twilio status dedupe keys; CallStatus to Call state mapping | sections 4 and 5 |
 
 Still open:

@@ -13,6 +13,7 @@ Every business-scoped hook takes `businessId` as its first argument. Pass `useBu
 | File | What it holds |
 |---|---|
 | `index.ts` | The barrel. Re-exports every type and schema of `@abos/contracts`, so screens import them from `@/lib/api`. The contract's error envelope type is `ApiErrorBody`, because `ApiError` is the class below. |
+| `config.ts` | `isMockMode()` and `defaultBaseUrl()` (`NEXT_PUBLIC_API_URL` without a trailing slash; empty means same origin, which mock mode uses). |
 | `client.ts` | One function per endpoint, exported as `api` from the barrel. Method, path and response schema come from `ENDPOINTS` in `@abos/contracts`; bodies and queries are typed with `EndpointBody` and `EndpointQuery`. Validates every response. |
 | `payload.ts` | `payloadOf(event)`: an event's payload with the contract's type for its `type`. |
 | `realtime-row.ts` | What a Supabase Realtime row does: it always refetches the affected queries; it joins the feed only if `activityEventFromRow` parses it. |
@@ -47,17 +48,23 @@ Queries return the normal React Query result (`data`, `isPending`, `error`, `ref
 
 | Hook | Arguments | `data` or mutation variables |
 |---|---|---|
-| `useBusinesses({ enabled? })` | optional `enabled` (default true) | `ListBusinessesResponse` `{ items: BusinessSummary[] }` (`id`, `name`, `category`, `timezone`; no cursor). `useBusiness()` from `@/lib/session` already uses it for the selector. |
+| `useBusinesses({ enabled? })` | optional `enabled` (default true) | `ListBusinessesResponse` `{ items: BusinessSummary[] }` (`id`, `name`, `category`, `timezone`; no cursor). `ApiBusinessProvider` in `@/lib/session` already uses it for the selector, so screens call `useBusiness()` from `@/lib/session` and not this hook. In real mode the selector shows only what this call returned. |
 | `useBusiness(businessId)` | | `Business` (contact has `phone?`, `email?`, `address?`) |
 | `useUpdateBusiness(businessId)` | mutate `{ name?, contact?, settings? }` | `Business` |
 | `useFacts(businessId, { kind?, status? })` | `kind`: `hours`, `policy`, `service`, `contact`, `faq`, `menu_item`. Default status leaves out `superseded`. | `FactsListResponse` `{ items: BusinessFact[], conflicts: FactConflict[] }` (open conflicts) |
 | `useProposeFact(businessId)` | mutate `{ kind, key, value, reason? }` or `{ resolvesConflictId, value, reason? }` | `{ approval }`, a `fact_edit` approval with `actorType: "owner"`. Open the confirm dialog and decide it with `useDecideApproval`. Nothing changes before that. |
-| `useResolveConflict(businessId)` | mutate `{ conflictId }` | `{ conflict }`. Keeps the authoritative value; no approval. |
+| `useResolveConflict(businessId)` | mutate `{ conflictId }` | `{ conflict }`. Sends `{ resolution: "keep_authoritative" }`. Keeps the authoritative value; no approval. |
 | `useCatalog(businessId)` | | `{ items: CatalogItem[], syncedAt }`. Display prices only. |
 | `useSyncCatalog(businessId)` | mutate with no argument | `{ jobId }`. Progress arrives as `sync.*` events with `target: "catalog"`. |
 | `useProposePrice(businessId)` (SHOULD) | mutate `{ variationId, newPriceMinor, currency: "USD" }` | `{ approval }`, a `price_edit` approval |
 
-A price conflict (`kind: "menu_item"`) is never resolved by a fact edit. Keep Square's price with `useResolveConflict`, or propose a price change.
+A price conflict (`kind: "menu_item"`) is never resolved by a fact edit. Keep Square's price with `useResolveConflict`, or propose a price change. The mock answers a fact edit on a price conflict with `VALIDATION_FAILED`; the server on `main` answers `CAPABILITY_NOT_ALLOWED` and names the two routes to use in `details.use` (`apps/server/src/api/routes.ts`).
+
+What the server on `main` does with these calls (read from the code, not run from the web app):
+
+- `POST /api/conflicts/:id/resolve` with `keep_authoritative` on a conflict stored in the database is resolved on the database and answers `{ conflict }` (`apps/server/src/app.ts`, `apps/server/src/api/conflicts.ts`). Any other body on such a conflict answers `INTEGRATION_UNAVAILABLE` with `details.use` naming `facts/propose` with `resolvesConflictId`, or `CAPABILITY_NOT_ALLOWED` for a price conflict.
+- The Knowledge screen handles that `INTEGRATION_UNAVAILABLE` answer (`isResolveOnFactsList`): it proposes the kept value through `useProposeFact` with `resolvesConflictId` and tells the owner that a confirmation is waiting in Approvals. A price conflict never takes this path.
+- `POST /api/businesses/:id/catalog/prices/propose` is registered (`apps/server/src/api/prices`). If a server answers `NOT_FOUND` with a message that starts "No route for", the Prices screen says the price editor is not available on that server (`isMissingRoute` in `knowledge/prices/_lib/propose-errors.ts`).
 
 ### Files
 
@@ -120,7 +127,7 @@ A price conflict (`kind: "menu_item"`) is never resolved by a fact edit. Keep Sq
 | `useCancelOrder(businessId)` (SHOULD) | mutate `{ orderId }` | `Order` |
 | `useResolveExecution(businessId)` (SHOULD) | mutate `{ executionId, action: "retry" \| "abandon" }` | `ActionExecution` |
 
-Leave the Cancel, Retry and Abandon buttons out of screens until the server has those routes (SPEC P-19). The client functions and mocks exist so the screens can be finished later. There is no "mark ready" route: the server moves a paid order to `FULFILLMENT_READY` itself.
+No screen calls `useCall`, `useCancelOrder` or `useResolveExecution` yet, so there are no Cancel, Retry or Abandon buttons (SPEC P-19). The client functions and mocks exist so the screens can be finished later. The server on `main` registers `GET /api/calls/:id`, `POST /api/orders/:id/cancel` and `POST /api/executions/:id/resolve` (`apps/server/src/api/routes.ts`, `apps/server/src/api/recovery`); the web app has not been run against them. There is no "mark ready" route: the server moves a paid order to `FULFILLMENT_READY` itself.
 
 Green only for `PAID_VERIFIED`, `FULFILLMENT_READY` and `BOOKED_VERIFIED` (FLOWS.md 3.5).
 
@@ -161,7 +168,6 @@ Run `npm run dev:mock` (or set `NEXT_PUBLIC_MOCK=1`). Requests go to MSW in the 
 | `simulateCatalogSyncFailed?()` | The next catalog sync ends with `sync.failed` (`target: "catalog"`, `final: true`). The catalog and `syncedAt` stay as they were. |
 | `simulateQrOnlyChannel?()` | The next pizza call is proposed with `messageChannel: "qr_only"`. After approval the message step is `SKIPPED`: no dispatch, no message event, `checkout.message` is absent, and the order goes from `PAYMENT_LINK_READY` straight to `PAYMENT_PENDING`, then to a verified sandbox payment. |
 | `simulateSheetsDisconnected?()` | Google Sheets reports `disconnected` (the shared `integrationHealthDisconnected`) until `reset()`. The default health is the shared `integrationHealth`, where Sheets is connected and Google Calendar is degraded. The Live operations "Sheets disconnects" button runs it. |
-
 | `simulateEmptyBusiness?(businessId)` | That business has nothing yet: no agents, versions, calls, orders, bookings, approvals, executions, messages, sync jobs, activity, facts, conflicts, files, catalog, builder sessions or telemetry, until `reset()`. The business stays in the selector, and nothing answers the number for it. Screens refetch at once (it tells `subscribeMockReset` listeners). Use it for every empty state. |
 | `simulateRequestFailure?({ path, method?, mode?, code?, message?, times? })` | Requests whose path starts with `path` (for example `"/api/calls"`, or `"/api/"` for all) fail until `reset()` or `clearRequestFailures()`. `method` defaults to `GET`. `mode: "error"` (default) answers with the API error envelope and `code` (default `INTERNAL`, which is retryable, so React Query retries twice before the screen shows the error). `mode: "invalid"` answers 200 with a body that does not match the contract, so the client throws `kind: "invalid_response"`. `times` limits how many requests fail. With `method: "POST"` it fails a mutation with the server's reason. |
 | `clearRequestFailures?()` | Removes every `simulateRequestFailure` rule. |

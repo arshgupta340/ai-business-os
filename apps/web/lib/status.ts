@@ -5,9 +5,33 @@
  * Rule: the `success` tone (green) is only for states the server or the
  * provider confirmed. Nothing here is green for a state that is still waiting.
  * Every payment label says sandbox.
+ *
+ * Rule: no raw state reaches the owner. Every contract state has a label
+ * here, and a state this app does not know shows in a readable form, in
+ * neutral. status.coverage.test.ts holds both rules against the contract lists.
  */
 
+import type {
+  AgentStatus,
+  ApprovalState,
+  BookingMachineState,
+  BuilderSessionStatus,
+  CallStage,
+  CallStatus,
+  ExecutionStatus,
+  ExtractionState,
+  FactStatus,
+  IntegrationState,
+  MessageDispatchStatus,
+  OrderMachineState,
+  SyncJobState,
+} from '@abos/contracts';
+import type {ActivityFeedStatus} from '@/lib/api/useActivityFeed';
+
 export type Tone = 'neutral' | 'info' | 'warning' | 'danger' | 'success';
+
+/** Every tone a status may have. StatusBadge and the banners know these and no others. */
+export const TONES: readonly Tone[] = ['neutral', 'info', 'warning', 'danger', 'success'];
 
 export type StatusView = {label: string; tone: Tone};
 
@@ -33,8 +57,50 @@ export type StatusMachine =
 
 const view = (label: string, tone: Tone): StatusView => ({label, tone});
 
-const TABLE: Record<StatusMachine, Record<string, StatusView>> = {
+/**
+ * The states of each machine, taken from the contract types. A state that is
+ * added to a contract enum and not labelled here fails the typecheck, and
+ * status.coverage.test.ts fails as well.
+ */
+type StatesByMachine = {
+  /** Order statuses, plus the order call stages that order.status_changed can carry. */
+  order: OrderMachineState;
+  /** Booking statuses, plus the booking call stages that booking.status_changed can carry. */
+  booking: BookingMachineState;
+  approval: ApprovalState;
+  execution: ExecutionStatus;
+  syncJob: SyncJobState;
+  /** SKIPPED is what the message step reports when the channel is QR only. */
+  messageDispatch: MessageDispatchStatus | 'SKIPPED';
+  call: CallStatus;
+  callStage: CallStage;
+  agent: AgentStatus;
+  fact: FactStatus;
+  fileExtraction: ExtractionState;
+  integration: IntegrationState;
+  feed: ActivityFeedStatus;
+  catalogSync: SyncJobState;
+  builderSession: BuilderSessionStatus;
+};
+
+/** The conversation stages of a call. `order` and `booking` reuse these labels. */
+const CALL_STAGE: Record<CallStage, StatusView> = {
+  CALL_STARTED: view('Call started', 'info'),
+  COLLECTING: view('Taking the order', 'info'),
+  VALIDATING: view('Checking the order', 'info'),
+  CUSTOMER_CONFIRMED: view('Customer confirmed', 'info'),
+  INQUIRY: view('Asking what they need', 'info'),
+  SLOT_SEARCH: view('Looking for a time', 'info'),
+  PROPOSAL: view('Offering a time', 'info'),
+  UNAVAILABLE: view('Item unavailable, choosing again', 'warning'),
+};
+
+const TABLE: {[M in StatusMachine]: Record<StatesByMachine[M], StatusView>} = {
   order: {
+    CALL_STARTED: CALL_STAGE.CALL_STARTED,
+    COLLECTING: CALL_STAGE.COLLECTING,
+    VALIDATING: CALL_STAGE.VALIDATING,
+    CUSTOMER_CONFIRMED: CALL_STAGE.CUSTOMER_CONFIRMED,
     AWAITING_OWNER_APPROVAL: view('Waiting for your approval', 'warning'),
     APPROVED: view('Approved, creating checkout', 'info'),
     CREATING_CHECKOUT: view('Creating checkout', 'info'),
@@ -51,6 +117,10 @@ const TABLE: Record<StatusMachine, Record<string, StatusView>> = {
     RECOVERY_REQUIRED: view('Needs your review', 'danger'),
   },
   booking: {
+    INQUIRY: CALL_STAGE.INQUIRY,
+    SLOT_SEARCH: CALL_STAGE.SLOT_SEARCH,
+    PROPOSAL: CALL_STAGE.PROPOSAL,
+    CUSTOMER_CONFIRMED: CALL_STAGE.CUSTOMER_CONFIRMED,
     AWAITING_OWNER_APPROVAL: view('Waiting for your approval', 'warning'),
     RECHECKING_SLOT: view('Checking the calendar', 'info'),
     BOOKED_VERIFIED: view('Booked, verified', 'success'),
@@ -86,6 +156,7 @@ const TABLE: Record<StatusMachine, Record<string, StatusView>> = {
     DELIVERED: view('Message delivered', 'success'),
     UNKNOWN: view('Delivery unknown, not resent', 'warning'),
     FAILED: view('Message failed, show the QR code', 'danger'),
+    SKIPPED: view('No message sent', 'neutral'),
   },
   call: {
     IN_PROGRESS: view('On the call', 'info'),
@@ -93,16 +164,7 @@ const TABLE: Record<StatusMachine, Record<string, StatusView>> = {
     DROPPED: view('Call lost', 'warning'),
     FAILED: view('Call failed', 'danger'),
   },
-  callStage: {
-    CALL_STARTED: view('Call started', 'info'),
-    COLLECTING: view('Taking the order', 'info'),
-    VALIDATING: view('Checking the order', 'info'),
-    CUSTOMER_CONFIRMED: view('Customer confirmed', 'info'),
-    INQUIRY: view('Asking what they need', 'info'),
-    SLOT_SEARCH: view('Looking for a time', 'info'),
-    PROPOSAL: view('Offering a time', 'info'),
-    UNAVAILABLE: view('Item unavailable, choosing again', 'warning'),
-  },
+  callStage: CALL_STAGE,
   agent: {
     draft: view('Draft', 'neutral'),
     live: view('Live', 'info'),
@@ -149,15 +211,49 @@ const TABLE: Record<StatusMachine, Record<string, StatusView>> = {
   },
 };
 
-/** Label and tone for a server state. An unknown state shows as itself, in neutral. */
+/**
+ * A readable form of a raw value this app has no label for. "REFUND_PENDING"
+ * becomes "Refund pending" and "google_sheets" becomes "Google sheets".
+ * `whenEmpty` is returned for a value that is not text or has no letters or digits.
+ */
+export function readableLabel(raw: unknown, whenEmpty = 'Unknown'): string {
+  if (typeof raw !== 'string') return whenEmpty;
+  const words = raw
+    .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : whenEmpty;
+}
+
+function lookup(machine: StatusMachine, state: unknown): StatusView | undefined {
+  if (typeof state !== 'string' || !Object.hasOwn(TABLE, machine)) return undefined;
+  const states: Record<string, StatusView> = TABLE[machine];
+  // Object.hasOwn keeps inherited names such as "constructor" from passing as a state.
+  return Object.hasOwn(states, state) ? states[state] : undefined;
+}
+
+/** True when this app has its own label for the state. False means statusView falls back to a readable form of the raw value. */
+export function hasStatusLabel(machine: StatusMachine, state: string): boolean {
+  return lookup(machine, state) !== undefined;
+}
+
+/**
+ * Label and tone for a server state. A state this app does not know, as a
+ * later contract version may add, shows in a readable form of its name and in
+ * neutral. It is never green, because nothing confirmed it.
+ */
 export function statusView(machine: StatusMachine, state: string): StatusView {
-  return TABLE[machine][state] ?? view(state, 'neutral');
+  return lookup(machine, state) ?? view(readableLabel(state, 'Unknown status'), 'neutral');
 }
 
 /** Fact conflicts depend on two fields, so they get their own helper. */
 export function conflictView(status: 'open' | 'resolved', required: boolean): StatusView {
   if (status === 'resolved') return view('Resolved', 'neutral');
-  return required ? view('Conflict, blocks publish', 'danger') : view('Conflict', 'warning');
+  if (status === 'open') return required ? view('Conflict, blocks publish', 'danger') : view('Conflict', 'warning');
+  // A conflict state this app does not know. It is not shown as open or as blocking.
+  return view(readableLabel(status, 'Unknown status'), 'neutral');
 }
 
 /**

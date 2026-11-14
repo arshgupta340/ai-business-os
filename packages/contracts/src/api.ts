@@ -108,7 +108,17 @@ export type CatalogResponse = z.infer<typeof CatalogResponseSchema>;
 export const CatalogSyncResponseSchema = z.object({ jobId: JobIdSchema });
 export type CatalogSyncResponse = z.infer<typeof CatalogSyncResponseSchema>;
 
-export const ProposePriceBodySchema = z.strictObject({ variationId: z.string().min(1), newPriceMinor: MinorAmountSchema, currency: CurrencySchema });
+/**
+ * `resolvesConflictId` (issue #108, additive): the open price conflict this change is meant to settle.
+ * It is a request field only. The `price_edit` approval payload does not carry it, so no stored
+ * approval links to a conflict (CONTRACTS section 12).
+ */
+export const ProposePriceBodySchema = z.strictObject({
+  variationId: z.string().min(1),
+  newPriceMinor: MinorAmountSchema,
+  currency: CurrencySchema,
+  resolvesConflictId: FactConflictIdSchema.optional(),
+});
 export type ProposePriceBody = z.infer<typeof ProposePriceBodySchema>;
 export const ProposePriceResponseSchema = z.object({ approval: PriceEditApprovalRequestSchema });
 export type ProposePriceResponse = z.infer<typeof ProposePriceResponseSchema>;
@@ -130,7 +140,16 @@ export type CreateBuilderSessionBody = z.infer<typeof CreateBuilderSessionBodySc
 export const BuilderMessageBodySchema = z.strictObject({ text: z.string().min(1), inputMode: InputModeSchema });
 export type BuilderMessageBody = z.infer<typeof BuilderMessageBodySchema>;
 
-export const StopConditionSchema = z.object({ code: z.string().min(1) });
+/**
+ * One PRD section 6 stop condition. `path` and `conflictIds` are additive (issue #108):
+ * `path` names the missing field on `missing_required_fact` (a `missingFields` name such as
+ * `hours.mon`), and `conflictIds` lists the open required conflicts on `open_conflict`.
+ */
+export const StopConditionSchema = z.object({
+  code: z.string().min(1),
+  path: z.string().min(1).optional(),
+  conflictIds: z.array(FactConflictIdSchema).optional(),
+});
 export type StopCondition = z.infer<typeof StopConditionSchema>;
 
 export const BuilderTurnResponseSchema = z.object({
@@ -213,6 +232,7 @@ export const DecisionResponseSchema = z.object({
     id: ApprovalIdSchema,
     state: ApprovalStateSchema,
     decidedBy: z.string().optional(),
+    decidedByName: z.string().min(1).optional(), // issue #108: display only, as on ApprovalRequest
     decidedAt: IsoDateTimeSchema.optional(),
   }),
 });

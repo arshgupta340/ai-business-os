@@ -14,8 +14,8 @@ import {
   type LiveAgent,
 } from '../src/index';
 import { CATALOG_SYNCED_AT } from './catalog';
-import { barberFacts, pizzaVerifiedFacts } from './facts';
-import { DEMO_PHONE_NUMBER, OWNER_USER_ID, SEEDED_AT } from './world';
+import { barberFacts, menuPriceConflict, pizzaVerifiedFacts } from './facts';
+import { DEMO_PHONE_NUMBER, OWNER_USER_ID, SEEDED_AT, ownerUser } from './world';
 
 /** SPEC 2.2: the capabilities of the restaurant template (tools plus the executor bundle). */
 export const PIZZA_CAPABILITIES: CapabilityId[] = [
@@ -100,6 +100,7 @@ export const pizzaVersionV1 = {
   spec: pizzaSpecV1,
   knowledgeSnapshotRef: snapshotOf(pizzaVerifiedFacts, '2026-11-13T19:30:00Z'),
   createdBy: OWNER_USER_ID,
+  createdByName: ownerUser.displayName,
   publishedAt: '2026-11-13T19:30:00Z',
 } satisfies AgentVersion;
 
@@ -110,6 +111,7 @@ export const pizzaVersionV2 = {
   spec: pizzaSpecV2,
   knowledgeSnapshotRef: snapshotOf(pizzaVerifiedFacts, CATALOG_SYNCED_AT),
   createdBy: OWNER_USER_ID,
+  createdByName: ownerUser.displayName,
   publishedAt: '2026-11-14T16:00:00Z',
 } satisfies AgentVersion;
 
@@ -120,6 +122,7 @@ export const barberVersionV1 = {
   spec: barberSpecV1,
   knowledgeSnapshotRef: snapshotOf(barberFacts),
   createdBy: OWNER_USER_ID,
+  createdByName: ownerUser.displayName,
   publishedAt: '2026-11-14T17:00:00Z',
 } satisfies AgentVersion;
 
@@ -183,6 +186,8 @@ export const faqDraftAgent = {
   updatedAt: '2026-11-14T20:28:00Z',
 } satisfies Agent;
 
+// The paused agent still has the live agent's name (issue #103, item 6). A web test reads this pair as its
+// "two agents with one name" case, so the rename has to land together with that test: see issue103.test.ts.
 export const pausedSpec: AgentSpec = { ...pizzaSpecV1, id: 'agt_pizza_paused_88', status: 'paused' };
 export const pausedVersion: AgentVersion = { ...pizzaVersionV1, id: 'agv_pizza_paused_88_v1', agentId: pausedSpec.id, spec: pausedSpec };
 agentVersions.push(pausedVersion);
@@ -279,7 +284,13 @@ export const builderTurn = {
   draftSpec: faqDraftSpec,
   missingFields: builderMissingFields,
   suggestions: ['Confirm the Friday hours change', 'Resolve the menu price conflict'],
-  stopConditions: [{ code: 'conflict_open' }, { code: 'missing_greeting' }],
+  // `conflictIds` and `path` are the additive fields of issue #108. The third entry has the shape the
+  // builder sends for a missing fact: `path` is one of `missingFields`.
+  stopConditions: [
+    { code: 'conflict_open', conflictIds: [menuPriceConflict.id] },
+    { code: 'missing_greeting' },
+    { code: 'missing_required_fact', path: 'policy.after_hours' },
+  ],
   progress: { answered: 3, required: 6 },
   unsupportedRequests: ['Take card numbers over the phone'],
   proposedChange: { approvalId: 'apv_demo_f01', bundleType: 'fact_edit' },

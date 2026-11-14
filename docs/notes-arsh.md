@@ -108,3 +108,11 @@ Assumptions made in that work that no test here can check. Each one needs a real
 - **The phone prompt on the text model.** A simulated call now runs the phone prompt. The scripted model in tests does not read instructions, so how the deployed builder text model behaves under that prompt (for example whether it opens with the disclosure line when the caller speaks first) is not verified.
 - **A process that stops mid-call.** Relay state and the credential timers are in memory. After a restart a phone call left `IN_PROGRESS` ends only when Twilio's status callback arrives. No sweep was added: a call handed to a person has no relay either, and no column tells the two apart.
 - **A non-material field in `approval_requests.payload`.** `resolvesConflictId` is stored beside the hashed fields. The migrations allow it (containment check, material rebuilt from the payload, column frozen by the guard). It was run on the in-process test database as `abos_app`, not on the real database.
+
+## Issue #108 contract additions (2026-11-14): assumptions not verified
+
+- `decidedByName` is read from `users.display_name` of the business owner. The seed script writes "Demo Owner" there. This was run only on the in-process test database, not on the Supabase project, so what the deployed owner row holds was not checked. A null or blank name sends no field.
+- `itemName` and `variationName` are read from the `catalog_items` row in the approval's `subjectId`. The claim that a row stays after its item leaves Square rests on the sync statement that marks missing rows unavailable (`adapters/square/core.ts`). It was not checked against a real Square sandbox catalog with a deleted item.
+- `createdByName` is in the schema and the fixtures only. No server code fills it: the version view is built in `apps/server/src/builder/publish/stores.ts` (`toVersionView`), which is the UI lead's directory.
+- `resolvesConflictId` on the price proposal body is in the schema, and the route still refuses it. Nothing stores the link.
+

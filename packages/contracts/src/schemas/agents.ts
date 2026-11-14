@@ -50,6 +50,7 @@ export const AgentVersionSchema = z.object({
   spec: AgentSpecSchema,
   knowledgeSnapshotRef: KnowledgeSnapshotRefSchema,
   createdBy: UserIdSchema.optional(), // agent_versions.created_by is nullable
+  createdByName: z.string().min(1).optional(), // issue #108: the publisher's display name; display only, not stored on the version
   publishedAt: IsoDateTimeSchema,
 });
 export type AgentVersion = z.infer<typeof AgentVersionSchema>;

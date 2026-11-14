@@ -125,6 +125,9 @@ const approvalBase = {
   state: ApprovalStateSchema,
   expiresAt: IsoDateTimeSchema, // SPEC 2.9: createdAt plus 10 minutes
   decidedBy: UserIdSchema.optional(),
+  // Issue #108, additive. The decider's display name, read from the users row when the approval is
+  // served. Display only: it is outside `payload`, so it is not hashed and not stored on the approval.
+  decidedByName: z.string().min(1).optional(),
   decidedAt: IsoDateTimeSchema.optional(),
   createdAt: IsoDateTimeSchema,
 };
@@ -161,6 +164,11 @@ export const PriceEditApprovalRequestBaseSchema = z.object({
   actionBundle: PriceEditActionsSchema,
   subjectId: CatalogItemRowIdSchema,
   payload: PriceEditApprovalPayloadSchema,
+  // Issue #108, additive. The catalog names of the `cat_` row in `subjectId`, read from the catalog
+  // cache when the approval is served. Display only: they are outside `payload`, so they are not
+  // hashed, and they are not a record of the names at proposal time (CONTRACTS section 12).
+  itemName: z.string().min(1).optional(),
+  variationName: z.string().min(1).optional(),
 });
 type ApprovalRequestShape = {
   businessId: string;
