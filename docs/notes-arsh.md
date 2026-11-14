@@ -97,3 +97,11 @@ These statements under `docs/` also disagree with migration 0004 or SPEC 2.9. Th
 - **Webhook processing columns:** DATA-MODEL 2.19 lists `processed_at` and `process_error`. Migration 0004 gives `abos_app` select and insert on `webhook_events` but no update, so the server cannot set them.
 - **Fallback jobs table:** DATA-MODEL section 7 defines a `jobs` table with the comment "service role only". No migration creates it and `abos_app` has no grant on it.
 - **SQL blocks in DATA-MODEL section 2:** the block in 2.14 leaves out `payload_canonical` and its three constraints, 2.15 and 2.16 leave out `unique (id, business_id)`, 2.17 leaves out `unique (id, approval_id, business_id)`, and 2.18 leaves out the unique `execution_id` and the composite foreign keys. Section 0 already says the migrations win, but it does not name these.
+
+## Issue #108 contract additions (2026-11-14): assumptions not verified
+
+- `decidedByName` is read from `users.display_name` of the business owner. The seed script writes "Demo Owner" there. This was run only on the in-process test database, not on the Supabase project, so what the deployed owner row holds was not checked. A null or blank name sends no field.
+- `itemName` and `variationName` are read from the `catalog_items` row in the approval's `subjectId`. The claim that a row stays after its item leaves Square rests on the sync statement that marks missing rows unavailable (`adapters/square/core.ts`). It was not checked against a real Square sandbox catalog with a deleted item.
+- `createdByName` is in the schema and the fixtures only. No server code fills it: the version view is built in `apps/server/src/builder/publish/stores.ts` (`toVersionView`), which is the UI lead's directory.
+- `resolvesConflictId` on the price proposal body is in the schema, and the route still refuses it. Nothing stores the link.
+

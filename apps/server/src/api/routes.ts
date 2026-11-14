@@ -9,6 +9,7 @@ import type { Db } from '../db/index';
 import type { Env } from '../env';
 import { AppError } from '../errors';
 import { mapRow } from './rows';
+import { ownerDisplayNames, withApprovalDisplayFields } from './display';
 import { setLiveAgent } from './live-agent';
 import { unavailableCatalog, type CatalogPort, type EnginePorts } from './ports';
 import { createHealthMonitor, type HealthMonitor } from '../compose/health';
@@ -102,7 +103,8 @@ async function list(db: Db, name: keyof typeof collections, businessId: string, 
   const rows = (await db.query(`select *, to_char(${time} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as page_time
     from public.${table} where ${clauses.join(' and ')} order by ${time} desc, id desc limit $${values.length}`, values)).rows;
   const mapped = rows.slice(0, limit).map(mapRow);
-  const page = name === 'listActivity' ? await normalizeActivity(db, mapped) : mapped;
+  const page = name === 'listActivity' ? await normalizeActivity(db, mapped)
+    : name === 'listApprovals' ? await withApprovalDisplayFields(db, businessId, mapped) : mapped;
   const last = page.at(-1);
   return { items: page, ...(rows.length > limit && last ? {
     nextCursor: Buffer.from(JSON.stringify({ id: last.id, time: last.pageTime, scope })).toString('base64url'),
@@ -213,6 +215,7 @@ export async function apiRoutes(app: FastifyInstance, deps: ApiDependencies): Pr
     const businessId = request.businessId ?? '';
     const id = String(params.id ?? '');
     if (name in collections) return list(db, name as keyof typeof collections, businessId, query);
+    if (name === 'getApproval') return (await withApprovalDisplayFields(db, businessId, [await one(db, singles.getApproval, id, businessId)]))[0];
     if (name in singles) return one(db, singles[name as keyof typeof singles], id, businessId);
     switch (name) {
       case 'listBusinesses': return referencePage((await db.query('select * from public.businesses where owner_id = $1 order by id', [ownerUserId])).rows.map(mapRow), query, canonicalJson({ name, ownerUserId }));
@@ -242,7 +245,7 @@ export async function apiRoutes(app: FastifyInstance, deps: ApiDependencies): Pr
         if ('resolvesConflictId' in proposal) {
           const conflict = await one(db, 'fact_conflicts', proposal.resolvesConflictId, businessId);
           if (conflict.state !== 'open') throw new AppError('INVALID_STATE', 'Conflict is already resolved.');
-          // A Square price is not a fact edit, and the price proposal carries no resolvesConflictId yet.
+          // A Square price is not a fact edit, and a price approval cannot link to a conflict yet (CONTRACTS section 12).
           if (conflict.kind === 'menu_item') {
             throw new AppError('CAPABILITY_NOT_ALLOWED', 'A Square price is changed with a price change. Change the price, sync, then keep the current value on this conflict.', undefined, false,
               { use: ['POST /api/businesses/:id/catalog/prices/propose', 'POST /api/conflicts/:id/resolve with resolution keep_authoritative'] });
@@ -267,7 +270,14 @@ export async function apiRoutes(app: FastifyInstance, deps: ApiDependencies): Pr
       case 'decideApproval': {
         await one(db, 'approval_requests', id, businessId);
         const input = ApprovalDecisionSchema.parse(body);
-        const perform = async () => ({ approval: (await ports.decide({ ...input, approvalId: id, businessId, ownerUserId })).approval });
+        const perform = async () => {
+          const { approval } = await ports.decide({ ...input, approvalId: id, businessId, ownerUserId });
+          // Issue #108: the decider's display name, read after the decision is recorded. Display only,
+          // so a failed lookup sends no name: it must not turn a recorded decision into an error.
+          const decidedByName = approval.decidedBy
+            ? (await ownerDisplayNames(db, businessId, [approval.decidedBy]).catch(() => new Map<string, string>())).get(approval.decidedBy) : undefined;
+          return { approval: { ...approval, ...(decidedByName ? { decidedByName } : {}) } };
+        };
         const key = request.headers['idempotency-key'];
         if (typeof key !== 'string') return perform();
         const cacheKey = canonicalJson({ ownerUserId, key });
