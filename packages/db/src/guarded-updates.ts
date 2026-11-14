@@ -65,6 +65,7 @@ export interface ExpiredApproval {
  * decided_by is taken from businesses.owner_id, so it is always the business's owner.
  * The payload, hash, bundle and expiry are frozen by the approval_requests_guard trigger.
  */
+/** @deprecated Direct SQL is unavailable to abos_app. Use runtimeDecideAndEnqueue. */
 export const DECIDE_APPROVAL_SQL = `
 update public.approval_requests r
 set    state = $3, decided_by = b.owner_id, decided_at = now(), decision_reason = $6
@@ -73,7 +74,7 @@ where  r.id = $1 and r.business_id = $2 and b.id = r.business_id and b.owner_id 
   and  r.payload_hash = $5 and r.state = 'PENDING' and r.expires_at > now()
 returning r.*`;
 
-/** @deprecated Use decideAndEnqueue in a caller-owned transaction. */
+/** @deprecated Use runtimeDecideAndEnqueue with abos_app. */
 export async function decideApproval(
   db: QueryExecutor,
   args: {
@@ -112,6 +113,7 @@ export type DecideAndEnqueueArgs = Parameters<typeof decideApproval>[1] & {
  * caller catches the error and later commits. No provider calls belong in this transaction.
  * Identical retries return existing rows; conflicting decisions or keys return null.
  */
+/** @deprecated Use runtimeDecideAndEnqueue with abos_app. */
 export async function decideAndEnqueue(
   tx: TransactionClient,
   args: DecideAndEnqueueArgs,
@@ -185,6 +187,7 @@ const CLAIMABLE = `
  * earlier step has not finished. attempts is checked to stay within 0 to 3, so a fourth claim
  * fails at the database.
  */
+/** @deprecated Use runtimeClaimExecution with abos_app. */
 export const CLAIM_EXECUTION_SQL = `
 update public.action_executions x
 set    status = 'RUNNING', attempts = x.attempts + 1, locked_by = $1, locked_at = now(),
@@ -192,6 +195,7 @@ set    status = 'RUNNING', attempts = x.attempts + 1, locked_by = $1, locked_at 
 where  x.id = $2 and ${CLAIMABLE}
 returning x.*`;
 
+/** @deprecated Use runtimeClaimExecution with abos_app. */
 export async function claimExecution(
   db: QueryExecutor,
   args: { executionId: string; workerId: string },
@@ -201,6 +205,7 @@ export async function claimExecution(
 }
 
 /** Claims the next claimable execution without blocking other workers (FOR UPDATE SKIP LOCKED). */
+/** @deprecated Use runtimeClaimNextExecution with abos_app. */
 export const CLAIM_NEXT_EXECUTION_SQL = `
 with next as (
   select x.id
@@ -217,6 +222,7 @@ from   next
 where  x.id = next.id and x.status = 'QUEUED'
 returning x.*`;
 
+/** @deprecated Use runtimeClaimNextExecution with abos_app. */
 export async function claimNextExecution(
   db: QueryExecutor,
   args: { workerId: string },
@@ -262,6 +268,7 @@ export async function recordWebhookEvent(
  * and its booking from AWAITING_OWNER_APPROVAL to EXPIRED. The caller writes approval.expired
  * and the status_changed events for the rows returned.
  */
+/** @deprecated Use runtimeExpireApprovals with abos_app. */
 export const EXPIRE_APPROVALS_SQL = `
 with expired as (
   update public.approval_requests
@@ -288,6 +295,7 @@ select e.id, e.business_id, e.bundle_type, e.subject_id,
 from   expired e
 order by e.id`;
 
+/** @deprecated Use runtimeExpireApprovals with abos_app. */
 export async function expireApprovals(db: QueryExecutor): Promise<ExpiredApproval[]> {
   const { rows } = await db.query(EXPIRE_APPROVALS_SQL);
   return rows as ExpiredApproval[];
