@@ -5,7 +5,8 @@
 // route path), parses only routing IDs, and inserts the row into webhook_events with
 // "on conflict do nothing". Only a newly inserted row is processed, after the response. Processing
 // reads the payment from Square afresh; the webhook body is never trusted for status or amount.
-import { PAYMENT_POLL_INTERVAL_MS, PAYMENT_POLL_DURATION_MS, WEBHOOK_ENDPOINTS, type Call, type MessageChannel } from '@abos/contracts';
+import { PAYMENT_POLL_INTERVAL_MS, PAYMENT_POLL_DURATION_MS, WEBHOOK_ENDPOINTS, type ActivityEvent, type Call, type MessageChannel } from '@abos/contracts';
+import { fulfillOrder, markOrderPaid, markOrderPaymentFailed } from '@abos/db';
 import type { FastifyPluginAsync } from 'fastify';
 import { verifyWebhookSignature } from '../adapters/square/index';
 import { unavailableDb, type QueryDb } from '../db/index';
@@ -42,6 +43,13 @@ export function toPaymentVerification(failed: readonly string[], status: string 
   return { verified: false, field: 'status', status: status ?? 'UNKNOWN' };
 }
 
+/** The payment.failed reason the webhook module built: Square's status, at most 200 characters. */
+function failedReason(events: ActivityEvent[]): string {
+  const failed = events.find((e) => e.type === 'payment.failed');
+  const reason = String((failed?.payload as { reason?: unknown } | undefined)?.reason ?? 'FAILED').slice(0, 200);
+  return reason || 'FAILED';
+}
+
 export type DbWebhooks = {
   plugin: FastifyPluginAsync;
   /** True when the routes verify and store events; false when they answer 503 (missing settings). */
@@ -58,7 +66,7 @@ export type DbWebhooks = {
 };
 
 export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, hooks: { afterJob?(): void } = {}): DbWebhooks {
-  const { env, db, providers, interim, log } = deps;
+  const { env, db, providers, log } = deps;
   const base = env.PUBLIC_SERVER_URL?.replace(/\/+$/, '');
   const missing = [
     ...(base ? [] : ['PUBLIC_SERVER_URL']),
@@ -72,11 +80,15 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
     const integration = await one(q, "select config from public.integrations where business_id = $1 and provider = 'square' order by alias limit 1", [order.businessId]);
     const configured = integration?.config && typeof integration.config === 'object' ? (integration.config as Record<string, unknown>).locationId : undefined;
     const locationId = typeof configured === 'string' && configured ? configured : providers.squareLocationId ?? '';
-    // Link creation time: the checkout step finished when the verified link was stored. Never updated_at.
-    const step = order.approvalId ? await one(q, "select finished_at from public.action_executions where approval_id = $1 and action_type = 'square.checkout.create' and status = 'SUCCEEDED'", [order.approvalId]) : undefined;
-    const linkReadyAt = step?.finished_at instanceof Date ? step.finished_at.toISOString() : typeof step?.finished_at === 'string' ? step.finished_at : '';
+    // Link creation time: orders.link_ready_at, set by save_checkout (or resolve_execution) when the
+    // verified link was stored. Never updated_at.
+    const ready = row.link_ready_at;
+    const linkReadyAt = ready instanceof Date ? ready.toISOString() : typeof ready === 'string' ? ready : '';
     return { ...order, locationId, linkReadyAt };
   }
+
+  // The routines refuse anything but sandbox; the server passes the configured environment as is.
+  const squareEnvironment = () => env.SQUARE_ENVIRONMENT ?? 'unset';
 
   const pending = new Set<string>();
   const done = new Set<string>();
@@ -94,8 +106,9 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
           await new Promise((r) => setTimeout(r, 200 * attempt));
         }
       }
+      // No routine records webhook_events.processed_at for abos_app (needs private.mark_webhook_processed),
+      // so the processed marker stays in this process; recovery re-runs rows after a restart (idempotent).
       done.add(webhookId);
-      await interim.markWebhookProcessed({ webhookId }).catch(() => false);
       // A payment that just verified has a Sheets job waiting: let the executor pick it up now.
       hooks.afterJob?.();
     } finally {
@@ -153,13 +166,21 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
           const order = row ? await paymentOrder(tx, row) : undefined;
           await fn({
             order,
-            markPaid: async ({ paymentId, events }) => {
-              if (!order) throw new Error('order not found');
-              await interim.markPaid(tx, { businessId: order.businessId, orderId: order.id, paymentId, amountMinor: order.totalMinor, currency: order.currency, events });
+            // Square's answer was verified against this order before these run (webhooks/square.ts). The
+            // routines check the observation again against the signed approval and the order, record the
+            // receipt, and write their own status, payment and sync events.
+            markPaid: async ({ paymentId }) => {
+              if (!order?.squareOrderId) throw new Error('order not found');
+              await markOrderPaid(tx, { businessId: order.businessId, orderId: order.id, paymentId, amountMinor: order.totalMinor, currency: order.currency,
+                squareOrderId: order.squareOrderId, locationId: order.locationId, paymentStatus: 'COMPLETED', environment: squareEnvironment() });
+              // SPEC 2.9 Fulfillment: the server sets FULFILLMENT_READY itself once the paid order is recorded.
+              await fulfillOrder(tx, { businessId: order.businessId, orderId: order.id });
             },
             markFailed: async ({ paymentId, events }) => {
-              if (!order) throw new Error('order not found');
-              await interim.markFailed(tx, { businessId: order.businessId, orderId: order.id, paymentId, events });
+              if (!order?.squareOrderId) throw new Error('order not found');
+              const reason = failedReason(events);
+              await markOrderPaymentFailed(tx, { businessId: order.businessId, orderId: order.id, paymentId, reason, amountMinor: order.totalMinor, currency: order.currency,
+                squareOrderId: order.squareOrderId, locationId: order.locationId, paymentStatus: reason === 'CANCELED' ? 'CANCELED' : 'FAILED', environment: squareEnvironment() });
             },
           });
         });
@@ -224,7 +245,7 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
   }
 
   async function recoverNow(): Promise<number> {
-    // processed_at cannot be written by abos_app yet (interim-db markWebhookProcessed), so every row of
+    // processed_at cannot be written by abos_app (no routine), so every row of
     // the payment window is a candidate; rows finished in this process are skipped. Re-running is safe:
     // a paid order is never paid twice and a call ends once.
     const since = new Date(deps.now().getTime() - PAYMENT_POLL_DURATION_MS);

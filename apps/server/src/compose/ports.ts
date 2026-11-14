@@ -5,7 +5,7 @@
 import {
   SLOT_CONFLICT_MAX_ALTERNATIVES, AgentSpecSchema, HoursKeySchema, OrderStatusSchema, HoursValueSchema, ReadableFactKindSchema, ServiceOfferingSchema, ToolFailureReasonSchema,
   type AvailabilitySlot, type CallEndReason, type CallStage, type CallStatus, type CatalogItem, type HoursKey, type HoursValue,
-  type JsonValue, type ServiceOffering, type ToolFailureReason, type ActionExecution, type ActivityEvent,
+  type JsonValue, type ServiceOffering, type ToolFailureReason,
 } from '@abos/contracts';
 import type { Db, QueryDb } from '../db/index';
 import { AppError } from '../errors';
@@ -310,33 +310,4 @@ export function dbVoiceEventsPort(db: Db, newId: (prefix: string) => string, now
     async webhookRejected({ businessId, payload }) { if (businessId) await write(businessId, 'webhook.rejected', payload, newId('req_')); },
     async guardrailRefused({ businessId, payload }) { await write(businessId, 'guardrail.refused', payload, payload.callId ?? newId('req_')); },
   };
-}
-
-// ---------- writes served by migration 0005 routines ----------
-
-/**
- * The state changes that need one checked database routine. `interim-db.ts` implements them with the
- * 0005 wrappers (and, where no routine exists yet, an INTERIM(0005) direct write); swapping a routine
- * changes only that file.
- */
-export interface InterimDb {
-  /**
-   * Every step RUNNING under a lease claimed before `olderThan` moves to NEEDS_REVIEW (never back to
-   * QUEUED), and its subject moves as a failed step would (checkout: RECOVERY_REQUIRED, calendar:
-   * RETRY_REQUIRED). Returns the steps it moved.
-   */
-  recoverStaleExecutions(input: { olderThan: Date }): Promise<ActionExecution[]>;
-  /**
-   * All or nothing, inside the caller's transaction (the order row is already locked): refuse unless
-   * PAYMENT_PENDING or PAYMENT_FAILED; save the payment ID; PAID_VERIFIED; enqueue the one Sheets job
-   * and write sync.queued; FULFILLMENT_READY; append `events`.
-   */
-  markPaid(tx: QueryDb, input: { businessId: string; orderId: string; paymentId: string; amountMinor: number; currency: string; events: ActivityEvent[] }): Promise<void>;
-  /** All or nothing: refuse unless PAYMENT_PENDING; PAYMENT_FAILED; append `events`. */
-  markFailed(tx: QueryDb, input: { businessId: string; orderId: string; paymentId: string; events: ActivityEvent[] }): Promise<void>;
-  /**
-   * Marks a stored webhook row processed. Returns false when the role cannot record it; the caller then
-   * keeps the row pending in memory and recovery re-runs it after a restart (processing is idempotent).
-   */
-  markWebhookProcessed(input: { webhookId: string; error?: string | undefined }): Promise<boolean>;
 }

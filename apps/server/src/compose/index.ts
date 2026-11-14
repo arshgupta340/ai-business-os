@@ -28,11 +28,10 @@ import { createRealToolset, type FactsSnapshot, type RealToolset, type RealTools
 import type { VoicePluginOptions } from '../voice/types';
 import {
   calendarAvailabilityPort, dbCallsPort, dbVoiceEventsPort, dbCatalogPort, dbFactsPort, dbLiveAgentPort, dbOrderStatusPort, engineProposalPort, squareQuotePort,
-  type CallsStore, type InterimDb,
+  type CallsStore,
 } from './ports';
 import { buildProviders, type Providers } from './providers';
 import { createDbExecutor } from './executor';
-import { createInterimDb } from './interim-db';
 import { createDbWebhooks, type DbWebhooks } from './webhooks';
 import { createHealthMonitor, type HealthMonitor } from './health';
 import { createTelemetry, type TelemetryPluginOptions } from '../telemetry/index';
@@ -55,8 +54,6 @@ export interface ComposeOptions {
   newId?: (prefix: string) => string;
   /** Defaults to the database executor (executor.ts) when a database is present. */
   executor?: ExecutorFactory;
-  /** Writes waiting for migration 0005. Defaults to interim-db.ts. */
-  interim?: InterimDb;
   // PLUG-IN B-13: pass the webhooks plugin factory here, or replace `notWiredWebhooks` below.
   webhooks?: WebhooksFactory;
   log?: SeamDeps['log'];
@@ -88,7 +85,6 @@ export interface ComposedServer {
   webhooksPlugin: FastifyPluginAsync;
   /** The database webhooks wiring, when it is the one in use (jobs, recovery, reconciliation). */
   webhooks: DbWebhooks | undefined;
-  interim: InterimDb;
   /** Integration health: configuration plus cached read-only probe results (API 3.11). */
   health: HealthMonitor;
   /** GET /api/telemetry (B-30) and the recorder modules may record into. */
@@ -142,9 +138,8 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   };
   const calls = dbCallsPort(db, newId);
 
-  const interim = options.interim ?? createInterimDb(db, { newId, now });
-  const seamDeps: SeamDeps = { env, db, engine, providers, interim, now, newId, log };
-  const defaultExecutor: ExecutorFactory = hasDb ? (deps) => createDbExecutor(deps, { interim: deps.interim }) : notWiredExecutor;
+  const seamDeps: SeamDeps = { env, db, engine, providers, now, newId, log };
+  const defaultExecutor: ExecutorFactory = hasDb ? (deps) => createDbExecutor(deps) : notWiredExecutor;
   const executor = (options.executor ?? defaultExecutor)(seamDeps);
   // Provider webhooks and payment reconciliation (B-13). Without a database or the signature settings
   // the routes keep the 503 default, which reads and stores nothing.
@@ -233,7 +228,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
 
   let sweep: ReturnType<typeof setInterval> | undefined;
   return {
-    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, interim, telemetry: telemetryOptions, health, now, newId,
+    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, telemetry: telemetryOptions, health, now, newId,
     async close() { if (pool) await pool.end(); },
     startJobs() {
       if (!hasDb || sweep) return;

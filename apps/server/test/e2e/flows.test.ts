@@ -328,7 +328,7 @@ describe('an executor that crashes between claim and finish', () => {
     const { orderId, approvalId } = await pizzaOrder(w);
     await approve(w, PIZZA, approvalId);
     const c = w.app.composed;
-    const deps: SeamDeps = { env: c.env, db: c.db, engine: c.engine, providers: c.providers, interim: c.interim, now: c.now, newId: c.newId, log: silentLog };
+    const deps: SeamDeps = { env: c.env, db: c.db, engine: c.engine, providers: c.providers, now: c.now, newId: c.newId, log: silentLog };
 
     // Worker A claims the checkout step, sends CreatePaymentLink, and never returns (the process died).
     const hanging = fakeSquareClient();
@@ -336,19 +336,19 @@ describe('an executor that crashes between claim and finish', () => {
     const sent = new Promise<void>((resolve) => { created = resolve; });
     hanging.client.checkout.paymentLinks.create = async () => { hanging.writes.push('checkout.paymentLinks.create'); created(); return new Promise(() => {}); };
     const crashed = createDbExecutor({ ...deps, providers: { ...c.providers, square: createSquareAdapterForTest(hanging.client, { locationId: LOCATION_ID, environment: 'sandbox', now: () => new Date() }) } },
-      { workerId: 'worker-crashed', interim: c.interim });
+      { workerId: 'worker-crashed' });
     void crashed.tick();
     await sent;
     expect((await steps(w, approvalId)).map((x) => x.status)).toEqual(['RUNNING', 'QUEUED', 'QUEUED']);
     expect((await order(w, orderId)).status).toBe('CREATING_CHECKOUT');
 
     // Worker B starts later. Before the lease is stale it leaves the step alone.
-    const healthy = createDbExecutor(deps, { workerId: 'worker-b', interim: c.interim });
+    const healthy = createDbExecutor(deps, { workerId: 'worker-b' });
     await healthy.drain();
     expect((await steps(w, approvalId))[0]!.status).toBe('RUNNING');
     // Past the stale window the step goes to review, never back to QUEUED, and the order to RECOVERY_REQUIRED.
     // Test-only time travel on the database clock: the lease was claimed 16 minutes ago.
-    await w.t.admin((q) => q.query("update public.action_executions set locked_at = locked_at - interval '16 minutes' where approval_id = $1 and status = 'RUNNING'", [approvalId]));
+    await w.t.admin((q) => q.query("update public.action_executions set locked_at = locked_at - interval '16 minutes', lease_deadline = lease_deadline - interval '16 minutes' where approval_id = $1 and status = 'RUNNING'", [approvalId]));
     await healthy.drain();
     expect((await steps(w, approvalId)).map((x) => x.status)).toEqual(['NEEDS_REVIEW', 'QUEUED', 'QUEUED']);
     expect((await order(w, orderId)).status).toBe('RECOVERY_REQUIRED');
@@ -356,6 +356,7 @@ describe('an executor that crashes between claim and finish', () => {
     expect(hanging.writes).toEqual(['checkout.paymentLinks.create']);
     expect(w.squareWrites).toEqual([]);
     expect(w.messageSends).toBe(0);
-    expect(await countRows(w, "select count(*)::int as n from activity_events where correlation_id = $1 and type = 'execution.failed' and payload->>'nextStatus' = 'NEEDS_REVIEW'", [approvalId])).toBe(1);
+    // recover_stale_executions writes the one execution.failed event (correlated to the call, like every routine event).
+    expect(await countRows(w, "select count(*)::int as n from activity_events where type = 'execution.failed' and payload->>'nextStatus' = 'NEEDS_REVIEW' and payload->>'executionId' = $1", [(await steps(w, approvalId))[0]!.id])).toBe(1);
   });
 });

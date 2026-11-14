@@ -167,13 +167,14 @@ export async function createCalendarEvent(c: HandlerContext): Promise<StepOutcom
 export async function sendBookingConfirmation(c: HandlerContext): Promise<StepOutcome> {
   const { booking, approved } = await bookingFor(c);
   if (approved.messageChannel === 'qr_only') return qrOnlyClaimed();
-  if (!booking.googleEventId || booking.status !== 'RECHECKING_SLOT') return failed('Verified calendar event is missing');
+  // verify_booking (0005) stores the event and moves the booking to BOOKED_VERIFIED in the calendar step.
+  if (!booking.googleEventId || (booking.status !== 'RECHECKING_SLOT' && booking.status !== 'BOOKED_VERIFIED')) return failed('Verified calendar event is missing');
   return sendMessage(c, booking, approved.messageRecipient, () => c.deps.templates.booking({ booking, approved }), false);
 }
 
 export async function recordBooking(c: HandlerContext): Promise<StepOutcome> {
   const { booking } = await bookingFor(c);
-  if (!booking.googleEventId || booking.status !== 'RECHECKING_SLOT') return failed('Verified calendar event is missing');
+  if (!booking.googleEventId || (booking.status !== 'RECHECKING_SLOT' && booking.status !== 'BOOKED_VERIFIED')) return failed('Verified calendar event is missing');
   return { status: 'SUCCEEDED', apply: (subjects) => subjects.moveBooking(booking.businessId, booking.id, 'BOOKED_VERIFIED') };
 }
 
