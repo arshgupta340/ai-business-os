@@ -33,10 +33,10 @@ async function approvedOrder(target: PGlite, messageChannel: string) {
 }
 
 describe('0007 agentphone channel', () => {
-  it('follows 0006, is followed only by 0008, and applies on top of 0006 without touching existing rows', async () => {
+  it('follows 0006, is followed only by 0008 and 0009, and applies on top of 0006 without touching existing rows', async () => {
     const names = readMigrations().map((f) => f.name);
     expect(names[6]).toBe('0007_agentphone_channel.sql');
-    expect(names.slice(7)).toEqual(['0008_owner_recovery.sql']);
+    expect(names.slice(7)).toEqual(['0008_owner_recovery.sql', '0009_demo_orders.sql']);
     const fresh = await createSupabaseLikeDb();
     try {
       await fresh.exec('set role supabase_postgres');
@@ -45,7 +45,7 @@ describe('0007 agentphone channel', () => {
       await as(fresh, 'abos_app', () => insert(fresh, 'webhook_events', { source: 'square', provider_event_id: 'ev-' + uniq(), event_type: 'payment.updated' }));
       const before = (await fresh.query<{ n: number }>('select count(*)::int n from public.webhook_events')).rows[0]!.n;
       await fresh.exec('set role supabase_postgres');
-      expect((await applyMigrations(migrationDb(fresh))).applied).toEqual(['0007_agentphone_channel.sql', '0008_owner_recovery.sql']);
+      expect((await applyMigrations(migrationDb(fresh))).applied).toEqual(['0007_agentphone_channel.sql', '0008_owner_recovery.sql', '0009_demo_orders.sql']);
       await fresh.exec('reset role');
       expect((await fresh.query<{ n: number }>('select count(*)::int n from public.webhook_events')).rows[0]!.n).toBe(before);
     } finally { await fresh.close(); }

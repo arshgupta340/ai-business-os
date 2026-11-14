@@ -14,6 +14,9 @@ export const TRUNCATED_TABLES = [
   'webhook_events', 'activity_events', 'fact_conflicts', 'builder_sessions', 'live_agent', 'agent_versions', 'agents',
 ] as const;
 
+/** Tables from later migrations, truncated only when present: 0008 recovery decisions, 0009 demo tables (D-13). */
+export const OPTIONAL_TRUNCATED_TABLES = ['recovery_decisions', 'demo_messages', 'demo_orders'] as const;
+
 export class ResetRefusedError extends Error {
   constructor(message: string) {
     super(message);
@@ -44,10 +47,14 @@ export async function runReset(db: SeedDb, opts: ResetOptions): Promise<ResetSum
   }
   const before = await countRows(db);
   const world = await inTransaction(db, async () => {
-    // Migration 0008's recovery_decisions references action_executions, so it is emptied with them. It is
-    // named only when it exists, so the reset still works on a database without 0008.
-    const recovery = (await db.query<{ t: string | null }>("select to_regclass('public.recovery_decisions')::text as t")).rows[0]?.t ? ['recovery_decisions'] : [];
-    await db.query(`truncate table ${[...recovery, ...TRUNCATED_TABLES].map((t) => `public.${t}`).join(', ')}`);
+    // Migration 0008's recovery_decisions references action_executions, and 0009's demo tables (D-13)
+    // reference orders and calls, so they are emptied with them. Each is named only when it exists, so the
+    // reset still works on a database without 0008 or 0009.
+    const optional: string[] = [];
+    for (const t of OPTIONAL_TRUNCATED_TABLES) {
+      if ((await db.query<{ t: string | null }>('select to_regclass($1)::text as t', [`public.${t}`])).rows[0]?.t) optional.push(t);
+    }
+    await db.query(`truncate table ${[...optional, ...TRUNCATED_TABLES].map((t) => `public.${t}`).join(', ')}`);
     // Drafts, owner edits and upload facts go; the seeded rows are rewritten to verified below.
     await db.query('delete from public.business_facts where not (id = any($1::text[]))', [[...SEEDED_FACT_IDS]]);
     await db.query('delete from public.files');

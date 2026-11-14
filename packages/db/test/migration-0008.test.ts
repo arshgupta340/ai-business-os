@@ -419,7 +419,8 @@ describe('0008 privileges', () => {
 
 describe('0008 on a database that already has 0001 to 0007', () => {
   const NAME = '0008_owner_recovery.sql';
-  const files = readMigrations();
+  // 0009 (demo tables) follows; this block applies the files up to and including 0008 only.
+  const files = readMigrations().filter((f) => f.name <= NAME);
   const snapshot = async (target: PGlite) => {
     const q = async (sql: string) => (await target.query<{ k: string; v: string }>(sql)).rows.map((r) => `${r.k} = ${r.v}`);
     return [
@@ -445,7 +446,7 @@ describe('0008 on a database that already has 0001 to 0007', () => {
       const rows = `select (select count(*)::int from public.activity_events) e, (select count(*)::int from public.message_dispatches) d,
         (select count(*)::int from public.action_executions) x`;
       const rowsBefore = (await fresh.query(rows)).rows[0];
-      expect((await as(fresh, 'supabase_postgres', () => applyMigrations(migrationDb(fresh)))).applied).toEqual([NAME]);
+      expect((await as(fresh, 'supabase_postgres', () => applyMigrations(migrationDb(fresh), files))).applied).toEqual([NAME]);
       const after = await snapshot(fresh);
       expect(before.filter((x) => !after.includes(x))).toEqual([]);
       const added = after.filter((x) => !before.includes(x)).map((x) => x.split(' = ')[0]!);
