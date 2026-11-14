@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node --import tsx src/server.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "probe": "node --import tsx src/probe-openai.ts"
   },
   "dependencies": {
     "@fastify/formbody": "^8.0.2",
