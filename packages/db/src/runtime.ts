@@ -99,6 +99,48 @@ export async function runtimeExpireApprovals(db: QueryExecutor, businessId: stri
   return (await db.query('select * from private.expire_approvals($1)', [businessId])).rows as ExpiredApproval[];
 }
 
+export interface OrderRow {
+  id: string; business_id: string; call_id: string; status: string; total_minor: number; currency: string;
+  approval_id: string | null; square_order_id: string | null; square_payment_link_id: string | null;
+  checkout_url: string | null; square_payment_id: string | null;
+  [column: string]: unknown;
+}
+export interface MarkOrderPaidResult { order: JsonRow<OrderRow>; syncJob: JsonRow<SyncJobRow> }
+
+/**
+ * Square verified a COMPLETED payment. Checks amount and currency against the signed approval and the
+ * order, records the payment ID, moves PAYMENT_PENDING or PAYMENT_FAILED to PAID_VERIFIED and enqueues
+ * the Sheets job, with order.status_changed, payment.verified and sync.queued events. A repeat with the
+ * same payment ID changes nothing and returns the same result; a different payment ID is refused.
+ * It does not move the order to FULFILLMENT_READY.
+ */
+export async function markOrderPaid(db: QueryExecutor, args: {
+  businessId: string; orderId: string; paymentId: string; amountMinor: number; currency: string;
+}): Promise<MarkOrderPaidResult> {
+  const result = await row<{ result: MarkOrderPaidResult }>(db,
+    'select private.mark_order_paid($1,$2,$3,$4,$5) as result',
+    [args.businessId,args.orderId,args.paymentId,args.amountMinor,args.currency]);
+  return result.result;
+}
+/** Square reported a final failed payment. PAYMENT_PENDING to PAYMENT_FAILED; a repeat is a no-op; paid orders are refused. */
+export function markOrderPaymentFailed(db: QueryExecutor, args: {
+  businessId: string; orderId: string; paymentId: string; reason: string;
+}): Promise<OrderRow> {
+  return row(db, 'select * from private.mark_order_payment_failed($1,$2,$3,$4)',
+    [args.businessId,args.orderId,args.paymentId,args.reason]);
+}
+/**
+ * Moves every RUNNING step in the business whose lease is older than staleAfterMs (database clock,
+ * at least 60000) to NEEDS_REVIEW, moving the subject as a failed step would. Returns the moved steps.
+ */
+export async function recoverStaleExecutions(db: QueryExecutor, args: {
+  businessId: string; staleAfterMs: number;
+}): Promise<ExecutionRow[]> {
+  if (!Number.isFinite(args.staleAfterMs)) throw new RangeError('staleAfterMs must be finite');
+  return (await db.query("select * from private.recover_stale_executions($1, $2::double precision * interval '1 millisecond')",
+    [args.businessId,args.staleAfterMs])).rows as ExecutionRow[];
+}
+
 /**
  * The PostgreSQL SCRAM-SHA-256 verifier for a password (RFC 7677, as stored in pg_authid).
  * Valid for printable ASCII passwords, which SASLprep leaves unchanged.

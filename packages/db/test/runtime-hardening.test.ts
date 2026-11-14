@@ -50,7 +50,7 @@ describe('Supabase-like deployment (non-superuser migration owner)', () => {
       const { migrationDb } = await import('./helpers');
       const again = await applyMigrations(migrationDb(db));
       expect(again.applied).toEqual([]);
-      expect(again.skipped).toHaveLength(4);
+      expect(again.skipped).toHaveLength(5);
     } finally { await db.exec('reset role'); }
   });
 

@@ -18,6 +18,7 @@ The runner checks out one client, takes an advisory lock, applies each new file 
 | `0002_core_tables.sql` | Application tables, RLS, constraints and existing ALWAYS guards |
 | `0003_realtime.sql` | Activity publication |
 | `0004_runtime_role_and_routines.sql` | Forward migration adding the restricted runtime role, routines and retention guards |
+| `0005_payments_and_stale_leases.sql` | `agents.spec_revision`, unique `orders.square_payment_id`, payment outcome routines and stale lease recovery |
 
 Files 0001 through 0003 remain unchanged and may already be applied. The runtime boundary is available only after 0004 commits. Its SQL is applied once; replay safety comes from the checksum runner, rather than running its CREATE statements twice.
 
@@ -58,10 +59,13 @@ Every runtime entry point lives in `private`, is SECURITY DEFINER owned by the m
 | private.claim_sync_job | claimSyncJob | Revalidates eligibility, due time and five-attempt limit, then acquires the worker lease |
 | private.finish_sync_job | finishSyncJob | Requires matching RUNNING worker and attempt. Allows DONE with provider reference, FAILED, or RETRYING within the limit |
 | private.expire_approvals | runtimeExpireApprovals | Uses one clock_timestamp cutoff per sweep and supplied business. Updates subjects and audit in the same statement |
+| private.mark_order_paid (0005) | markOrderPaid | Locks the order. Requires its APPROVED order bundle, PAYMENT_PENDING or PAYMENT_FAILED, and amount and currency equal to the signed material and the row. Records the payment ID, moves to PAID_VERIFIED, enqueues Sheets and audits. Same payment ID repeats unchanged; a different one is refused |
+| private.mark_order_payment_failed (0005) | markOrderPaymentFailed | PAYMENT_PENDING to PAYMENT_FAILED with audit. Repeat is a no-op; paid and other states are refused |
+| private.recover_stale_executions (0005) | recoverStaleExecutions | Interval of at least one minute. Moves stale RUNNING steps to NEEDS_REVIEW, never QUEUED, and moves the checkout or calendar subject as a failed step would |
 
 Every execution key is the hex SHA-256 of `businessId:subjectId:actionType:approvalId`, derived in the database. Dispatches reuse the message execution key. Sheets jobs derive the equivalent Sheets action key. No routine accepts caller-chosen keys or recipient overrides. All material field sets come from CONTRACTS section 4 because `packages/contracts/src/bundles.ts` and `hash.ts` are absent in this checkout.
 
-A lease has no timeout. If a worker dies while a step is RUNNING, the step stays RUNNING until that worker ID finishes it with the same attempt number, or an operator reviews it. An automatic reclaim could repeat a provider write.
+A lease has no timeout. If a worker dies while a step is RUNNING, the step stays RUNNING until that worker ID finishes it, or `recover_stale_executions` (0005) moves it to NEEDS_REVIEW for an operator. Nothing reclaims it to QUEUED, because that could repeat a provider write. The 0005 routines are granted to `abos_app` only, not `service_role`.
 
 Display-only payload extras are excluded from the material projection. The server must serialize canonical JSON with recursively sorted keys, no whitespace and ordered arrays per CONTRACTS. The database compares parsed material and hashes the supplied bytes; it does not replace that serializer with JSONB text formatting. Executors must consume the stored signed material. Current stored material is revalidated at creation, decision and claim. Message recipient and channel come from that immutable material. The database cannot prove rendered provider message bytes from a body hash, validate actual provider responses from a reference string, verify webhook signatures, or establish human authentication. Those remain backend responsibilities.
 
