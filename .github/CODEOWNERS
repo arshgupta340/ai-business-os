@@ -1,0 +1,8 @@
+# Directory ownership. See docs/WORKPLAN.md section 1 and AGENTS.md.
+# GitHub does not enforce this on a private repo on the free plan. It records the agreement.
+
+*                              @arshgupta340
+/apps/web/                     @sainakakkar2006
+/apps/server/src/builder/      @sainakakkar2006
+/packages/contracts/           @arshgupta340 @sainakakkar2006
+/docs/                         @arshgupta340 @sainakakkar2006

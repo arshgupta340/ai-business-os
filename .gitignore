@@ -1,0 +1,30 @@
+# dependencies and builds
+node_modules/
+.next/
+dist/
+build/
+out/
+.turbo/
+.vercel/
+coverage/
+
+# secrets: never commit
+.env
+.env.*
+!.env.example
+*service-account*.json
+*credentials*.json
+*.pem
+*.key
+
+# local tooling
+supabase/.temp/
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# per-person Claude settings
+.claude/settings.local.json

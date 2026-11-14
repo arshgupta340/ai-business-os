@@ -1,0 +1,1504 @@
+{
+  "phases": {
+    "A": "A: 0 to 2h, spikes and contract freeze",
+    "B": "B: 2 to 8h, foundation",
+    "C": "C: 8 to 16h, core flow",
+    "D": "D: 16 to 28h, phone to paid",
+    "E": "E: 28 to 40h, second agent and hardening",
+    "F": "F: 40 to 48h, freeze and rehearse"
+  },
+  "tasks": [
+    {
+      "id": "S-01",
+      "title": "Scaffold workspaces, apps and CI",
+      "owner": "arsh",
+      "lane": "shared",
+      "phase": "A",
+      "deps": [],
+      "size": "M",
+      "tier": "must",
+      "acs": [],
+      "human": false,
+      "done": [
+        "npm workspaces at the root with apps/web (adopting the app from U-01 if it already exists), apps/server, packages/contracts, packages/db",
+        "Shared tsconfig, tsx and vitest run from the root: npm run typecheck and npm test pass",
+        "GitHub Actions runs typecheck and tests on every pull request",
+        "apps/server starts and answers GET /health; a builder plugin stub is registered from apps/server/src/builder so Saina never edits the server entry file"
+      ],
+      "read": [
+        "docs/SPEC.md section 3"
+      ],
+      "paths": [
+        "package.json",
+        "tsconfig.base.json",
+        ".github/workflows/",
+        "apps/server/src/index.ts",
+        "apps/*/package.json",
+        "packages/*/package.json"
+      ]
+    },
+    {
+      "id": "S-02",
+      "title": "Contracts package: Zod schemas from CONTRACTS.md",
+      "owner": "arsh",
+      "lane": "shared",
+      "phase": "A",
+      "deps": [
+        "S-01"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [],
+      "human": false,
+      "contract": true,
+      "done": [
+        "Every schema, enum, state machine and activity event in docs/CONTRACTS.md exists as Zod in packages/contracts and is exported",
+        "The capability registry and the ToolHandler interface are exported",
+        "Saina has reviewed the pull request and confirmed each screen has the fields it needs",
+        "From this merge on, contract changes are additive only"
+      ],
+      "read": [
+        "docs/CONTRACTS.md",
+        "docs/API.md"
+      ],
+      "paths": [
+        "packages/contracts/src/"
+      ]
+    },
+    {
+      "id": "S-03",
+      "title": "Fixtures, mock timelines and mock toolset",
+      "owner": "arsh",
+      "lane": "shared",
+      "phase": "A",
+      "deps": [
+        "S-02"
+      ],
+      "size": "S",
+      "tier": "must",
+      "acs": [],
+      "human": false,
+      "contract": true,
+      "done": [
+        "packages/contracts/fixtures holds the two seed businesses, the pizza catalog, barbershop services and sample approvals, orders and bookings",
+        "Two scripted activity timelines exist: a pizza order from call.started to payment.verified, and a booking to booking.verified",
+        "A mock toolset implements every phone agent tool against fixtures with no network calls",
+        "Every fixture parses against its Zod schema in a test"
+      ],
+      "read": [
+        "docs/CONTRACTS.md section on fixtures"
+      ],
+      "paths": [
+        "packages/contracts/fixtures/",
+        "apps/server/src/tools/mock/"
+      ]
+    },
+    {
+      "id": "S-04",
+      "title": "Integration 1: UI on the real staging API",
+      "owner": "both",
+      "lane": "shared",
+      "phase": "C",
+      "deps": [
+        "B-08",
+        "B-09",
+        "B-11",
+        "U-02",
+        "U-04"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [],
+      "human": false,
+      "done": [
+        "With NEXT_PUBLIC_MOCK off, sign-in, Overview, Approvals and Live operations work against the staging server",
+        "A typed test order reaches the approval inbox, and approving it runs the order bundle",
+        "A paid sandbox webhook moves the order to PAID_VERIFIED on the dashboard without a page reload",
+        "Every contract mismatch found is fixed in a pull request labelled contract"
+      ],
+      "read": [
+        "docs/WORKPLAN.md timeline"
+      ],
+      "paths": [
+        "docs/notes-arsh.md",
+        "docs/notes-saina.md"
+      ]
+    },
+    {
+      "id": "S-05",
+      "title": "Integration 2: full run with phone, booking and Sheets",
+      "owner": "both",
+      "lane": "shared",
+      "phase": "E",
+      "deps": [
+        "S-04",
+        "B-15",
+        "B-17",
+        "B-19",
+        "B-20",
+        "B-25"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [],
+      "human": true,
+      "done": [
+        "One real phone call goes from order to owner approval to checkout link to verified sandbox payment, watched on the dashboard",
+        "A real phone call to the barbershop agent ends in an approved booking and a real Calendar event",
+        "The opening-hours edit changes what the next call hears",
+        "A paid order and a booking each appear as one row in the sheet",
+        "This is the first full rehearsal: every failure is filed as an issue"
+      ],
+      "read": [
+        "docs/FLOWS.md"
+      ],
+      "paths": [
+        "docs/notes-arsh.md",
+        "docs/notes-saina.md"
+      ]
+    },
+    {
+      "id": "S-06",
+      "title": "Rehearsals, runbook, security notes and backup video",
+      "owner": "both",
+      "lane": "shared",
+      "phase": "F",
+      "deps": [
+        "S-05",
+        "S-07",
+        "U-14"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [],
+      "human": true,
+      "done": [
+        "Three complete rehearsals pass in a row, including one with a declined card and one with a prompt-injection refusal",
+        "DEMO_RUNBOOK.md, SECURITY_NOTES.md, IMPLEMENTATION_NOTES.md and a feature matrix of real versus mocked are written",
+        "A backup video is recorded and clearly labelled as a recording",
+        "Code freeze held from hour 40: bug fixes only"
+      ],
+      "read": [
+        "docs/PRD.md sections 17, 19, 23"
+      ],
+      "paths": [
+        "DEMO_RUNBOOK.md",
+        "SECURITY_NOTES.md",
+        "IMPLEMENTATION_NOTES.md",
+        "docs/FEATURE-MATRIX.md"
+      ]
+    },
+    {
+      "id": "S-07",
+      "title": "Automated end-to-end suite through simulated calls",
+      "owner": "arsh",
+      "lane": "shared",
+      "phase": "D",
+      "deps": [
+        "B-31",
+        "B-13"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [
+        "AC-07",
+        "AC-08",
+        "AC-09",
+        "AC-12"
+      ],
+      "human": false,
+      "paths": [
+        "apps/server/test/e2e/"
+      ],
+      "done": [
+        "One command runs the pizza flow through a simulated call against the Square sandbox: quote, proposal, approval, payment link, and a sandbox payment made through the API",
+        "The same suite covers reject, expiry and declined payment",
+        "The booking flow runs to a real Calendar event and cleans up after itself",
+        "The suite runs in CI with sandbox keys stored as repository secrets, or is documented as a local-only run if secrets are not added"
+      ],
+      "read": [
+        "docs/FLOWS.md",
+        "docs/API.md sim-call"
+      ]
+    },
+    {
+      "id": "B-01",
+      "title": "Provider accounts and keys",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "A",
+      "deps": [],
+      "size": "M",
+      "tier": "must",
+      "acs": [],
+      "human": true,
+      "done": [
+        "Every item under 'Done when' in docs/SETUP-ACCOUNTS.md is checked",
+        "The exact OpenAI model IDs are confirmed and set in the environment",
+        "Saina has the three public values she needs",
+        "No secret is in git"
+      ],
+      "read": [
+        "docs/SETUP-ACCOUNTS.md"
+      ],
+      "paths": []
+    },
+    {
+      "id": "B-02",
+      "title": "Spike: Square catalog, quote, payment link, paid webhook",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "A",
+      "deps": [
+        "B-01"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [
+        "AC-05",
+        "AC-09",
+        "AC-11"
+      ],
+      "human": true,
+      "done": [
+        "A script seeds two pizzas with sizes, a topping modifier list and a sales tax into the sandbox catalog",
+        "CalculateOrder returns a total with tax for a cart with a modifier, and the same cart through CreatePaymentLink gives the same total",
+        "The link is opened on a second device and paid with the test card",
+        "The payment webhook arrives, its signature verifies, and the payment reads back as COMPLETED with the right order ID and amount",
+        "Go or no-go is written in docs/notes-arsh.md. If links cannot be paid in sandbox, the CreateOrder plus CreatePayment fallback is proven instead"
+      ],
+      "read": [
+        "docs/SPEC.md section 4",
+        "docs/FLOWS.md Flow B"
+      ],
+      "paths": [
+        "scripts/spikes/square/"
+      ]
+    },
+    {
+      "id": "B-03",
+      "title": "Spike: phone call reaches the voice model",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "A",
+      "deps": [
+        "B-01"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [],
+      "human": true,
+      "done": [
+        "A call to the Twilio number is answered by the OpenAI Realtime model through a Media Stream relay on our server",
+        "The model calls one test tool and speaks the result",
+        "Interrupting the model stops its speech (barge-in works)",
+        "Time to first audio is measured and written in docs/notes-arsh.md with a go or no-go"
+      ],
+      "read": [
+        "docs/SPEC.md section 4",
+        "docs/FLOWS.md voice worker notes"
+      ],
+      "paths": [
+        "scripts/spikes/voice/"
+      ]
+    },
+    {
+      "id": "B-04",
+      "title": "Spike: choose and prove the message channel",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "A",
+      "deps": [
+        "B-01",
+        "B-02"
+      ],
+      "size": "S",
+      "tier": "must",
+      "acs": [],
+      "human": true,
+      "done": [
+        "A real Square sandbox link is sent to a team phone, trying Surge first, then the Android phone as sender, then WhatsApp sandbox",
+        "The first channel that delivers the link intact is recorded in docs/SPEC.md and set as MESSAGE_CHANNEL",
+        "Surge's 25-message cap is tracked if Surge is chosen",
+        "If nothing delivers, the channel is qr_only and that is stated plainly"
+      ],
+      "read": [
+        "docs/GAPS.md G-01",
+        "docs/SETUP-ACCOUNTS.md step 5"
+      ],
+      "paths": [
+        "scripts/spikes/message/"
+      ]
+    },
+    {
+      "id": "B-05",
+      "title": "Spike: Google Calendar and Sheets with a service account",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "A",
+      "deps": [
+        "B-01"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [],
+      "human": true,
+      "done": [
+        "Free/busy is read for the demo calendar",
+        "One test event is created and then deleted",
+        "One row is appended to the demo sheet"
+      ],
+      "read": [
+        "docs/SETUP-ACCOUNTS.md step 6"
+      ],
+      "paths": [
+        "scripts/spikes/google/"
+      ]
+    },
+    {
+      "id": "B-06",
+      "title": "Database migrations, row-level security, realtime",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "B",
+      "deps": [
+        "S-02"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [
+        "AC-17"
+      ],
+      "human": false,
+      "done": [
+        "Every table in docs/DATA-MODEL.md exists through migrations in packages/db",
+        "Row-level security lets an owner read only their own businesses' rows",
+        "activity_events is in the realtime publication and is append only",
+        "A test proves a second owner cannot read the first owner's rows"
+      ],
+      "read": [
+        "docs/DATA-MODEL.md"
+      ],
+      "paths": [
+        "packages/db/migrations/"
+      ]
+    },
+    {
+      "id": "B-07",
+      "title": "Policy and approval engine with activity events",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "B",
+      "deps": [
+        "B-06"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [
+        "AC-07",
+        "AC-08",
+        "AC-10"
+      ],
+      "human": false,
+      "done": [
+        "Creating a proposal stores the payload, its hash and an approval request that expires in 10 minutes, and makes no external call",
+        "A decision succeeds once only: wrong hash, expired, or already decided are all refused",
+        "Every side effect passes one policy check: principal, business, agent version, capability allowlist, approval state, payload hash, expiry",
+        "Every transition writes an activity event with a correlation ID",
+        "Unit tests cover reject, expire, double approve and changed payload"
+      ],
+      "read": [
+        "docs/CONTRACTS.md approvals and state machines",
+        "docs/PRD.md sections 13 and 14"
+      ],
+      "paths": [
+        "apps/server/src/policy/"
+      ]
+    },
+    {
+      "id": "B-08",
+      "title": "Server skeleton, auth and core REST routes",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "B",
+      "deps": [
+        "B-06"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [],
+      "human": false,
+      "done": [
+        "The server verifies the Supabase JWT and checks business ownership on every business-scoped route",
+        "Routes for businesses, facts, approvals, orders, bookings, activity, integrations health and live agent match docs/API.md",
+        "Errors use the standard envelope with a correlation ID",
+        "Request and response bodies are validated with the contracts package"
+      ],
+      "read": [
+        "docs/API.md"
+      ],
+      "paths": [
+        "apps/server/src/api/",
+        "apps/server/src/auth/"
+      ]
+    },
+    {
+      "id": "B-09",
+      "title": "Staging deploy and webhook registration",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "B",
+      "deps": [
+        "B-01",
+        "B-08"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [],
+      "human": true,
+      "done": [
+        "The server runs on a host with a URL that does not change",
+        "The Square webhook subscription and the Twilio voice webhook point at that URL",
+        "GET /api/integrations/health is green for every provider that has keys",
+        "Saina has the staging API URL"
+      ],
+      "read": [
+        "docs/SETUP-ACCOUNTS.md step 7"
+      ],
+      "paths": [
+        "apps/server/deploy/"
+      ]
+    },
+    {
+      "id": "B-10",
+      "title": "Seed and reset scripts",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "B",
+      "deps": [
+        "B-06",
+        "B-02"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [],
+      "human": false,
+      "done": [
+        "One command seeds the owner profile, both businesses, verified hours and policies, the capability registry and the Square sandbox catalog",
+        "One command resets orders, bookings, approvals, calls and activity for a clean rehearsal and keeps the seeds",
+        "Both commands are safe to run twice"
+      ],
+      "read": [
+        "docs/DATA-MODEL.md seed data"
+      ],
+      "paths": [
+        "packages/db/seeds/",
+        "scripts/seed.ts",
+        "scripts/reset.ts"
+      ]
+    },
+    {
+      "id": "B-11",
+      "title": "Action executor, jobs, idempotency, approval expiry",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "C",
+      "deps": [
+        "B-07"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [
+        "AC-09",
+        "AC-10"
+      ],
+      "human": false,
+      "done": [
+        "An approved bundle runs its action types in order, one worker at a time per bundle",
+        "Every action has an intent row and a stable idempotency key that survives retries and timeouts",
+        "Retries back off and stop after a bound; an unknown result goes to NEEDS_REVIEW, never a blind retry",
+        "A job expires approvals after 10 minutes",
+        "A test approves the same request twice and sees one execution"
+      ],
+      "read": [
+        "docs/CONTRACTS.md idempotency keys",
+        "docs/PRD.md section 14"
+      ],
+      "paths": [
+        "apps/server/src/executor/"
+      ]
+    },
+    {
+      "id": "B-12",
+      "title": "Square adapter: catalog cache, quote, checkout link",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "C",
+      "deps": [
+        "B-02",
+        "B-11"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [
+        "AC-05",
+        "AC-19"
+      ],
+      "human": false,
+      "done": [
+        "The Square catalog syncs into catalog_items",
+        "order.quote returns the authoritative total from CalculateOrder",
+        "square.checkout.create makes one payment link with the order object and the stable key, stores the order ID, link ID and URL, and stops with RECOVERY_REQUIRED if the link total differs from the approved total",
+        "The server refuses to start when SQUARE_ENVIRONMENT is not sandbox",
+        "20 seeded cart cases quote the exact catalog price"
+      ],
+      "read": [
+        "docs/FLOWS.md Flow B",
+        "docs/SPEC.md section 4"
+      ],
+      "paths": [
+        "apps/server/src/adapters/square/"
+      ]
+    },
+    {
+      "id": "B-13",
+      "title": "Webhooks and payment reconciliation",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "C",
+      "deps": [
+        "B-12"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [
+        "AC-11",
+        "AC-12"
+      ],
+      "human": false,
+      "done": [
+        "The Square webhook is rejected unless its signature verifies, and a repeated event ID is processed once",
+        "An order becomes PAID_VERIFIED only after the payment reads back from Square as COMPLETED with matching order ID, amount, currency and location",
+        "A declined or abandoned payment leaves the order unpaid",
+        "A poller resolves an order whose webhook never arrived",
+        "Twilio webhooks verify their signature"
+      ],
+      "read": [
+        "docs/FLOWS.md Flow B and failure branches",
+        "docs/API.md webhooks"
+      ],
+      "paths": [
+        "apps/server/src/webhooks/",
+        "apps/server/src/reconcile/"
+      ]
+    },
+    {
+      "id": "B-14",
+      "title": "Message adapter with dispatch dedupe and QR data",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "C",
+      "deps": [
+        "B-04",
+        "B-11"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [
+        "AC-10"
+      ],
+      "human": false,
+      "done": [
+        "One MessageAdapter interface with the chosen channel behind it and qr_only as the fallback",
+        "Each send has one message_dispatches row and never sends twice for the same key",
+        "A send whose result is unknown goes to review, not resend",
+        "GET /api/orders/:id/checkout returns the link for the dashboard QR code"
+      ],
+      "read": [
+        "docs/CONTRACTS.md MessageDispatch",
+        "docs/GAPS.md G-01"
+      ],
+      "paths": [
+        "apps/server/src/adapters/message/"
+      ]
+    },
+    {
+      "id": "B-15",
+      "title": "Pizza phone worker and tool handlers",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "D",
+      "deps": [
+        "B-03",
+        "B-12",
+        "B-07"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [
+        "AC-05",
+        "AC-06",
+        "AC-07"
+      ],
+      "human": true,
+      "done": [
+        "An inbound call resolves the live agent, pins its version and opens a voice session with only read and propose tools",
+        "The real toolset implements every phone agent tool behind the ToolHandler interface",
+        "The agent discloses it is an AI, answers only from the catalog and facts, reads back the quoted total, collects the message number and consent, and proposes the order",
+        "After proposing, the agent uses the wait script and never says the order is placed or paid",
+        "A real call produces an approval request on the dashboard"
+      ],
+      "read": [
+        "docs/FLOWS.md Flow B and guardrails",
+        "docs/CONTRACTS.md phone agent tools"
+      ],
+      "paths": [
+        "apps/server/src/voice/",
+        "apps/server/src/tools/real/"
+      ]
+    },
+    {
+      "id": "B-16",
+      "title": "Builder service: interview, spec, text runner, preview",
+      "owner": "saina",
+      "lane": "builder",
+      "phase": "C",
+      "deps": [
+        "S-01",
+        "S-03"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [
+        "AC-01",
+        "AC-03"
+      ],
+      "human": false,
+      "done": [
+        "Code lives in apps/server/src/builder and registers its own routes through the plugin stub",
+        "A builder session classifies the request into a template and capability set, asks for missing required fields, and returns a draft AgentSpec that validates against the registry",
+        "The builder never offers a capability that is not registered",
+        "Preview and test run the agent in text with the mock toolset and return a tool trace; no external write is possible in this mode",
+        "Needs OPENAI_API_KEY from Arsh; until then it runs against recorded responses"
+      ],
+      "read": [
+        "docs/FLOWS.md Flow A",
+        "docs/API.md builder and agents",
+        "docs/PRD.md sections 6 and 7"
+      ],
+      "paths": [
+        "apps/server/src/builder/session/",
+        "apps/server/src/builder/runner/",
+        "apps/server/src/builder/index.ts"
+      ]
+    },
+    {
+      "id": "B-17",
+      "title": "Publish, pause, versions and the live-agent switch",
+      "owner": "saina",
+      "lane": "builder",
+      "phase": "D",
+      "deps": [
+        "B-16",
+        "B-06"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [
+        "AC-04"
+      ],
+      "human": false,
+      "done": [
+        "Publish requires confirm true, is blocked by unresolved required conflicts, and writes an immutable agent version",
+        "Pause stops the agent taking new calls",
+        "PUT /api/live-agent sets which published agent answers the phone number",
+        "agent.published and agent.paused events are written"
+      ],
+      "read": [
+        "docs/API.md agents and live agent",
+        "docs/DATA-MODEL.md agent_versions and live_agent"
+      ],
+      "paths": [
+        "apps/server/src/builder/publish/"
+      ]
+    },
+    {
+      "id": "B-18",
+      "title": "Opening-hours edit as an owner confirmation",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "D",
+      "deps": [
+        "B-07",
+        "B-08"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [
+        "AC-16"
+      ],
+      "human": false,
+      "done": [
+        "POST /api/businesses/:id/facts/propose creates a fact_edit approval with the owner as actor",
+        "Confirming it writes a new verified fact version and a fact.changed event",
+        "The next call reads the new hours; a call already in progress keeps the hours it started with"
+      ],
+      "read": [
+        "docs/FLOWS.md Flow D"
+      ],
+      "paths": [
+        "apps/server/src/api/facts/"
+      ]
+    },
+    {
+      "id": "B-19",
+      "title": "Barbershop booking: calendar adapter and booking bundle",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "D",
+      "deps": [
+        "B-05",
+        "B-11",
+        "B-14"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [
+        "AC-14",
+        "AC-15"
+      ],
+      "human": false,
+      "done": [
+        "read_calendar_availability returns free slots inside business hours for a service duration",
+        "propose_booking creates an approval; approving it rechecks the slot and creates exactly one Calendar event that carries the booking ID",
+        "A taken slot creates no event and offers alternatives",
+        "The customer gets a confirmation message",
+        "The whole flow runs through a simulated call (POST /api/agents/:id/sim-call) with the real toolset"
+      ],
+      "read": [
+        "docs/FLOWS.md Flow C"
+      ],
+      "paths": [
+        "apps/server/src/adapters/calendar/",
+        "apps/server/src/tools/real/booking.ts"
+      ]
+    },
+    {
+      "id": "B-20",
+      "title": "Sheets mirror job",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "E",
+      "deps": [
+        "B-05",
+        "B-11"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [
+        "AC-13"
+      ],
+      "human": false,
+      "done": [
+        "A paid order and a verified booking each append one row with a unique record ID column",
+        "A retry never adds a second row",
+        "When Sheets fails, the order stays paid and the dashboard shows the sync as retrying"
+      ],
+      "read": [
+        "docs/PRD.md section 14"
+      ],
+      "paths": [
+        "apps/server/src/adapters/sheets/"
+      ]
+    },
+    {
+      "id": "B-21",
+      "title": "Document extraction and conflict detection",
+      "owner": "saina",
+      "lane": "builder",
+      "phase": "E",
+      "deps": [
+        "B-16"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [
+        "AC-02"
+      ],
+      "human": false,
+      "done": [
+        "A PDF, image, CSV or spreadsheet upload is checked for type and size (10 MB cap) and stored privately",
+        "One structured-output call turns it into draft facts with a confidence value and a source reference",
+        "A price that disagrees with the Square catalog is flagged as a conflict and blocks publish until resolved",
+        "Text inside the document is treated as data and never as an instruction"
+      ],
+      "read": [
+        "docs/API.md files",
+        "docs/PRD.md sections 10 and 13"
+      ],
+      "paths": [
+        "apps/server/src/builder/extraction/"
+      ]
+    },
+    {
+      "id": "B-22",
+      "title": "Voice hardening: refusals, hang-up, barge-in, latency",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "E",
+      "deps": [
+        "B-15",
+        "B-25"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [
+        "AC-06",
+        "AC-18"
+      ],
+      "human": true,
+      "done": [
+        "Each spoken threat test in PRD section 13 is tried on a real call and refused with no write and no secret revealed",
+        "A caller who hangs up before confirming leaves no approval and no paid state",
+        "First audio and tool latency are measured over 10 calls and recorded honestly"
+      ],
+      "read": [
+        "docs/FLOWS.md guardrails"
+      ],
+      "paths": [
+        "apps/server/src/voice/"
+      ]
+    },
+    {
+      "id": "B-23",
+      "title": "Adversarial and duplicate tests",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "E",
+      "deps": [
+        "B-13"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [
+        "AC-06",
+        "AC-10",
+        "AC-11",
+        "AC-17"
+      ],
+      "human": false,
+      "done": [
+        "Automated tests: forged Square webhook, replayed webhook, double approval, swapped proposal ID, changed recipient after approval, approval after expiry, cross-business read",
+        "20 repeated-event runs create zero duplicate orders, links or messages",
+        "Every test fails closed"
+      ],
+      "read": [
+        "docs/PRD.md sections 13 and 17"
+      ],
+      "paths": [
+        "apps/server/test/adversarial/"
+      ]
+    },
+    {
+      "id": "B-24",
+      "title": "Owner voice session: realtime client secret endpoint",
+      "owner": "saina",
+      "lane": "builder",
+      "phase": "D",
+      "deps": [
+        "B-16"
+      ],
+      "size": "S",
+      "tier": "must",
+      "acs": [
+        "AC-01"
+      ],
+      "human": false,
+      "paths": [
+        "apps/server/src/builder/voice/"
+      ],
+      "done": [
+        "POST /api/realtime/client-secret returns a short-lived OpenAI Realtime client secret to a signed-in owner only",
+        "The real API key never reaches the browser",
+        "The voice session has the same builder tools as the typed chat and no deployed-agent tools"
+      ],
+      "read": [
+        "docs/API.md realtime client secret",
+        "docs/SPEC.md section 4 OpenAI"
+      ]
+    },
+    {
+      "id": "B-25",
+      "title": "Barbershop agent on a live phone call",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "E",
+      "deps": [
+        "B-15",
+        "B-19",
+        "B-17"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [
+        "AC-14",
+        "AC-15"
+      ],
+      "human": true,
+      "paths": [
+        "apps/server/src/voice/"
+      ],
+      "done": [
+        "Switching the live agent to the barbershop makes the same phone number answer as the barbershop",
+        "A real call finds a slot, proposes a booking, and after owner approval one Calendar event exists",
+        "Asking for a taken slot gets alternatives and no event"
+      ],
+      "read": [
+        "docs/FLOWS.md Flow C"
+      ]
+    },
+    {
+      "id": "B-26",
+      "title": "Price change through Square with approval",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "E",
+      "deps": [
+        "B-12",
+        "B-11",
+        "B-08"
+      ],
+      "size": "M",
+      "tier": "should",
+      "acs": [],
+      "human": false,
+      "paths": [
+        "apps/server/src/adapters/square/price.ts",
+        "apps/server/src/api/prices/"
+      ],
+      "done": [
+        "POST /api/businesses/:id/catalog/prices/propose creates a price_edit approval",
+        "Confirming it updates the Square catalog object with its current version and then syncs catalog_items",
+        "The next quote uses the new price"
+      ],
+      "read": [
+        "docs/FLOWS.md Flow E"
+      ]
+    },
+    {
+      "id": "B-27",
+      "title": "Version compare and rollback",
+      "owner": "saina",
+      "lane": "builder",
+      "phase": "E",
+      "deps": [
+        "B-17"
+      ],
+      "size": "M",
+      "tier": "should",
+      "acs": [],
+      "human": false,
+      "paths": [
+        "apps/server/src/builder/publish/"
+      ],
+      "done": [
+        "GET /api/agents/:id/versions returns enough to compare two versions",
+        "POST /api/agents/:id/rollback makes an earlier version the active one as a new publish event",
+        "Calls in progress keep the version they started with"
+      ],
+      "read": [
+        "docs/API.md agents"
+      ]
+    },
+    {
+      "id": "B-28",
+      "title": "Human fallback call routing",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "E",
+      "deps": [
+        "B-22"
+      ],
+      "size": "M",
+      "tier": "should",
+      "acs": [],
+      "human": true,
+      "paths": [
+        "apps/server/src/voice/fallback/"
+      ],
+      "done": [
+        "When the agent is paused or the voice session fails, the caller hears a clear message or is forwarded to a configured number",
+        "The fallback is logged as a call.ended reason"
+      ],
+      "read": [
+        "docs/PRD.md section 4 P1"
+      ]
+    },
+    {
+      "id": "B-29",
+      "title": "FAQ-only custom agent from a capability subset",
+      "owner": "saina",
+      "lane": "builder",
+      "phase": "E",
+      "deps": [
+        "B-16"
+      ],
+      "size": "M",
+      "tier": "should",
+      "acs": [],
+      "human": false,
+      "paths": [
+        "apps/server/src/builder/session/"
+      ],
+      "done": [
+        "The builder can produce an agent with only catalog.read and business.facts.read",
+        "Asking for a tool that does not exist is explained and left out of the draft",
+        "The agent can be published and answers questions on a call or a simulated call"
+      ],
+      "read": [
+        "docs/PRD.md section 7 custom agent"
+      ]
+    },
+    {
+      "id": "B-30",
+      "title": "Latency and cost telemetry",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "E",
+      "deps": [
+        "B-11",
+        "B-15"
+      ],
+      "size": "M",
+      "tier": "should",
+      "acs": [],
+      "human": false,
+      "paths": [
+        "apps/server/src/telemetry/"
+      ],
+      "done": [
+        "Call answer latency, tool latency, approval time, webhook delay and retry counts are recorded per journey with the correlation ID",
+        "p50 and p95 are available from one endpoint or query",
+        "No success counter increases on request submission alone"
+      ],
+      "read": [
+        "docs/PRD.md section 15"
+      ]
+    },
+    {
+      "id": "B-31",
+      "title": "Simulated call endpoint with the real toolset",
+      "owner": "arsh",
+      "lane": "backend",
+      "phase": "D",
+      "deps": [
+        "B-15",
+        "B-16"
+      ],
+      "size": "S",
+      "tier": "must",
+      "acs": [],
+      "human": false,
+      "paths": [
+        "apps/server/src/api/simcall/"
+      ],
+      "done": [
+        "POST /api/agents/:id/sim-call runs a published agent in text with the real read and propose tools",
+        "It creates a calls row with channel test_console, so approvals and orders look the same as from a phone call",
+        "It cannot run a draft agent and cannot skip approval"
+      ],
+      "read": [
+        "docs/SPEC.md P-18",
+        "docs/API.md sim-call"
+      ]
+    },
+    {
+      "id": "U-01",
+      "title": "Web app scaffold, shell, sign-in, sandbox banner",
+      "owner": "saina",
+      "lane": "ui",
+      "phase": "A",
+      "deps": [],
+      "size": "M",
+      "tier": "must",
+      "acs": [],
+      "human": false,
+      "done": [
+        "Next.js App Router app in apps/web with Tailwind and shadcn/ui, created as a self-contained app so it does not wait for the root scaffold",
+        "Sidebar and top bar from PRD section 5, with the business selector for the two seeded businesses",
+        "Supabase sign-in for the seeded owner",
+        "A sandbox label shows wherever payment data appears",
+        "Before coding screens, the list of fields each screen needs is sent to Arsh for the contract freeze"
+      ],
+      "read": [
+        "docs/PRD.md section 5",
+        "docs/SPEC.md"
+      ],
+      "paths": [
+        "apps/web/ (scaffold and shell)"
+      ]
+    },
+    {
+      "id": "U-02",
+      "title": "API client and mock layer",
+      "owner": "saina",
+      "lane": "ui",
+      "phase": "B",
+      "deps": [
+        "S-02",
+        "S-03"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [],
+      "human": false,
+      "done": [
+        "A typed API client built on the contracts package",
+        "With NEXT_PUBLIC_MOCK=1, MSW handlers in apps/web/mocks serve every MUST-tier endpoint from fixtures",
+        "useActivityFeed replays the scripted pizza timeline in mock mode and subscribes to Supabase Realtime otherwise",
+        "The whole UI can be developed with no backend running"
+      ],
+      "read": [
+        "docs/API.md mock layer notes"
+      ],
+      "paths": [
+        "apps/web/lib/api/",
+        "apps/web/mocks/"
+      ]
+    },
+    {
+      "id": "U-03",
+      "title": "Overview screen",
+      "owner": "saina",
+      "lane": "ui",
+      "phase": "B",
+      "deps": [
+        "U-02"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [],
+      "human": false,
+      "done": [
+        "Agent cards, today's calls, orders by status, bookings, approval count and integration health",
+        "Loading, empty and error states",
+        "Counts update when an activity event arrives"
+      ],
+      "read": [
+        "docs/PRD.md section 5 screen 1"
+      ],
+      "paths": [
+        "apps/web/app/(dashboard)/overview/"
+      ]
+    },
+    {
+      "id": "U-04",
+      "title": "Approvals inbox and decision dialog",
+      "owner": "saina",
+      "lane": "ui",
+      "phase": "B",
+      "deps": [
+        "U-02"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [
+        "AC-07",
+        "AC-08",
+        "AC-10"
+      ],
+      "human": false,
+      "done": [
+        "Each request shows the itemized order, total, recipient, external systems, expiry countdown and bundle ID",
+        "Approve and Reject send the payload hash; the button cannot fire twice",
+        "Expired and already-decided requests show their state and cannot be acted on",
+        "No green success state appears until the server confirms"
+      ],
+      "read": [
+        "docs/PRD.md section 5 screen 7",
+        "docs/API.md approvals"
+      ],
+      "paths": [
+        "apps/web/app/(dashboard)/approvals/"
+      ]
+    },
+    {
+      "id": "U-05",
+      "title": "Live operations timeline with link and QR panel",
+      "owner": "saina",
+      "lane": "ui",
+      "phase": "C",
+      "deps": [
+        "U-02"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [],
+      "human": false,
+      "done": [
+        "One timeline per call: proposal, approval, Square order ID, link status, message status, verified payment, Sheets sync",
+        "The checkout link shows as a QR code with a sandbox label",
+        "Proposal, link ready and paid are visibly different states",
+        "Payment failed, sync retrying and call lost states are covered"
+      ],
+      "read": [
+        "docs/PRD.md section 5 screen 6",
+        "docs/CONTRACTS.md activity events"
+      ],
+      "paths": [
+        "apps/web/app/(dashboard)/activity/"
+      ]
+    },
+    {
+      "id": "U-06",
+      "title": "Builder chat and spec panel",
+      "owner": "saina",
+      "lane": "ui",
+      "phase": "C",
+      "deps": [
+        "U-02"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [
+        "AC-01"
+      ],
+      "human": false,
+      "done": [
+        "Typed chat on the left, the evolving agent spec on the right",
+        "Progress indicator, missing-field questions and capability list with read versus approval-gated shown clearly",
+        "Unsupported requests are explained, never promised",
+        "A microphone button is in place; the voice session itself is task U-12"
+      ],
+      "read": [
+        "docs/PRD.md section 5 screen 2",
+        "docs/FLOWS.md Flow A"
+      ],
+      "paths": [
+        "apps/web/app/(dashboard)/build/"
+      ]
+    },
+    {
+      "id": "U-07",
+      "title": "Agent preview, test console and publish",
+      "owner": "saina",
+      "lane": "ui",
+      "phase": "C",
+      "deps": [
+        "U-06"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [
+        "AC-03",
+        "AC-04"
+      ],
+      "human": false,
+      "done": [
+        "Preview shows name, goal, tools, data scope, permissions and failure policy",
+        "The test console runs a text conversation and shows the tool trace, labelled as a test with mock tools",
+        "Publish asks for confirmation and then shows the live phone number and version",
+        "The same console can place a simulated call on a published agent, clearly labelled as simulated"
+      ],
+      "read": [
+        "docs/PRD.md section 5 screens 4 and 5"
+      ],
+      "paths": [
+        "apps/web/app/(dashboard)/agents/[id]/preview/"
+      ]
+    },
+    {
+      "id": "U-08",
+      "title": "Knowledge review: upload, extracted facts, conflict banner",
+      "owner": "saina",
+      "lane": "ui",
+      "phase": "D",
+      "deps": [
+        "U-02"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [
+        "AC-02"
+      ],
+      "human": false,
+      "done": [
+        "Upload a PDF, image, CSV or spreadsheet and see extracted draft facts with source and confidence",
+        "Uncertain fields ask for confirmation",
+        "A conflict with Square shows a banner and blocks publish"
+      ],
+      "read": [
+        "docs/PRD.md section 5 screen 3"
+      ],
+      "paths": [
+        "apps/web/app/(dashboard)/knowledge/"
+      ]
+    },
+    {
+      "id": "U-09",
+      "title": "Agents list and detail, live switch, hours edit",
+      "owner": "saina",
+      "lane": "ui",
+      "phase": "D",
+      "deps": [
+        "U-07",
+        "U-04"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [
+        "AC-16"
+      ],
+      "human": false,
+      "done": [
+        "Agent list and detail with status, version, phone number, capabilities and recent calls",
+        "Pause and the live-agent switch",
+        "Business facts list with an opening-hours edit that goes through the confirm dialog and shows the change log",
+        "Integrations health panel"
+      ],
+      "read": [
+        "docs/PRD.md section 5 screen 5",
+        "docs/FLOWS.md Flow D"
+      ],
+      "paths": [
+        "apps/web/app/(dashboard)/agents/",
+        "apps/web/app/(dashboard)/integrations/",
+        "apps/web/app/(dashboard)/settings/"
+      ]
+    },
+    {
+      "id": "U-10",
+      "title": "Demo polish and every UI state",
+      "owner": "saina",
+      "lane": "ui",
+      "phase": "E",
+      "deps": [
+        "S-04"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [],
+      "human": false,
+      "done": [
+        "Every state listed in PRD section 5 has a designed appearance",
+        "The Live operations screen reads clearly from the back of a room",
+        "The demo path has no dead ends and no console errors"
+      ],
+      "read": [
+        "docs/PRD.md section 5 UI states",
+        "docs/PRD.md section 19"
+      ],
+      "paths": [
+        "apps/web/ (all screens, after Integration 1)"
+      ]
+    },
+    {
+      "id": "U-11",
+      "title": "Outside owner tries the builder",
+      "owner": "saina",
+      "lane": "ui",
+      "phase": "E",
+      "deps": [
+        "U-10"
+      ],
+      "size": "S",
+      "tier": "must",
+      "acs": [
+        "AC-20"
+      ],
+      "human": true,
+      "done": [
+        "One small-business owner who is not on the team creates or edits an agent with guidance",
+        "What confused them is written down and the worst item is fixed"
+      ],
+      "read": [
+        "docs/PRD.md section 17 usability"
+      ],
+      "paths": []
+    },
+    {
+      "id": "U-12",
+      "title": "Builder by voice in the browser",
+      "owner": "saina",
+      "lane": "ui",
+      "phase": "D",
+      "deps": [
+        "U-06",
+        "B-24"
+      ],
+      "size": "L",
+      "tier": "must",
+      "acs": [
+        "AC-01"
+      ],
+      "human": true,
+      "paths": [
+        "apps/web/app/(dashboard)/build/voice/"
+      ],
+      "done": [
+        "The owner can speak to the builder and hear it answer, over WebRTC with the client secret",
+        "What was said appears in the same chat thread and updates the same spec panel",
+        "Typed chat still works if the microphone is denied or the session fails",
+        "Tested by a person speaking, in the browser used for the demo"
+      ],
+      "read": [
+        "docs/FLOWS.md Flow A",
+        "docs/SPEC.md section 4 OpenAI"
+      ]
+    },
+    {
+      "id": "U-13",
+      "title": "Version history, price edit and telemetry screens",
+      "owner": "saina",
+      "lane": "ui",
+      "phase": "E",
+      "deps": [
+        "U-09"
+      ],
+      "size": "M",
+      "tier": "should",
+      "acs": [],
+      "human": false,
+      "paths": [
+        "apps/web/app/(dashboard)/agents/[id]/versions/",
+        "apps/web/app/(dashboard)/knowledge/prices/",
+        "apps/web/app/(dashboard)/telemetry/"
+      ],
+      "done": [
+        "Two agent versions can be compared and one rolled back",
+        "A price edit goes through the confirm dialog and shows the new price after it is verified",
+        "A small panel shows p50 and p95 latency"
+      ],
+      "read": [
+        "docs/API.md"
+      ]
+    },
+    {
+      "id": "U-14",
+      "title": "Playwright smoke test of the demo path",
+      "owner": "saina",
+      "lane": "ui",
+      "phase": "E",
+      "deps": [
+        "U-07",
+        "U-05",
+        "U-04"
+      ],
+      "size": "M",
+      "tier": "must",
+      "acs": [],
+      "human": false,
+      "paths": [
+        "apps/web/e2e/"
+      ],
+      "done": [
+        "In mock mode, a browser test walks sign-in, build, preview, publish, approvals and live operations",
+        "It fails on any console error",
+        "It runs in CI on every pull request that touches apps/web"
+      ],
+      "read": [
+        "docs/PRD.md section 19"
+      ]
+    }
+  ]
+}
