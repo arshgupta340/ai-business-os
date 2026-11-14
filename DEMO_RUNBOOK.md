@@ -248,6 +248,25 @@ This is the one end-to-end path that is verified against real services. It is st
 
    The `negative` flow re-approves a pizza order from the same run or from `--order`. Without one of those, that one check reports a failure.
 
+   The `booking` flow now deletes the Calendar event it created at the end, through the server's own Calendar adapter, and only for the booking it made in that run. This cleanup has not been run against the real Calendar yet.
+
+4. **Not run yet.** A declined payment: a new pizza order, approved, then paid with Square's sandbox decline nonce. It expects the order to reach `PAYMENT_FAILED`, a `payment.failed` event, no paid state and no Orders row. The decline nonce is not in SPEC section 4, so the first run is its test.
+
+   ```bash
+   npx tsx scripts/live/run-demo.ts declined --base https://abos-server.onrender.com
+   ```
+
+5. **Not run yet.** An approval that expires: a new pizza order that nobody decides. There is no owner route that expires an approval early, so the flow waits out the 10 minute window and the 30 second sweep, about 11 minutes. `all` leaves it out; name it to run it. It expects `APPROVAL_EXPIRED` on the order, `EXPIRED` on the approval, no steps and a refused late approval.
+
+   ```bash
+   npx tsx scripts/live/run-demo.ts expiry --base https://abos-server.onrender.com
+   ```
+
+### Which suite runs where
+
+- **CI runs `npm test` only.** That suite uses the in-process test database as `abos_app` and fake providers. It covers the end-to-end flows in `apps/server/test/e2e/`, including reject, expiry for orders and bookings, a declined payment and a duplicate webhook. It needs no keys and writes nowhere outside the test database.
+- **`scripts/live/run-demo.ts` is local only.** It is not in CI and no repository secrets are set for it. It needs real keys in `.env.local` and writes to the sandbox providers: the Square sandbox, the demo Calendar and the demo Sheet, and the real database behind the server it drives.
+
 ## 7. Reset between runs
 
 1. **Not rehearsed.** Wait for the call to end. Write down the order, approval and booking IDs of the run, and anything that ended in "Needs your review".

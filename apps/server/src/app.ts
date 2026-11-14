@@ -150,7 +150,8 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
 
   // Phone calls (B-15). Off, with a log line naming the missing settings, when a key is absent.
   // When it is off, the voice webhook answers 503 (Twilio retries later) and /ws/phone does not exist.
-  if (composed.voice.ok) await app.register(voicePlugin, composed.voice.options);
+  // The voice logger is wrapped so each call's connect-to-first-audio time is also a first_audio sample (B-30).
+  if (composed.voice.ok) await app.register(voicePlugin, { ...composed.voice.options, logger: composed.firstAudio.logger(composed.voice.options.logger ?? app.log) });
   else {
     app.log.warn({ missing: composed.voice.missing }, 'phone voice is off: missing settings');
     await app.register(async (off) => {
