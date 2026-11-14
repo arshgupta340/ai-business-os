@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../app';
 import { parseEnv } from '../env';
-import { isLoopbackAddress } from './auth';
+import { FORWARDING_HEADERS, isLocalHost, isLoopbackAddress } from './auth';
 import { builderAuthMode } from './env';
 
 // The builder fails closed: with no auth option, only BUILDER_DEV_AUTH=1 (and
@@ -94,7 +94,7 @@ describe('builder auth fails closed', () => {
     });
     expect(spoofed.statusCode).toBe(401);
     expect(spoofed.json().code).toBe('UNAUTHENTICATED');
-    // A loopback peer that sends a foreign X-Forwarded-For is still the loopback peer.
+    // A loopback peer that sends any X-Forwarded-For is a tunnel or proxy, so it is refused.
     const local = await app.inject({
       method: 'POST',
       url: '/api/builder/sessions?businessId=biz_pizza_01',
@@ -102,7 +102,57 @@ describe('builder auth fails closed', () => {
       payload: {},
       remoteAddress: '127.0.0.1',
     });
-    expect(local.statusCode).toBe(201);
+    expect(local.statusCode).toBe(401);
+    expect(local.json()).toMatchObject({ code: 'UNAUTHENTICATED', message: 'Development auth accepts requests from this machine only.' });
+  });
+
+  it('the dev stand-in refuses each forwarding header from a loopback peer', async () => {
+    app = await appWith({ BUILDER_DEV_AUTH: '1' });
+    expect(FORWARDING_HEADERS).toEqual([
+      'forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip', 'cf-connecting-ip', 'cf-ray', 'true-client-ip',
+    ]);
+    for (const name of FORWARDING_HEADERS) {
+      for (const [method, url] of routes) {
+        const res = await app.inject({ method, url, headers: { ...AUTH, [name]: '127.0.0.1' }, payload: {}, remoteAddress: '127.0.0.1' });
+        expect(res.statusCode, `${name} ${method} ${url}`).toBe(401);
+        expect(res.json()).toMatchObject({ code: 'UNAUTHENTICATED', message: 'Development auth accepts requests from this machine only.', retryable: false });
+      }
+    }
+  });
+
+  it('the dev stand-in refuses a tunnel Host from a loopback peer', async () => {
+    app = await appWith({ BUILDER_DEV_AUTH: '1' });
+    for (const host of ['quick-words-here.trycloudflare.com', 'your-assigned-name.ngrok-free.app', 'abos.example.com:4000', '192.168.1.20:4000', 'localhost.example.com', '127.0.0.1.nip.io']) {
+      const res = await app.inject({ method: 'POST', url: '/api/builder/sessions?businessId=biz_pizza_01', headers: { ...AUTH, host }, payload: {}, remoteAddress: '127.0.0.1' });
+      expect(res.statusCode, host).toBe(401);
+      expect(res.json()).toMatchObject({ code: 'UNAUTHENTICATED', message: 'Development auth accepts requests from this machine only.' });
+    }
+  });
+
+  it('the dev stand-in accepts a plain local request', async () => {
+    app = await appWith({ BUILDER_DEV_AUTH: '1' });
+    for (const host of ['localhost', 'localhost:4000', 'LOCALHOST:4000', '127.0.0.1', '127.0.0.1:4000']) {
+      const res = await app.inject({ method: 'POST', url: '/api/builder/sessions?businessId=biz_pizza_01', headers: { ...AUTH, host }, payload: {}, remoteAddress: '127.0.0.1' });
+      expect(res.statusCode, host).toBe(201);
+    }
+    // The default Host that app.inject sends (localhost:80) keeps working.
+    const plain = await app.inject({ method: 'POST', url: '/api/builder/sessions?businessId=biz_pizza_01', headers: AUTH, payload: {} });
+    expect(plain.statusCode).toBe(201);
+  });
+
+  it('the dev stand-in accepts the IPv6 loopback Host', async () => {
+    app = await appWith({ BUILDER_DEV_AUTH: '1' });
+    for (const host of ['[::1]', '[::1]:4000']) {
+      const res = await app.inject({ method: 'POST', url: '/api/builder/sessions?businessId=biz_pizza_01', headers: { ...AUTH, host }, payload: {}, remoteAddress: '::1' });
+      expect(res.statusCode, host).toBe(201);
+    }
+  });
+
+  it('reads local Host headers exactly', () => {
+    for (const host of ['localhost', 'localhost:80', '127.0.0.1:4000', '[::1]', '[::1]:4000', 'Localhost']) expect(isLocalHost(host), host).toBe(true);
+    for (const host of [undefined, '', '::1', '[::1', 'localhost:', 'localhost:4000:1', 'localhost.', 'example.com', '[::2]:4000', '127.0.0.2', 'localhost ', ' localhost']) {
+      expect(isLocalHost(host), String(host)).toBe(false);
+    }
   });
 
   it('reads loopback addresses exactly', () => {
