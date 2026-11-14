@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
 import { btree_gist } from '@electric-sql/pglite/contrib/btree_gist';
+import { decideApproval } from '../src/guarded-updates';
 import { applyMigrations, type MigrationDb } from '../src/migrate';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -119,6 +120,17 @@ export async function createApproval(db: PGlite, o: Owner, extra: Row = {}): Pro
     payload: { businessId: o.businessId }, payload_hash: hash(),
     ...extra,
   });
+}
+
+/** Creates a PENDING approval and approves it through the guarded decision, as the owner. */
+export async function createApprovedApproval(db: PGlite, o: Owner, extra: Row = {}): Promise<Row> {
+  const pending = await createApproval(db, o, extra);
+  const approved = await decideApproval(db, {
+    approvalId: String(pending.id), businessId: o.businessId, decision: 'APPROVED', ownerUserId: o.userId,
+    payloadHash: String(pending.payload_hash),
+  });
+  if (!approved) throw new Error('test setup: approval was not approved');
+  return approved;
 }
 
 export async function createBooking(db: PGlite, o: Owner, extra: Row = {}): Promise<Row> {

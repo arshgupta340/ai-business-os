@@ -10,12 +10,26 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-/** The two calls the runner needs. A pg Client and a PGlite instance both fit through a thin adapter. */
+/**
+ * One database session: every call must reach the same connection. A pg Client or a PGlite
+ * instance fits through a thin adapter. Do not wrap a pg Pool in this; pass the pool itself.
+ */
 export interface MigrationDb {
   /** Runs one or more SQL statements with no parameters. */
   exec(sql: string): Promise<unknown>;
   /** Runs one statement with positional parameters. */
   query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
+}
+
+/** A connection pool, such as a pg Pool. The runner checks out one client for the whole run. */
+export interface MigrationPool {
+  connect(): Promise<PooledSession>;
+}
+
+/** A checked-out pool client, such as a pg PoolClient. */
+export interface PooledSession {
+  query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
+  release(err?: Error | boolean): void;
 }
 
 export interface MigrationFile {
@@ -46,10 +60,41 @@ export function readMigrations(dir: string = MIGRATIONS_DIR): MigrationFile[] {
     });
 }
 
+/**
+ * Applies every file not yet recorded. Given a pool, it checks out one client and runs the lock,
+ * every transaction and the unlock on that client, then releases it. Given a MigrationDb, it uses
+ * that single session as it is.
+ */
 export async function applyMigrations(
-  db: MigrationDb,
+  target: MigrationDb | MigrationPool,
   files: MigrationFile[] = readMigrations(),
   log: (line: string) => void = () => {},
+): Promise<MigrateResult> {
+  if ('exec' in target) return runOnSession(target, files, log);
+  const session = await target.connect();
+  if (!session || typeof session.query !== 'function' || typeof session.release !== 'function') {
+    throw new Error('applyMigrations needs a pool whose connect() returns a client, or a MigrationDb adapter.');
+  }
+  let failed: Error | undefined;
+  try {
+    const pinned: MigrationDb = {
+      exec: (sql) => session.query(sql),
+      query: (text, params) => session.query(text, params),
+    };
+    return await runOnSession(pinned, files, log);
+  } catch (err) {
+    failed = err instanceof Error ? err : new Error(String(err));
+    throw err;
+  } finally {
+    // Passing the error tells a pg Pool to discard the client instead of reusing it.
+    session.release(failed ?? false);
+  }
+}
+
+async function runOnSession(
+  db: MigrationDb,
+  files: MigrationFile[],
+  log: (line: string) => void,
 ): Promise<MigrateResult> {
   // Two runners started at once wait for each other instead of applying the same file twice.
   await db.query('select pg_advisory_lock($1)', [ADVISORY_LOCK_KEY]);
@@ -61,6 +106,16 @@ export async function applyMigrations(
         applied_at timestamptz not null default now()
       );
       alter table public.schema_migrations enable row level security;
+      do $$
+      begin
+        -- On Supabase, close the bookkeeping table to the API roles. Plain Postgres has no such roles.
+        if exists (select 1 from pg_roles where rolname = 'anon') then
+          revoke all on public.schema_migrations from anon;
+        end if;
+        if exists (select 1 from pg_roles where rolname = 'authenticated') then
+          revoke all on public.schema_migrations from authenticated;
+        end if;
+      end $$;
     `);
     const { rows } = await db.query('select name, checksum from public.schema_migrations');
     const done = new Map((rows as { name: string; checksum: string }[]).map((r) => [r.name, r.checksum]));

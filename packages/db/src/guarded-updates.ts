@@ -54,16 +54,19 @@ export interface ExpiredApproval {
 
 /**
  * One-use approval. The only move out of PENDING. Zero rows means the request was already
- * decided, has expired, belongs to another business, or the hash the owner saw no longer matches.
- * The caller then reads the row to return APPROVAL_ALREADY_DECIDED, APPROVAL_EXPIRED or
- * PAYLOAD_HASH_MISMATCH. The payload column is never touched.
+ * decided, has expired, belongs to another business, the deciding user does not own the business,
+ * or the hash the owner saw no longer matches. The caller then reads the row to return
+ * APPROVAL_ALREADY_DECIDED, APPROVAL_EXPIRED, PAYLOAD_HASH_MISMATCH or a permission error.
+ * decided_by is taken from businesses.owner_id, so it is always the business's owner.
+ * The payload, hash, bundle and expiry are frozen by the approval_requests_guard trigger.
  */
 export const DECIDE_APPROVAL_SQL = `
-update public.approval_requests
-set    state = $3, decided_by = $4, decided_at = now(), decision_reason = $6
-where  id = $1 and business_id = $2 and payload_hash = $5
-  and  state = 'PENDING' and expires_at > now()
-returning *`;
+update public.approval_requests r
+set    state = $3, decided_by = b.owner_id, decided_at = now(), decision_reason = $6
+from   public.businesses b
+where  r.id = $1 and r.business_id = $2 and b.id = r.business_id and b.owner_id = $4
+  and  r.payload_hash = $5 and r.state = 'PENDING' and r.expires_at > now()
+returning r.*`;
 
 export async function decideApproval(
   db: QueryExecutor,
@@ -91,28 +94,43 @@ export async function decideApproval(
 }
 
 /**
- * Steps run in bundle order (CONTRACTS.md section 6, Execution). A step may start only when every
- * earlier step of the same approval is SUCCEEDED, except that a message step that ended SKIPPED,
- * FAILED or NEEDS_REVIEW does not block the steps after it.
+ * A row x of action_executions may be claimed only when all of these hold:
+ * - its approval a is APPROVED, was decided before it expired, and is in the same business;
+ * - x is the step the approval lists at x.step_index (Sheets steps left out, SPEC 2.9);
+ * - every earlier step the approval lists has a row that is SUCCEEDED, or is a message step that
+ *   ended SKIPPED, FAILED or NEEDS_REVIEW (CONTRACTS.md section 6, Execution). A missing earlier
+ *   row blocks the claim, because the check walks the approval's list, not the rows that exist.
+ * The trigger action_executions_match_approval enforces the first two at insert as well.
  */
-const EARLIER_STEPS_DONE = `
-not exists (
-  select 1 from public.action_executions p
-  where p.approval_id = x.approval_id and p.step_index < x.step_index
-    and not (p.status = 'SUCCEEDED'
-             or (p.action_type like 'message.%' and p.status in ('SKIPPED', 'FAILED', 'NEEDS_REVIEW'))))`;
+const CLAIMABLE = `
+     a.id = x.approval_id and a.business_id = x.business_id
+ and a.state = 'APPROVED' and a.decided_at is not null and a.decided_at < a.expires_at
+ and x.status = 'QUEUED' and x.next_attempt_at <= now()
+ and (array(select t.step from unnest(a.action_bundle) with ordinality as t(step, n)
+            where t.step not like 'sheets.%' order by t.n))[x.step_index + 1] = x.action_type
+ and not exists (
+   select 1
+   from unnest(array(select t.step from unnest(a.action_bundle) with ordinality as t(step, n)
+                     where t.step not like 'sheets.%' order by t.n)) with ordinality as e(step, n)
+   where e.n - 1 < x.step_index
+     and not exists (
+       select 1 from public.action_executions p
+       where p.approval_id = x.approval_id and p.step_index = e.n - 1 and p.action_type = e.step
+         and (p.status = 'SUCCEEDED'
+              or (p.action_type like 'message.%' and p.status in ('SKIPPED', 'FAILED', 'NEEDS_REVIEW')))))`;
 
 /**
  * Claims one execution so only one worker owns it. Zero rows means another worker holds it,
- * it is not due yet, it is not QUEUED, or an earlier step has not finished.
- * attempts is checked to stay within 0 to 3, so a fourth claim fails at the database.
+ * it is not due yet, it is not QUEUED, its approval is not a valid APPROVED approval, or an
+ * earlier step has not finished. attempts is checked to stay within 0 to 3, so a fourth claim
+ * fails at the database.
  */
 export const CLAIM_EXECUTION_SQL = `
 update public.action_executions x
 set    status = 'RUNNING', attempts = x.attempts + 1, locked_by = $1, locked_at = now(),
        started_at = coalesce(x.started_at, now())
-where  x.id = $2 and x.status = 'QUEUED' and x.next_attempt_at <= now()
-  and  ${EARLIER_STEPS_DONE}
+from   public.approval_requests a
+where  x.id = $2 and ${CLAIMABLE}
 returning x.*`;
 
 export async function claimExecution(
@@ -123,15 +141,15 @@ export async function claimExecution(
   return (rows[0] as ExecutionRow | undefined) ?? null;
 }
 
-/** Claims the next due execution without blocking other workers (FOR UPDATE SKIP LOCKED). */
+/** Claims the next claimable execution without blocking other workers (FOR UPDATE SKIP LOCKED). */
 export const CLAIM_NEXT_EXECUTION_SQL = `
 with next as (
-  select x.id from public.action_executions x
-  where  x.status = 'QUEUED' and x.next_attempt_at <= now()
-    and  ${EARLIER_STEPS_DONE}
+  select x.id
+  from   public.action_executions x, public.approval_requests a
+  where  ${CLAIMABLE}
   order by x.next_attempt_at, x.created_at
   limit 1
-  for update skip locked
+  for update of x skip locked
 )
 update public.action_executions x
 set    status = 'RUNNING', attempts = x.attempts + 1, locked_by = $1, locked_at = now(),

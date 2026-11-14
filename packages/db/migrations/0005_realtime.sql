@@ -1,4 +1,4 @@
--- 0006: Supabase Realtime.
+-- 0005: Supabase Realtime.
 -- Source: docs/DATA-MODEL.md section 4.
 -- The dashboard subscribes to activity_events with the owner's JWT. Realtime applies
 -- activity_events_owner_read to each subscriber, so an owner receives only their own events (P-16).
