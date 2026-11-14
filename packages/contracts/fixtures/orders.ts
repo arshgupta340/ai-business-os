@@ -4,6 +4,7 @@ import {
   APPROVAL_EXPIRY_MS,
   PIZZA_BUSINESS_ID,
   QUOTE_EXPIRY_MS,
+  toCanonicalTimestamp,
   type Cart,
   type Order,
   type OrderStatus,
@@ -86,7 +87,8 @@ function order(o: OrderInput): Order {
       o.consent === undefined
         ? { name: o.contactName, messageConsent: false }
         : { name: o.contactName, messageRecipient: o.consent.recipient, messageConsent: true, consentAt: o.consent.consentAt },
-    fulfillment: { type: 'pickup', pickupAt: o.pickupAt },
+    // Issue #103: `toISOString()` form, the form the approval payload hashes and the server stores (CONTRACTS 4).
+    fulfillment: { type: 'pickup', pickupAt: toCanonicalTimestamp(o.pickupAt) },
     approvalId: `apv_demo_${o.n}`,
     createdAt: o.proposedAt,
     updatedAt: o.updatedAt,

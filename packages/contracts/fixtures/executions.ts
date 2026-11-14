@@ -102,13 +102,14 @@ export const executionsBookingConflict = executionsFor(approvalBookingConflict, 
   'calendar.event.create': { status: 'FAILED', attempts: 1, errorCode: 'SLOT_CONFLICT', lastError: 'Fresh free/busy read shows the slot busy. No event created.', doneAfterMs: 2000 },
 });
 
+// A step that stopped (FAILED or NEEDS_REVIEW) always has an errorCode: `execution.failed` requires one (issue #103).
 export const executions: ActionExecution[] = [
   ...executionsFor(approvalBookingRetry, {
-    'calendar.event.create': { status: 'NEEDS_REVIEW', attempts: 1, lastError: 'Calendar request timed out. Check the event before retrying.', doneAfterMs: 8000 },
+    'calendar.event.create': { status: 'NEEDS_REVIEW', attempts: 1, errorCode: 'INTEGRATION_UNAVAILABLE', lastError: 'Calendar request timed out. Check the event before retrying.', doneAfterMs: 8000 },
   }),
   ...executionsFor(approvalBookingUnknown, {
     'calendar.event.create': ok(3000, storedKey('idem:exe_demo_b88u_0')),
-    'message.booking.confirm': { status: 'NEEDS_REVIEW', attempts: 1, lastError: 'Message result is unknown. Do not resend automatically.', doneAfterMs: 8000 },
+    'message.booking.confirm': { status: 'NEEDS_REVIEW', attempts: 1, errorCode: 'INTEGRATION_UNAVAILABLE', lastError: 'Message result is unknown. Do not resend automatically.', doneAfterMs: 8000 },
     'local.booking.record': ok(9000),
   }),
   ...executionsOrderFulfilled,

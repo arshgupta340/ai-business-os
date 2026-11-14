@@ -6,7 +6,7 @@ import {VStack} from '@astryxdesign/core/VStack';
 import {useIntegrationsHealth, type IntegrationHealth, type IntegrationProvider} from '@/lib/api';
 import {statusView, type Tone} from '@/lib/status';
 import {consequenceFor} from '@/app/(dashboard)/integrations/_lib/integrations-view';
-import {PROVIDER_LABELS} from '@/components/shell/ConnectionHealth';
+import {providerLabel} from '@/components/shell/ConnectionHealth';
 
 /** The Banner status for a tone that statusView chose. Same translation as StatusBadge. */
 const BANNER_STATUS: Record<Tone, 'info' | 'warning' | 'error' | 'success'> = {
@@ -41,8 +41,9 @@ export function providerProblems(health: IntegrationHealth | undefined, provider
       provider,
       state: entry.state,
       tone: view.tone,
-      title: `${PROVIDER_LABELS[provider]} is ${view.label.toLowerCase()}`,
-      description: consequence ? consequence.notice : 'It may not work as expected right now.',
+      title: `${providerLabel(provider)} is ${view.label.toLowerCase()}`,
+      // The lookup can return something that is not a consequence for a state this app does not know.
+      description: typeof consequence?.notice === 'string' && consequence.notice ? consequence.notice : 'It may not work as expected right now.',
     });
   }
   return problems;
