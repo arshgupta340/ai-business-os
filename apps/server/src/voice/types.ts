@@ -145,6 +145,10 @@ export type RelayLimits = {
   toolTimeoutMs?: number | undefined;
   /** Model responses waiting for tool work. More are answered as unavailable. */
   maxPendingResponses: number;
+  /** Issue #95 item 8: function calls the model may make on one call, whatever their name. More are refused and recorded. */
+  maxToolCalls: number;
+  /** Proposals one call may store: distinct approvals, plus proposals whose result is unknown. More are refused and recorded. */
+  maxProposals: number;
   /** Unacknowledged marks before the call fails for back-pressure. */
   maxPendingMarks: number;
   /** Bytes queued on the Twilio socket before the call fails for back-pressure. */

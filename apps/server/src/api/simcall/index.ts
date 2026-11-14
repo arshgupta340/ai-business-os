@@ -21,11 +21,17 @@ import type { Db } from '../../db/index';
 import { AppError } from '../../errors';
 import { emitActivity } from '../../policy/activity';
 import type { RealToolset } from '../../tools/real/types';
-import { nextStage } from '../../voice/relay';
+import { DEFAULT_LIMITS, nextStage } from '../../voice/relay';
 import { PLAIN_SPEECH_RULE, plainSpeech } from './plain';
 import type { CallsStore } from '../../compose/ports';
 
 const MAX_TOOL_CALLS_PER_TURN = 8;
+/**
+ * Issue #95 item 8: the phone path's cap on proposals per call, here too. A turn is bounded by the cap
+ * above, but a call has any number of turns. The count is read from the proposals the database holds
+ * for the call, so it survives a restart, which the in-memory session does not.
+ */
+const MAX_PROPOSALS_PER_CALL = DEFAULT_LIMITS.maxProposals;
 
 /**
  * Live run 2026-11-14: turns carry only spoken text, so after propose_order the model no longer saw its
@@ -139,6 +145,16 @@ export function registerSimCall(app: FastifyInstance, deps: SimCallDeps): void {
           return { ok: false, reason: 'CAPABILITY_NOT_ALLOWED', message: 'This agent does not have that tool.' };
         }
         const tool: ToolName = named.data;
+        if (tool === 'propose_order' || tool === 'propose_booking') {
+          const stored = (await deps.db.query(`select (select count(*) from public.orders where call_id = $1 and business_id = $2)
+            + (select count(*) from public.bookings where call_id = $1 and business_id = $2) as n`, [callId, businessId])).rows[0] as { n: string | number } | undefined;
+          if (Number(stored?.n ?? 0) >= MAX_PROPOSALS_PER_CALL) {
+            deps.log?.warn({ callId, tool, maxProposals: MAX_PROPOSALS_PER_CALL }, 'sim-call: proposal limit reached; proposal refused');
+            await emitActivity(deps.db, { id: deps.newId('evt_'), businessId, correlationId: callId, type: 'guardrail.refused', actorType: 'deployed_agent',
+              occurredAt: deps.now().toISOString(), payload: { callId, rule: 'unsupported_request', reasonCode: 'proposal_limit', toolName: tool } });
+            return { ok: false, reason: 'VALIDATION_FAILED', message: 'The limit for this call is reached. No more requests can be sent to the shop on this call.' };
+          }
+        }
         const result = await s.toolset.handler.call(tool, (rawInput ?? {}) as never, ctx);
         const stage = nextStage(spec.template, s.stage, tool, result);
         if (stage !== s.stage) { s.stage = stage; await deps.calls.updateStage(callId, stage); }
