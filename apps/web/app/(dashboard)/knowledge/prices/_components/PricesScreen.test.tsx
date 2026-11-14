@@ -220,7 +220,7 @@ describe('PricesScreen', () => {
   it('shows each documented propose error with its own message', async () => {
     const cases: [string, number, Record<string, unknown>, RegExp][] = [
       ['NOT_FOUND', 404, {}, /This variation is not in the catalog/],
-      ['INTEGRATION_UNAVAILABLE', 503, {provider: 'square'}, /square is not responding/],
+      ['INTEGRATION_UNAVAILABLE', 503, {provider: 'square'}, /Square is not responding/],
       ['ENVIRONMENT_MISMATCH', 409, {}, /Square is not in sandbox/],
     ];
     for (const [code, status, details, text] of cases) {

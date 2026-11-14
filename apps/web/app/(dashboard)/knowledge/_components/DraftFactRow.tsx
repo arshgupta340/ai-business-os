@@ -14,12 +14,11 @@ import {isApiError, useProposeFact, type ApprovalRequest, type BusinessFact, typ
 import {statusView} from '@/lib/status';
 import {ApiErrorBanner} from './ApiErrorBanner';
 import {ProposalNotice} from './ProposalNotice';
+import {factKeyLabel, factKindGroupLabel} from '@/lib/labels';
 import {
-  KIND_LABELS,
   applyEdits,
   describeValue,
   editableFields,
-  factKeyLabel,
   formatConfidence,
   isLowConfidence,
   isPriceConflict,
@@ -85,7 +84,7 @@ export function DraftFactRow({businessId, fact, fileName, conflict, onRefetch}: 
       <VStack gap={2}>
         <HStack gap={2} vAlign="center" wrap="wrap">
           <Text weight="semibold">
-            {KIND_LABELS[fact.kind]}: {factKeyLabel(fact.kind, fact.key, fact.value)}
+            {factKindGroupLabel(fact.kind)}: {factKeyLabel(fact.kind, fact.key, fact.value)}
           </Text>
           <StatusBadge label={factView.label} tone={factView.tone} />
           {low ? <StatusBadge label="Please confirm" tone="warning" /> : null}

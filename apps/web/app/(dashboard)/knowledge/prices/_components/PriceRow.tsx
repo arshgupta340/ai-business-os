@@ -11,7 +11,7 @@ import {useApproval, type ActivityEvent} from '@/lib/api';
 import {formatMoney} from '@/lib/format';
 import {conflictView} from '@/lib/status';
 import {minorToInput} from '../_lib/price-input';
-import {canProposeAgain, phaseBadge, pricePhase, type PriceConflictView, type PricePhase} from '../_lib/price-row';
+import {canProposeAgain, failureText, phaseBadge, pricePhase, type PriceConflictView, type PricePhase} from '../_lib/price-row';
 import type {PriceEditorTarget} from './PriceEditorDialog';
 
 type Props = {
@@ -127,24 +127,8 @@ function PhaseNote({phase, onRefreshCatalog, isCatalogFetching}: {phase: PricePh
     case 'verified':
       return <Text type="supporting">The catalog from Square now shows this price.</Text>;
     case 'square_failed':
-      return phase.squarePrice === 'unknown' ? (
-        <Text type="supporting">
-          Square did not confirm the change ({phase.errorCode}). The price in Square is unknown until the step is reviewed. The price
-          above is the last one the catalog showed.
-        </Text>
-      ) : (
-        <Text type="supporting">
-          The price in Square is unchanged. Square refused the update ({phase.errorCode}). One cause is a price change in Square since
-          you proposed. Propose again.
-        </Text>
-      );
     case 'sync_failed':
-      return (
-        <Text type="supporting">
-          Square accepted {formatMoney(phase.payload.newPriceMinor, phase.payload.currency)} (sandbox), but the catalog here did not
-          refresh ({phase.errorCode}). Run Sync from Square on Business Knowledge to check.
-        </Text>
-      );
+      return <Text type="supporting">{failureText(phase)}</Text>;
     case 'rejected':
       return (
         <Text type="supporting">
