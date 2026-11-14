@@ -504,5 +504,16 @@ describe('owner text on Live operations', () => {
 
   it('shows a payment failure reason in words', () => {
     expectPlain(line('payment.failed', {orderId: 'ord_1', reason: 'CARD_DECLINED', sandbox: true}), 'CARD_DECLINED');
+    expect(line('payment.failed', {orderId: 'ord_1', reason: 'card_declined', sandbox: true})).toBe('Payment failed: card declined');
+  });
+
+  it('adds no reason when Square only says the payment failed', () => {
+    // The real server passes on the status text from Square, which is often just FAILED.
+    for (const reason of ['FAILED', 'failed', '']) {
+      expect(line('payment.failed', {orderId: 'ord_1', reason, sandbox: true})).toBe('Payment failed');
+      const events = [...approved(), ev('payment.failed', {orderId: 'ord_1', reason, sandbox: true})];
+      const notice = deriveJourney({callId: 'call_1', events, call: call(), order: order('PAYMENT_FAILED')}).notices.find((x) => x.key === 'payment_failed');
+      expect(notice?.description).toMatch(/^Square reported the payment as failed\. The order is not paid/);
+    }
   });
 });

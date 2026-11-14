@@ -1,7 +1,9 @@
 /**
  * The OpenAI Realtime protocol pieces the builder voice uses, and nothing else.
  *
- * Source: the official OpenAI docs, read 2026-11-14:
+ * Source: the official OpenAI docs, read 2026-11-14. Every event named below was
+ * then seen in a live run against OpenAI on 2026-11-14 (docs/notes-saina.md,
+ * "U-12 voice, live run"):
  * - developers.openai.com/api/docs/guides/realtime-webrtc (the browser posts its
  *   SDP offer to /v1/realtime/calls with "Authorization: Bearer <client secret>"
  *   and "Content-Type: application/sdp", reads the answer SDP as text, and opens
