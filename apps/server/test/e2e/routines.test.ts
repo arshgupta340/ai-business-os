@@ -292,3 +292,38 @@ describe('a new-key fact', () => {
     expect(malformed.json()).toMatchObject({ code: 'VALIDATION_FAILED' });
   });
 });
+
+describe('review finding 2: a created checkout survives a failed local completion', () => {
+  let w: World;
+  beforeAll(async () => { w = await createWorld({ executor: notWiredExecutor }); }, 120_000);
+  afterAll(async () => { await w?.close(); });
+
+  it('keeps the Square order ID, moves the order to RECOVERY_REQUIRED, never creates again, and recovery resolves it from Square', async () => {
+    const { orderId, approvalId } = await pizzaOrder(w);
+    await approve(w, PIZZA, approvalId);
+    const c = w.app.composed;
+    // One transaction failure at save_checkout, after Square created and the adapter verified the link.
+    const db = c.db as { transaction: typeof c.db.transaction };
+    const original = db.transaction.bind(c.db);
+    let failures = 1;
+    db.transaction = (fn) => original((tx) => fn({ query: (text, params) => {
+      if (failures > 0 && text.includes('save_checkout')) { failures--; return Promise.reject(new Error('connection reset')); }
+      return tx.query(text, params);
+    } }));
+    const executor = createDbExecutor({ env: c.env, db: c.db, engine: c.engine, providers: c.providers, now: c.now, newId: c.newId, log: silentLog }, { workerId: 'worker-f2' });
+    try {
+      expect(await executor.tick()).toBe(true);
+      await executor.drain();
+    } finally { db.transaction = original; await executor.stop(); }
+    expect(w.squareWrites).toHaveLength(1);
+    const checkout = (await steps(w, approvalId)).find((s) => s.action_type === 'square.checkout.create')!;
+    const linked = w.square.orders.size > 0 ? [...w.square.orders.keys()][0] : undefined;
+    expect(checkout).toMatchObject({ status: 'NEEDS_REVIEW', external_ref: linked });
+    expect((await order(w, orderId)).status).toBe('RECOVERY_REQUIRED');
+    // Owner recovery reads the link back from Square by the kept order ID and completes the step.
+    const res = await w.app.inject({ method: 'POST', url: `/api/executions/${checkout.id}/resolve?businessId=${PIZZA}`, headers: OWNER, payload: { action: 'retry' } });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await order(w, orderId)).toMatchObject({ status: 'PAYMENT_LINK_READY', square_order_id: linked });
+    expect(w.squareWrites).toHaveLength(1);
+  });
+});
