@@ -96,6 +96,9 @@ Index of the docs: https://docs.agentphone.ai/llms.txt
 ## Not confirmed in the docs
 
 - Whether the `timestamp` field inside the JSON body equals `X-Webhook-Timestamp`. We use the header only.
+- Whether a retried delivery carries a new `X-Webhook-Timestamp` (and so a new signature) or the original one. The server accepts either: it dedupes on the delivery ID and on the signed content.
+- The format of the webhook secret. The example response in the webhooks guide shows `"secret": "whsec_abc123..."`; no page states the prefix as a rule. Read again on 2026-11-14.
+- Whether `from` is present on a call from a withheld number. The server treats a missing or odd `from` as withheld.
 - Whether `X-Webhook-ID` is unique per event or per delivery attempt across retries for every event type (the docs say a retried delivery keeps it).
 - Whether a voice `agent.message` is sent for the very start of a call (before the caller speaks), and whether the agent's `beginMessage` is spoken in webhook mode. We do not depend on either.
 - What happens if our NDJSON stream closes without a final chunk.

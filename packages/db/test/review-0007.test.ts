@@ -241,7 +241,7 @@ describe('0007 on a database that already holds rows from 0001 to 0006', () => {
     await as(db, 'abos_app', async () => {
       // claim_execution compares the stored payload with private.material again.
       const x = await runtime.runtimeClaimExecution(db, { businessId, executionId: pending.executions[0]!.id, workerId: 'after-0007' });
-      expect(x.status).toBe('RUNNING');
+      expect(x?.status).toBe('RUNNING');
       for (const d of sent) expect((await runtime.updateDispatchStatus(db, { businessId: d.businessId, dispatchId: d.dispatchId, status: 'DELIVERED' })).status).toBe('DELIVERED');
     });
   });
