@@ -136,6 +136,56 @@ describe('VoiceSession: the happy path', () => {
     expect(session.state.phase).toBe('listening');
   });
 
+  it('follows the event order a real session sent (recorded against OpenAI on 2026-11-14)', async () => {
+    // One spoken sentence and one reply read aloud, in the order the data channel delivered them.
+    // The session must ignore every event it does not need and end where it started: listening.
+    const {fakes, session, transcripts} = await connect();
+    const said = 'I run a pizza shop, and I want an agent that takes pickup orders over the phone.';
+    const reply = 'I can set up an AI assistant to take pickup orders. What would you like it to say when it answers the phone?';
+    for (const event of [
+      {type: 'session.created', session: {id: 'sess_1'}},
+      {type: 'input_audio_buffer.speech_started', item_id: 'item_1'},
+      {type: 'input_audio_buffer.speech_stopped', item_id: 'item_1'},
+      {type: 'input_audio_buffer.committed', item_id: 'item_1'},
+      {type: 'conversation.item.added', item: {id: 'item_1'}},
+      {type: 'conversation.item.done', item: {id: 'item_1'}},
+      {type: 'conversation.item.input_audio_transcription.delta', item_id: 'item_1', delta: said},
+      {type: 'conversation.item.input_audio_transcription.completed', item_id: 'item_1', content_index: 0, transcript: said},
+    ]) {
+      fakes.dc.emit(event);
+    }
+    expect(transcripts).toEqual([said]);
+    expect(session.state.phase).toBe('listening');
+    expect(session.state.note).toBeNull();
+
+    // The chat answers, and the screen asks the session to read the reply.
+    expect(session.speak(reply)).toBe(true);
+    expect(fakes.dc.sentEvents().map((e) => e.type)).toEqual(['response.create']);
+    for (const event of [
+      {type: 'response.created', response: {id: 'resp_1', status: 'in_progress'}},
+      {type: 'response.output_item.added', response_id: 'resp_1'},
+      {type: 'response.content_part.added', response_id: 'resp_1'},
+      {type: 'response.output_audio_transcript.delta', response_id: 'resp_1', delta: 'I can'},
+      {type: 'output_audio_buffer.started', response_id: 'resp_1'},
+      {type: 'response.output_audio_transcript.delta', response_id: 'resp_1', delta: ' set up'},
+      {type: 'response.output_audio.done', response_id: 'resp_1'},
+      {type: 'response.output_audio_transcript.done', response_id: 'resp_1', transcript: reply},
+      {type: 'response.content_part.done', response_id: 'resp_1'},
+      {type: 'conversation.item.done', item: {id: 'item_2'}},
+      {type: 'response.output_item.done', response_id: 'resp_1'},
+      {type: 'response.done', response: {id: 'resp_1', status: 'completed'}},
+      {type: 'rate_limits.updated', rate_limits: []},
+    ]) {
+      fakes.dc.emit(event);
+      // The audio is still playing after response.done, so the session keeps saying it is speaking.
+      expect(session.state.phase).toBe('speaking');
+    }
+    fakes.dc.emit({type: 'output_audio_buffer.stopped', response_id: 'resp_1'});
+    expect(session.state.phase).toBe('listening');
+    // The reply read aloud is never taken for something the owner said.
+    expect(transcripts).toEqual([said]);
+  });
+
   it('mutes and unmutes the microphone track', async () => {
     const {fakes, session} = await connect();
     session.setMuted(true);

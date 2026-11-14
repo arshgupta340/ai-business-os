@@ -100,10 +100,10 @@ The builder was built before the contracts package (S-02), the mock toolset (S-0
 
 ### Not verified
 
-- The real OpenAI path has never run. The request body and the response shape come from the official reference, read on 2026-11-13, and are tested against a fake only.
+- The real OpenAI path ran once on 2026-11-14 from the web app against the deployed server (see "U-12 voice, live run" below). Before that it was tested against a fake only.
 - Whether the secret must stay valid after the WebRTC connection is set up. The 60 second expiry assumes it does not.
 - Whether a browser holding the secret can send `session.update` and add tools. If it can, the server-bound session limits a well-behaved client only. Check this once a key exists.
-- The data channel event names the browser will use (U-12) are from the docs and are untested.
+- The data channel event names the browser uses (U-12) were confirmed in the live run on 2026-11-14.
 
 ## B-29 FAQ-only custom agent (2026-11-13)
 
@@ -236,8 +236,30 @@ The sections above stay as they were written. These statements in them were true
 ### Not verified
 
 - **The web app against the real server with a real sign-in.** No Supabase sign-in was done from the web app, and no call was made from it to the deployed server. Every real-mode statement in these notes comes from reading the code and from tests that use the mock or hand-built error objects. Which commit the deployed server runs was not checked.
-- **Voice with a real microphone (U-12, issue #50, still open).** The voice code is tested against fakes only. Nobody has spoken to the builder in a browser and heard it answer. The items under "B-24, Not verified" still stand.
+- **Voice with a real microphone (U-12, issue #50, still open).** The voice path ran end to end on 2026-11-14 with a recorded sentence in place of the microphone (see "U-12 voice, live run" below). Nobody has spoken into a real microphone and listened to the answer with their own ears yet.
 - **The outside owner test (U-11, issue #49, still open).** No small-business owner outside the team has tried the builder yet.
 - Supabase Realtime delivery to `useActivityFeed` on a real project.
 - The price editor, conflict resolution, publish and rollback from the web app against a real server. Their error texts were written from the server code and the contract.
 - The Playwright tests run in mock mode only. They do not cover real mode.
+
+## U-12 voice, live run (2026-11-14)
+
+Run from the web app on `localhost:3000` in real mode, signed in as the demo owner, against the deployed server and the real OpenAI Realtime service. The microphone was replaced in the browser by a recorded sentence (made with the macOS `say` command) mixed with faint noise, because the run was not done by a person speaking.
+
+What happened, in order:
+
+1. "Talk to the builder" asked for the microphone, then `POST /api/realtime/client-secret` answered 200, then `POST https://api.openai.com/v1/realtime/calls` answered 201, and the `oai-events` data channel opened. The screen said "Listening."
+2. The sentence "I run a pizza shop, and I want an agent that takes pickup orders over the phone." came back word for word in `conversation.item.input_audio_transcription.completed`. It appeared in the same chat thread, marked "Spoken".
+3. The builder answered in the thread, and the draft panel filled in (12 of 13 details confirmed).
+4. The browser sent one `response.create`. OpenAI read the reply aloud: its own transcript of the audio matched the builder's text, `response.done` had status `completed`, and after `output_audio_buffer.stopped` the screen went back to "Listening."
+5. With the microphone blocked (`NotAllowedError`), the screen said "The microphone is blocked, so voice is off. Type your answer, or allow the microphone and try again." A typed answer was sent and answered in the same thread, and the draft took the new greeting.
+
+The event order from this run is replayed in `apps/web/app/(dashboard)/build/voice/voiceSession.test.ts` ("follows the event order a real session sent").
+
+Still not verified:
+
+- A person speaking into a real microphone, and hearing the answer through speakers. The audio was confirmed by events, not by ear. Echo from speakers into the microphone was not tested.
+- With a source that goes completely silent after speech, OpenAI never sent `speech_stopped` and nothing was transcribed. A real microphone always carries some room noise, so this should not happen to a person, but a muted or virtual input device could show it.
+- Whether the session survives well past the 60 seconds the client secret lives. The run lasted under a minute after connecting.
+- The demo browser itself. The run used the browser pane of the desktop app, not Chrome or Safari.
+
