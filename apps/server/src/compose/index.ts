@@ -33,6 +33,7 @@ import {
 import { buildProviders, type Providers } from './providers';
 import { createDbExecutor } from './executor';
 import { createInterimDb } from './interim-db';
+import { createDbWebhooks, type DbWebhooks } from './webhooks';
 import { createProposeFactFromChat, dbAgentDraftStore, dbBuilderSessionStore, dbBusinessKnowledge, dbDraftFactStore, dbLiveAgentReader, type ProposeFactFromChat } from './builder';
 import { notWiredExecutor, notWiredWebhooks, type Executor, type ExecutorFactory, type SeamDeps, type WebhooksFactory } from './seams';
 
@@ -80,6 +81,9 @@ export interface ComposedServer {
   voice: { ok: true; options: VoicePluginOptions } | { ok: false; missing: string[] };
   executor: Executor;
   webhooksPlugin: FastifyPluginAsync;
+  /** The database webhooks wiring, when it is the one in use (jobs, recovery, reconciliation). */
+  webhooks: DbWebhooks | undefined;
+  interim: InterimDb;
   /** Background jobs: the approval expiry sweep (API 3.7) and the executor loop. */
   startJobs(): void;
   stopJobs(): Promise<void>;
@@ -122,7 +126,10 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   const seamDeps: SeamDeps = { env, db, engine, providers, interim, now, newId, log };
   const defaultExecutor: ExecutorFactory = hasDb ? (deps) => createDbExecutor(deps, { interim: deps.interim }) : notWiredExecutor;
   const executor = (options.executor ?? defaultExecutor)(seamDeps);
-  const webhooksPlugin = (options.webhooks ?? notWiredWebhooks)(seamDeps);
+  // Provider webhooks and payment reconciliation (B-13). Without a database or the signature settings
+  // the routes keep the 503 default, which reads and stores nothing.
+  const webhooks = !options.webhooks && hasDb ? createDbWebhooks(seamDeps, notWiredWebhooks(seamDeps)) : undefined;
+  const webhooksPlugin = options.webhooks ? options.webhooks(seamDeps) : webhooks?.plugin ?? notWiredWebhooks(seamDeps);
 
   // Routes' engine port. After an approval the executor is told to look for work.
   const enginePorts: EnginePorts = options.ports ?? {
@@ -183,7 +190,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
 
   let sweep: ReturnType<typeof setInterval> | undefined;
   return {
-    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, now, newId,
+    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, interim, now, newId,
     async close() { if (pool) await pool.end(); },
     startJobs() {
       if (!hasDb || sweep) return;
@@ -191,11 +198,13 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       sweep = setInterval(() => { engine.expireDue().catch((error: unknown) => log.error({ job: 'expiry', code: error instanceof Error ? error.name : 'unknown' }, 'approval expiry sweep failed')); }, 30_000);
       sweep.unref();
       executor.start();
+      webhooks?.start();
     },
     async stopJobs() {
       if (sweep) clearInterval(sweep);
       sweep = undefined;
       await executor.stop();
+      await webhooks?.stop();
     },
   };
 }
