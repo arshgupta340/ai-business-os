@@ -28,7 +28,9 @@ export const pricesPlugin: FastifyPluginAsync<PricesDependencies> = async (app, 
       if (!params.success) throw apiFailure('VALIDATION_FAILED', 'The business path is invalid.');
       const owner = await deps.auth.requireOwner(request, params.data.id);
       if (!owner) throw apiFailure('UNAUTHENTICATED', 'An owner session is required.');
-      // The price proposal contract has no resolvesConflictId yet (NOTES.md), so say what works instead.
+      // The contract accepts resolvesConflictId on this body (issue #108), but the price_edit payload
+      // cannot carry it and no column stores it, so an approved price edit could not find its conflict
+      // (NOTES.md). Refuse and say what works, instead of accepting a link that would be dropped.
       if (request.body && typeof request.body === 'object' && 'resolvesConflictId' in request.body) {
         return reply.code(ERROR_CODE_INFO.VALIDATION_FAILED.httpStatus).send(makeApiError('VALIDATION_FAILED',
           'A price change cannot resolve a conflict yet. Change the price, sync, then keep the current value on the conflict.', correlationId));
@@ -54,7 +56,8 @@ export const pricesPlugin: FastifyPluginAsync<PricesDependencies> = async (app, 
         payloadHash: hash, createdAt,
       });
       if (created.kind === 'conflict') throw apiFailure('INVALID_STATE', 'A different price proposal is already pending for this item.');
-      const approval = created.approval;
+      // Display names from the catalog cache row (issue #108). They are outside the payload and the hash.
+      const approval = { ...created.approval, ...(item.itemName ? { itemName: item.itemName } : {}), ...(item.variationName ? { variationName: item.variationName } : {}) };
       const response = ProposePriceResponseSchema.parse({ approval });
       if (response.approval.state !== 'PENDING' || response.approval.payloadHash !== hash ||
           !(await verifyPayloadHash('price_edit', response.approval.payload, hash))) throw apiFailure('INTERNAL', 'The price approval could not be confirmed.');

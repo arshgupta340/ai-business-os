@@ -1,6 +1,8 @@
 # B-26 integration notes
 
-The price proposal contract has no optional resolvesConflictId. This module does not add it. Uploaded price conflicts need a contract change before a price approval can link to a conflict.
+Since issue #108 the price proposal body has an optional `resolvesConflictId`. The route still refuses a body that carries it (`VALIDATION_FAILED`, with the instruction to change the price, sync, then keep the current value on the conflict). The `price_edit` payload cannot carry the link: its fields are hashed, the payload schema is strict, and the material field list is in the database routine `private.material` (migration 0004). No other column stores it either. A price approval can link to a conflict only after a migration (CONTRACTS section 12).
+
+Also since issue #108, the proposal response carries `itemName` and `variationName` beside the payload when the catalog lookup returns them. They come from the catalog cache row, are display only, and never reach the approval port, the payload or the hash.
 
 Register pricesPlugin at the server root with injected owner authentication, catalog lookup, Square read, checked approval creation, and one clock. OwnerAuthPort must verify the session and ownership of the requested business. The configured Square location must be bound to that business during composition. The route does not call Square upsert.
 

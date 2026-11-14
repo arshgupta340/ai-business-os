@@ -1,6 +1,6 @@
 import Fastify from 'fastify';
 import { describe, expect, it, vi } from 'vitest';
-import { APPROVAL_EXPIRY_MS, EXECUTION_MAX_ATTEMPTS, MATERIAL_FIELDS, payloadHash, type PriceEditApprovalRequest } from '@abos/contracts';
+import { APPROVAL_EXPIRY_MS, ENDPOINTS, EXECUTION_MAX_ATTEMPTS, MATERIAL_FIELDS, payloadHash, type PriceEditApprovalRequest } from '@abos/contracts';
 import { CATALOG_PRICE_MAX } from '../../../src/adapters/square';
 import { executeCatalogSyncStep, pricesPlugin, executePriceEditStep, reconcilePriceEditStep } from '../../../src/api/prices';
 import { SquarePriceError } from '../../../src/adapters/square/price';
@@ -38,6 +38,41 @@ describe('price proposals', () => {
       expect(Date.parse(payload.expiresAt) - now.getTime()).toBe(APPROVAL_EXPIRY_MS);
       expect(Object.keys(deps.square)).toEqual(['readVariationPrice']);
       expect(response.json().approval.payloadHash).toBe(await payloadHash(payload));
+    } finally { await app.close(); }
+  });
+  it('issue #108: answers with the catalog names beside the payload, never inside it', async () => {
+    const { app, deps, createPendingPriceEditApproval } = await setup();
+    vi.mocked(deps.catalog.findVariation).mockResolvedValue({ businessId: 'biz_pizza_01', subjectId: 'cat_pepperoni', squareItemId: 'item', variationId: 'var', itemName: 'Pepperoni', variationName: 'Large' });
+    try {
+      const response = await app.inject({ method: 'POST', url, payload: body });
+      expect(response.statusCode).toBe(201);
+      const approval = response.json().approval;
+      expect(approval).toMatchObject({ itemName: 'Pepperoni', variationName: 'Large' });
+      // The stored and hashed payload is exactly the material fields: the names never reach the approval port.
+      const stored = createPendingPriceEditApproval.mock.calls[0]![0].payload;
+      expect(Object.keys(stored).sort()).toEqual([...MATERIAL_FIELDS.price_edit].sort());
+      expect(Object.keys(approval.payload).sort()).toEqual([...MATERIAL_FIELDS.price_edit].sort());
+      expect(approval.payloadHash).toBe(await payloadHash(stored));
+    } finally { await app.close(); }
+  });
+  it('issue #108: sends no names when the catalog lookup has none', async () => {
+    const { app } = await setup();
+    try {
+      const approval = (await app.inject({ method: 'POST', url, payload: body })).json().approval;
+      expect(approval).not.toHaveProperty('itemName');
+      expect(approval).not.toHaveProperty('variationName');
+    } finally { await app.close(); }
+  });
+  it('issue #108: resolvesConflictId is in the contract, and the route still refuses it before any read', async () => {
+    const { app, deps, createPendingPriceEditApproval } = await setup();
+    try {
+      expect(ENDPOINTS.proposePrice.body.safeParse({ ...body, resolvesConflictId: 'cfl_pizza_01' }).success).toBe(true);
+      const response = await app.inject({ method: 'POST', url, payload: { ...body, resolvesConflictId: 'cfl_pizza_01' } });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ code: 'VALIDATION_FAILED', message: 'A price change cannot resolve a conflict yet. Change the price, sync, then keep the current value on the conflict.' });
+      expect(deps.catalog.findVariation).not.toHaveBeenCalled();
+      expect(deps.square.readVariationPrice).not.toHaveBeenCalled();
+      expect(createPendingPriceEditApproval).not.toHaveBeenCalled();
     } finally { await app.close(); }
   });
   it('refuses an item of another business before reading Square', async () => {
