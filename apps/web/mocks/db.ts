@@ -1,5 +1,6 @@
 /**
- * In-memory mock database, seeded from ./fixtures. It enforces the rules the
+ * In-memory mock database, seeded from the shared demo world in
+ * @abos/contracts/fixtures (see ./seed). It enforces the rules the
  * real server enforces (API.md section 3) and runs the scripted follow-up
  * after an approval, on timers from ./scheduler. Every change that the real
  * server would log writes an ActivityEvent and publishes it to the mock
@@ -64,7 +65,15 @@ import {
   priceEditApproval,
   sandboxCheckoutUrl,
 } from "./builders";
-import { buildSeed, emptyState, BARBER_SERVICES, TIMELINE_CART } from "./fixtures";
+import {
+  businesses as SHARED_BUSINESSES,
+  integrationHealthDisconnected,
+  materializeBusyBlocks,
+  orderFulfilled,
+  serviceHaircut,
+  telemetry as sharedTelemetry,
+} from "@abos/contracts/fixtures";
+import { buildSeed, emptyState } from "./seed";
 import { cancel, cancelAllScheduled, schedule, timing } from "./scheduler";
 import { BARBER_CALENDAR_ID, MESSAGE_CHANNEL, OWNER_USER_ID, TIMEZONE, type AgentRecord, type MockState } from "./types";
 
@@ -90,7 +99,7 @@ const fail = (code: ErrorCode, message: string, details?: Record<string, unknown
  * Empty until the first seed finishes. The contract's hash functions are async,
  * so seeding is too; the handlers await ready() before they read the state.
  */
-let state: MockState = emptyState(Date.now());
+let state: MockState = emptyState();
 let seeding: Promise<void> = Promise.resolve();
 
 /** Resolves once the current seed (start or reset) is in place. */
@@ -251,7 +260,7 @@ export async function setApprovalExpiry(approvalId: string, expiresAtMs: number)
   apv.createdAt = iso(expiresAtMs - APPROVAL_EXPIRY_MS);
   apv.expiresAt = iso(expiresAtMs);
   apv.payload = { ...apv.payload, expiresAt: apv.expiresAt } as ApprovalRequest["payload"];
-  apv.payloadHash = await payloadHash(apv.payload);
+  apv.payloadHash = await payloadHash(apv.payload, apv.bundleType);
 }
 
 export function emit<T extends ActivityEventType>(
@@ -269,7 +278,11 @@ export function emit<T extends ActivityEventType>(
 
 // --------------------------------------------------------------- scoping
 
-const OWNER_BUSINESSES = ["biz_pizza_01", "biz_barber_01"];
+/** The seeded owner owns both shared businesses. */
+const OWNER_BUSINESSES: string[] = SHARED_BUSINESSES.map((b) => b.id);
+
+/** The cart of the shared pizza timeline (CONTRACTS 9): Large Margherita with Mushrooms, Large Pepperoni. Total 4731. */
+export const TIMELINE_CART = orderFulfilled.cart;
 
 /** FORBIDDEN_BUSINESS unless the seeded owner owns it (API.md section 1). */
 export function requireBusiness(businessId: string | null | undefined): string {
@@ -481,6 +494,20 @@ export function resolveConflict(businessId: string, conflictId: string, resoluti
   conflict.resolvedBy = OWNER_USER_ID;
   conflict.resolvedAt = nowIso();
   if (authority?.factId) conflict.resolvedFactId = authority.factId;
+  // Like the shared factConflictResolvedEvent: keeping the authority supersedes the draft without a new fact version.
+  const draftId = conflict.candidates.find((c) => c.sourceType === "upload" || c.sourceType === "owner_chat")?.factId;
+  const draft = draftId ? state.facts.find((f) => f.id === draftId) : undefined;
+  if (draft) {
+    emit(businessId, "fact.changed", conflict.id, "owner", {
+      factId: draft.id,
+      kind: draft.kind,
+      key: draft.key,
+      fromVersion: draft.version,
+      toVersion: draft.version,
+      sourceType: draft.sourceType,
+      resolvedConflictId: conflict.id,
+    });
+  }
   return { conflict };
 }
 
@@ -628,25 +655,40 @@ function finishExtraction(file: FileRecord): void {
     createdAt: iso(at),
     updatedAt: iso(at),
   });
+  // What the scripted extractor "reads" has no shared fixture (the shared world holds only finished
+  // uploads). The drafts follow the shared shapes: a menu_item value is { itemName, variationName,
+  // priceMinor, currency } keyed like "margherita_large", and a price conflict names the Square row.
   if (file.businessId === "biz_pizza_01") {
-    const pep = draft("menu_item", "SQ_VAR_PEP_MD", { item: "Pepperoni", variation: "Medium", priceMinor: 1800 }, 0.88);
-    const marg = draft("menu_item", "SQ_VAR_MARG_SM", { item: "Margherita", variation: "Small", priceMinor: 1300 }, 0.74);
-    drafts.push(pep, marg);
-    const open = state.conflicts.some((c) => c.businessId === file.businessId && c.key === "SQ_VAR_MARG_SM" && c.state === "open");
-    if (!open) {
-      conflicts.push({
-        id: newId("cfl_"),
-        businessId: file.businessId,
-        kind: "menu_item",
-        key: "SQ_VAR_MARG_SM",
-        required: true,
-        candidates: [
-          { factId: marg.id, sourceType: "upload", value: { priceMinor: 1300 } },
-          { sourceType: "square", sourceRef: catalogRowId("SQ_VAR_MARG_SM"), value: { priceMinor: 1200 } },
-        ],
-        state: "open",
-        createdAt: iso(at),
-      });
+    const menuDraft = (itemId: string, variationId: string, delta: number, confidence: number) => {
+      const item = state.catalog.find((c) => c.squareItemId === itemId);
+      const variation = item?.variations.find((v) => v.id === variationId);
+      if (!item || !variation) return null;
+      const key = `${item.name}_${variation.name}`.toLowerCase().replace(/\s+/g, "_");
+      const value = { itemName: item.name, variationName: variation.name, priceMinor: variation.priceMinor + delta, currency: variation.currency };
+      return { fact: draft("menu_item", key, value, confidence), variation };
+    };
+    const [margItem, pepItem] = [state.catalog[0], state.catalog[1]];
+    const same = pepItem && menuDraft(pepItem.squareItemId, pepItem.variations[1].id, 0, 0.88);
+    const higher = margItem && menuDraft(margItem.squareItemId, margItem.variations[0].id, 100, 0.74);
+    for (const d of [same, higher]) if (d) drafts.push(d.fact);
+    if (higher) {
+      const open = state.conflicts.some((c) => c.businessId === file.businessId && c.key === higher.fact.key && c.state === "open");
+      if (!open) {
+        const uploaded = (higher.fact.value as { priceMinor: number }).priceMinor;
+        conflicts.push({
+          id: newId("cfl_"),
+          businessId: file.businessId,
+          kind: "menu_item",
+          key: higher.fact.key,
+          required: true,
+          candidates: [
+            { factId: higher.fact.id, sourceType: "upload", sourceRef: `${file.name} page 1`, value: { priceMinor: uploaded, variationId: higher.variation.id } },
+            { sourceType: "square", sourceRef: catalogRowId(higher.variation.id), value: { priceMinor: higher.variation.priceMinor, variationId: higher.variation.id } },
+          ],
+          state: "open",
+          createdAt: iso(at),
+        });
+      }
     }
   } else {
     drafts.push(
@@ -656,7 +698,7 @@ function finishExtraction(file: FileRecord): void {
         { id: "svc_shave", businessId: file.businessId, name: "Hot towel shave", durationMinutes: 30, priceMinor: 3500, currency: "USD" },
         0.66,
       ),
-      draft("faq", "walk_ins", { question: "Do you take walk-ins?", answer: "Yes, when a chair is free." }, 0.81),
+      draft("faq", "gift_cards", { question: "Do you sell gift cards?", answer: "Yes, at the front desk." }, 0.81),
     );
   }
   state.facts.push(...drafts);
@@ -849,7 +891,7 @@ export function rollbackAgent(businessId: string, agentId: string, body: { toVer
   if (conflictIds.length) fail("CONFLICT_UNRESOLVED", "Resolve the open conflicts first.", { conflictIds });
   const previous = agent.activeVersionId;
   agent.activeVersionId = target!.id;
-  agent.state = "live";
+  // API.md 3.4: only the active version moves. A paused agent stays paused.
   agent.updatedAt = nowIso();
   emit(businessId, "agent.published", agent.id, "owner", {
     agentId,
@@ -857,7 +899,7 @@ export function rollbackAgent(businessId: string, agentId: string, body: { toVer
     version: target!.version,
     rolledBackFrom: previous,
   });
-  if (state.liveAgent.agentId === agent.id) setLiveAgentTo(agent, target!.id);
+  if (agent.state === "live" && state.liveAgent.agentId === agent.id) setLiveAgentTo(agent, target!.id);
   return { agent: agentView(agent), version: target!, phoneNumber: state.liveAgent.phoneNumber };
 }
 
@@ -955,7 +997,7 @@ export async function tamperApproval(approvalId: string): Promise<void> {
   const apv = state.approvals.find((a) => a.id === approvalId);
   if (!apv || apv.state !== "PENDING") return;
   apv.payload = { ...apv.payload, expiresAt: iso(Date.parse(apv.expiresAt) + 1000) } as ApprovalRequest["payload"];
-  apv.payloadHash = await payloadHash(apv.payload);
+  apv.payloadHash = await payloadHash(apv.payload, apv.bundleType);
 }
 
 function rejectSubject(apv: ApprovalRequest): void {
@@ -1204,14 +1246,15 @@ function runSheetsSync(
   correlationId: string,
   afterQueued?: () => void,
 ): void {
-  const job = {
+  const job: MockState["syncJobs"][number] = {
     id: newId("syn_"),
     businessId,
-    target: "google_sheets" as const,
+    target: "google_sheets",
     recordType,
     recordId,
-    status: "PENDING" as MockState["syncJobs"][number]["status"],
+    state: "PENDING",
     attempts: 0,
+    nextRetryAt: nowIso(),
     createdAt: nowIso(),
     updatedAt: nowIso(),
   };
@@ -1223,9 +1266,10 @@ function runSheetsSync(
   const steps: (() => void)[] = [];
   if (retry) {
     steps.push(() => {
-      job.status = "RETRYING";
+      job.state = "RETRYING";
       job.attempts = 1;
       job.updatedAt = nowIso();
+      job.nextRetryAt = iso(Date.now() + timing.stepMs);
       emit(businessId, "sync.failed", correlationId, "system", {
         target: "google_sheets",
         syncJobId: job.id,
@@ -1237,7 +1281,7 @@ function runSheetsSync(
     });
   }
   steps.push(() => {
-    job.status = "DONE";
+    job.state = "DONE";
     job.attempts += 1;
     job.updatedAt = nowIso();
     emit(businessId, "sync.succeeded", correlationId, "system", { target: "google_sheets", syncJobId: job.id, recordType, recordId });
@@ -1358,6 +1402,7 @@ async function runFactEdit(apv: ApprovalRequest): Promise<void> {
           }
         }
       }
+      const resolved = conflictId ? state.conflicts.find((c) => c.id === conflictId && c.resolvedFactId === draft.id) : undefined;
       emit(apv.businessId, "fact.changed", apv.id, "system", {
         factId: draft.id,
         kind: draft.kind,
@@ -1365,6 +1410,7 @@ async function runFactEdit(apv: ApprovalRequest): Promise<void> {
         fromVersion: current?.version ?? 0,
         toVersion: draft.version,
         sourceType: draft.sourceType,
+        ...(resolved ? { resolvedConflictId: resolved.id } : {}),
       });
       succeedStep(apv, exe, apv.id);
     },
@@ -1590,6 +1636,18 @@ export async function proposeOrderOnCall(call: Call, contact: { name: string; me
   return { order, approval };
 }
 
+/**
+ * The slot a scripted booking call proposes: the first free time of the shared
+ * demo appointment day (just after the morning busy block, inside opening
+ * hours), a week later when that is under the two hour minimum notice.
+ */
+export function scriptedSlotStart(at: number): number {
+  const [morning] = materializeBusyBlocks(new Date(at));
+  let start = Date.parse(morning.endUtc);
+  while (start < at + 120 * MINUTE) start += 7 * 24 * 60 * MINUTE;
+  return start;
+}
+
 /** What propose_booking does. slotConflict makes the scripted recheck after approval find the slot taken. */
 export async function proposeBookingOnCall(
   call: Call,
@@ -1597,9 +1655,8 @@ export async function proposeBookingOnCall(
   options: { slotConflict?: boolean } = {},
 ): Promise<{ booking: Booking; approval: ApprovalRequest }> {
   const at = Date.now();
-  const service = BARBER_SERVICES[0];
-  const start = new Date(at + 26 * 60 * MINUTE);
-  start.setUTCMinutes(0, 0, 0);
+  const service = serviceHaircut;
+  const start = new Date(scriptedSlotStart(at));
   const booking: Booking = {
     id: newId("bkg_"),
     businessId: call.businessId,
@@ -1665,6 +1722,16 @@ export function listActivity(
 
 // ----------------------------------------------------- health, telemetry
 
+/**
+ * Mock control: Google Sheets loses its connection. The shared world keeps
+ * this as a separate export (integrationHealthDisconnected), so the default
+ * health stays as the shared default and this control switches to it.
+ */
+export function disconnectSheets(): void {
+  const at = nowIso();
+  state.health = { ...state.health, google_sheets: { ...integrationHealthDisconnected.google_sheets, lastCheckedAt: at } };
+}
+
 export function getHealth(refresh: boolean) {
   if (refresh) {
     const at = nowIso();
@@ -1673,16 +1740,9 @@ export function getHealth(refresh: boolean) {
   return state.health;
 }
 
+/** The shared telemetry fixture. It has no times, so it needs no materializing. */
 export function getTelemetry() {
-  return {
-    metrics: [
-      { name: "call_answer_latency" as const, p50Ms: 820, p95Ms: 1460, count: 14 },
-      { name: "first_audio" as const, p50Ms: 1310, p95Ms: 2280, count: 14 },
-      { name: "tool_latency" as const, p50Ms: 410, p95Ms: 1190, count: 61 },
-      { name: "approval_time" as const, p50Ms: 48000, p95Ms: 212000, count: 9 },
-      { name: "webhook_delay" as const, p50Ms: 1900, p95Ms: 6400, count: 7 },
-    ],
-  };
+  return structuredClone(sharedTelemetry);
 }
 
 // -------------------------------------------------- test console (no writes)

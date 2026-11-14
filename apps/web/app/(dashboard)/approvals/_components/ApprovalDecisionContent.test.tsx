@@ -6,6 +6,14 @@ import type {ReactNode} from 'react';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import * as api from '@/lib/api/client';
 import {BusinessProvider} from '@/lib/session';
+import {
+  approvalBookingPending,
+  approvalFactEditPending,
+  approvalOrderExpired,
+  approvalOrderPending,
+  approvalOrderRejected,
+  orderAwaitingApproval,
+} from '@abos/contracts/fixtures';
 import {advanceMockClock, getState, mockControls, server, setApprovalExpiry} from '@/mocks/server';
 import {requests, useMockServer} from '@/mocks/test-setup';
 import {ApprovalDecisionContent} from './ApprovalDecisionContent';
@@ -18,6 +26,9 @@ afterEach(() => {
 
 const PIZZA = 'biz_pizza_01';
 const BARBER = 'biz_barber_01';
+// Shared fixture approvals (@abos/contracts/fixtures).
+const PENDING = approvalOrderPending.id;
+const RECIPIENT_LAST4 = orderAwaitingApproval.contact.messageRecipient!.slice(-4);
 
 function renderDecision(approvalId: string, businessId = PIZZA, onDecided = vi.fn()) {
   const qc = new QueryClient({defaultOptions: {queries: {retry: false, staleTime: 0}, mutations: {retry: false}}});
@@ -38,21 +49,21 @@ const button = (name: string) => screen.getByRole('button', {name});
 
 describe('order bundle', () => {
   it('shows the itemized order, sandbox total, recipient, steps and the immutable IDs', async () => {
-    renderDecision('apv_pizza_pending');
+    renderDecision(PENDING);
     await screen.findByText('Order request');
-    const apv = getState().approvals.find((a) => a.id === 'apv_pizza_pending')!;
+    const apv = getState().approvals.find((a) => a.id === PENDING)!;
     await screen.findByText('Subtotal');
     expect(screen.getAllByText('Sandbox').length).toBeGreaterThan(0);
     expect(screen.getByText(apv.id)).toBeTruthy();
     expect(screen.getByText(apv.payloadHash)).toBeTruthy();
     expect(screen.getByText('Square (sandbox)')).toBeTruthy();
     expect(screen.getByText('Google Sheets')).toBeTruthy();
-    expect(screen.getAllByText(/phone ending 0136/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(new RegExp(`phone ending ${RECIPIENT_LAST4}`)).length).toBeGreaterThan(0);
     expect(screen.getByText(/^Expires in \d+:\d\d$/)).toBeTruthy();
   });
 
   it('sends one request for two fast presses, with the stored hash, and shows Approved only from the server', async () => {
-    const {onDecided} = renderDecision('apv_pizza_pending');
+    const {onDecided} = renderDecision(PENDING);
     const approve = await screen.findByRole('button', {name: 'Approve'});
     expect(screen.queryByText('The actions are now running.')).toBeNull();
     fireEvent.click(approve);
@@ -60,15 +71,15 @@ describe('order bundle', () => {
     await screen.findByText('The actions are now running.');
     expect(decisionRequests()).toHaveLength(1);
     const body = (await decisionRequests()[0].json()) as {decision: string; payloadHash: string};
-    const stored = getState().approvals.find((a) => a.id === 'apv_pizza_pending')!;
+    const stored = getState().approvals.find((a) => a.id === PENDING)!;
     expect(body).toEqual({decision: 'approve', payloadHash: stored.payloadHash});
     expect(decisionRequests()[0].headers.get('Idempotency-Key')).toBeTruthy();
-    expect(onDecided).toHaveBeenCalledWith(expect.objectContaining({approvalId: 'apv_pizza_pending', state: 'APPROVED'}));
+    expect(onDecided).toHaveBeenCalledWith(expect.objectContaining({approvalId: PENDING, state: 'APPROVED'}));
     expect(screen.getByRole('link', {name: 'Open Live operations'}).getAttribute('href')).toBe('/activity');
   });
 
   it('rejects with an optional reason', async () => {
-    renderDecision('apv_pizza_pending');
+    renderDecision(PENDING);
     fireEvent.click(await screen.findByRole('button', {name: 'Reject'}));
     fireEvent.change(screen.getByLabelText(/Reason/), {target: {value: 'Kitchen closed early'}});
     fireEvent.click(button('Reject request'));
@@ -80,14 +91,14 @@ describe('order bundle', () => {
 
 describe('requests that cannot be acted on', () => {
   it('shows an expired request with no decision buttons', async () => {
-    renderDecision('apv_pizza_expired');
+    renderDecision(approvalOrderExpired.id);
     await screen.findByText('This request expired. Nothing was sent.');
     expect(screen.queryByRole('button', {name: 'Approve'})).toBeNull();
     expect(screen.queryByRole('button', {name: 'Reject'})).toBeNull();
   });
 
   it('shows a decided request with who and when and no decision buttons', async () => {
-    renderDecision('apv_pizza_rejected');
+    renderDecision(approvalOrderRejected.id);
     await screen.findByText('Nothing was sent or charged.');
     expect(screen.getByText(/^Decided .* by usr_owner_01\.$/)).toBeTruthy();
     expect(screen.queryByRole('button', {name: 'Approve'})).toBeNull();
@@ -95,8 +106,8 @@ describe('requests that cannot be acted on', () => {
 
   it('locks the buttons when the countdown reaches zero while it is open', async () => {
     // createdAt, expiresAt and the hashed payload.expiresAt move together (contract cross-field rule).
-    await setApprovalExpiry('apv_pizza_pending', Date.now() + 1500);
-    renderDecision('apv_pizza_pending');
+    await setApprovalExpiry(PENDING, Date.now() + 1500);
+    renderDecision(PENDING);
     await screen.findByRole('button', {name: 'Approve'});
     await screen.findByText('This request expired. Nothing was sent.', undefined, {timeout: 4000});
     expect(screen.queryByRole('button', {name: 'Approve'})).toBeNull();
@@ -106,11 +117,11 @@ describe('requests that cannot be acted on', () => {
 
 describe('decision errors', () => {
   it('payload hash mismatch: says the request changed, locks, and reloads the new payload', async () => {
-    renderDecision('apv_pizza_pending');
+    renderDecision(PENDING);
     const approve = await screen.findByRole('button', {name: 'Approve'});
-    const oldHash = getState().approvals.find((a) => a.id === 'apv_pizza_pending')!.payloadHash;
-    await mockControls.simulatePayloadChanged('apv_pizza_pending');
-    const newHash = getState().approvals.find((a) => a.id === 'apv_pizza_pending')!.payloadHash;
+    const oldHash = getState().approvals.find((a) => a.id === PENDING)!.payloadHash;
+    await mockControls.simulatePayloadChanged(PENDING);
+    const newHash = getState().approvals.find((a) => a.id === PENDING)!.payloadHash;
     fireEvent.click(approve);
     await screen.findByText('This request changed since you opened it');
     const sent = (await decisionRequests()[0].json()) as {payloadHash: string};
@@ -123,9 +134,9 @@ describe('decision errors', () => {
   });
 
   it('already decided: shows the recorded decision and no more actions', async () => {
-    renderDecision('apv_barber_pending', BARBER);
+    renderDecision(approvalBookingPending.id, BARBER);
     const approve = await screen.findByRole('button', {name: 'Approve'});
-    const apv = await api.getApproval(BARBER, 'apv_barber_pending');
+    const apv = await api.getApproval(BARBER, approvalBookingPending.id);
     await api.decideApproval(BARBER, apv.id, {decision: 'reject', payloadHash: apv.payloadHash});
     fireEvent.click(approve);
     await screen.findByText('Already decided');
@@ -134,7 +145,7 @@ describe('decision errors', () => {
   });
 
   it('expired on the server: says nothing was sent', async () => {
-    renderDecision('apv_pizza_pending');
+    renderDecision(PENDING);
     const approve = await screen.findByRole('button', {name: 'Approve'});
     advanceMockClock(11 * 60_000);
     fireEvent.click(approve);
@@ -142,7 +153,7 @@ describe('decision errors', () => {
   });
 
   it('network failure: offers a retry that reuses the same Idempotency-Key', async () => {
-    renderDecision('apv_pizza_pending');
+    renderDecision(PENDING);
     const approve = await screen.findByRole('button', {name: 'Approve'});
     server.use(http.post('*/api/approvals/:id/decision', () => HttpResponse.error(), {once: true}));
     fireEvent.click(approve);
@@ -164,13 +175,15 @@ describe('decision errors', () => {
 
 describe('fact edit', () => {
   it('shows before and after and says the owner is confirming their own change', async () => {
-    renderDecision('apv_pizza_fact_sun');
+    // The shared pending edit: Friday closes at 23:00 instead of 22:00.
+    renderDecision(approvalFactEditPending.id);
     await screen.findByText('Confirm your change');
     expect(screen.getByText(/You asked for this change/)).toBeTruthy();
     expect(screen.getByText('Before')).toBeTruthy();
     expect(screen.getByText('After')).toBeTruthy();
-    expect(screen.getByText('12:00 to 22:00')).toBeTruthy();
-    expect(screen.getByText('Sunday')).toBeTruthy();
+    expect(screen.getByText('11:00 to 22:00')).toBeTruthy();
+    expect(screen.getByText('11:00 to 23:00')).toBeTruthy();
+    expect(screen.getByText('Friday')).toBeTruthy();
     expect(button('Confirm change')).toBeTruthy();
   });
 });

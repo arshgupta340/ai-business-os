@@ -719,6 +719,14 @@ function StepsList({t}: {t: TypedApproval}) {
  * True when the order or booking the screen loaded does not match the hashed
  * payload. Then the itemized view would not be what the owner approves.
  */
+/**
+ * Payload times are in toISOString() form (CONTRACTS 4); a stored row may
+ * write the same instant without milliseconds. Compare instants, not text.
+ */
+function sameInstant(a: string, b: string): boolean {
+  return Date.parse(a) === Date.parse(b);
+}
+
 export function subjectDiffers(t: TypedApproval, order?: Order, booking?: Booking): boolean {
   if (t.bundleType === 'order_bundle' && order) {
     return (
@@ -733,8 +741,8 @@ export function subjectDiffers(t: TypedApproval, order?: Order, booking?: Bookin
       booking.id !== t.payload.subjectId ||
       booking.serviceId !== t.payload.serviceId ||
       booking.calendarId !== t.payload.calendarId ||
-      booking.startUtc !== t.payload.startUtc ||
-      booking.endUtc !== t.payload.endUtc
+      !sameInstant(booking.startUtc, t.payload.startUtc) ||
+      !sameInstant(booking.endUtc, t.payload.endUtc)
     );
   }
   return false;

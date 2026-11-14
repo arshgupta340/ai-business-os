@@ -73,6 +73,8 @@ export interface MockControls {
    * and the order goes from PAYMENT_LINK_READY straight to PAYMENT_PENDING.
    */
   simulateQrOnlyChannel?(): void;
+  /** Mock only. Google Sheets reports `disconnected` (the shared integrationHealthDisconnected) until reset(). */
+  simulateSheetsDisconnected?(): void;
 }
 
 let controls: MockControls | null = null;
