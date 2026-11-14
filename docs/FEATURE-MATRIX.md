@@ -1,6 +1,6 @@
 # Feature matrix
 
-**Task:** S-06. **Updated:** 2026-11-14. **Describes:** the code on `main` at commit `50d4c80`, merged into branch `arsh/S-06-docs`.
+**Task:** S-06. **Updated:** 2026-11-14. **Describes:** the code on `main` at commit `4f1bed8`, merged into branch `arsh/S-06-docs`.
 
 One row for each acceptance criterion AC-01 to AC-20 and for each P0 item in `docs/PRD.md` section 4. Task IDs come from `scripts/tasks.json`. Where the PRD and `docs/SPEC.md` use different names, the row uses the SPEC name.
 

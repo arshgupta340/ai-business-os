@@ -1,6 +1,6 @@
 # Security notes
 
-**Task:** S-06. **Updated:** 2026-11-14. **Describes:** the code on `main` at commit `50d4c80`, merged into branch `arsh/S-06-docs`.
+**Task:** S-06. **Updated:** 2026-11-14. **Describes:** the code on `main` at commit `4f1bed8`, merged into branch `arsh/S-06-docs`.
 
 This file lists the eight rules from `AGENTS.md` that are never broken. For each rule it says where the code enforces it, which tests cover it, what has been verified against a real service, and what is not yet enforced or not yet tested. It then describes the restricted database role, webhook handling, idempotency keys, secrets, and the known limits.
 
@@ -80,7 +80,7 @@ This is the complete list as of 2026-11-14 10:00 Pacific. I did not rerun any of
 
 ## 3. Test results from this checkout
 
-I ran these on 2026-11-14 in a cloud container with 4 cores and Node 22.23.4, on `main` at `50d4c80` merged with the four documents. The spec and CI name Node 24.
+I ran these on 2026-11-14 in a cloud container with 4 cores and Node 22.23.4, on `main` at `4f1bed8` merged with the four documents. I also ran them one commit earlier, at `50d4c80`, with the same totals: the commit between changed only Markdown files. The spec and CI name Node 24.
 
 | Command | Result |
 |---|---|
@@ -90,7 +90,7 @@ I ran these on 2026-11-14 in a cloud container with 4 cores and Node 22.23.4, on
 
 **The 2 expected failures.** The adversarial suite marks two known open defects with `it.fails`, so the run passes while they stay open. One: `GET /api/builder/ping` answers without a token (`apps/server/test/adversarial/access.test.ts`, issue #96). Two: after crash recovery a message dispatch stays `QUEUED` where `docs/FLOWS.md` says `UNKNOWN` (`apps/server/test/adversarial/idempotency.test.ts`). The second fails closed: nothing resends a queued dispatch, and the checkout view shows it as unknown.
 
-**CI.** The CI workflow (typecheck, `npm test`, the web tests, on Node 24) finished with success on `main` at `50d4c80` (run 130). I read that result from GitHub. The result for this branch is in the pull request, not in this file.
+**CI.** The CI workflow (typecheck, `npm test`, the web tests, on Node 24) finished with success on `main` at `50d4c80` (run 130), the last commit on `main` that changed code before this document. I read that result from GitHub. The result for this branch is in the pull request, not in this file.
 
 ## 4. The eight rules
 

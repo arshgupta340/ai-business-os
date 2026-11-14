@@ -1,6 +1,6 @@
 # Implementation notes
 
-**Task:** S-06. **Updated:** 2026-11-14. **Describes:** the code on `main` at commit `50d4c80`, merged into branch `arsh/S-06-docs`.
+**Task:** S-06. **Updated:** 2026-11-14. **Describes:** the code on `main` at commit `4f1bed8`, merged into branch `arsh/S-06-docs`.
 
 This file describes the server as it is built on `main`, how the database is designed, how an approval becomes executed steps, where the build differs from `docs/PRD.md`, and what is still open. The PRD asks for unverified assumptions and blockers to be written here. They are in sections 6 and 7.
 
@@ -241,7 +241,7 @@ In the order I would do them.
 11. **Wire the extraction stores to Postgres**, and pass the call finish signal to the voice plugin.
 12. **Close the two defects the adversarial suite records as open**: `GET /api/builder/ping` answers without a token, and a dispatch stays `QUEUED` after crash recovery.
 13. **Put the smoke script in the repository.** The list of real checks cites a smoke script that passes 9 of 9 on the deployed server. I found no such script on `main`.
-14. **Bring three other documents up to date.** `docs/DEPLOY.md`, `docs/DEMO-LAPTOP.md` and `docs/notes-web-real-mode.md` still say that the deployed server serves only the health route and the builder, that the price route is missing, or that integration health is not built. None of that is true of `main`. This pull request changes only the four delivery documents.
+14. **Bring `docs/DEPLOY.md` up to date.** It still says that `GET /api/integrations/health` is not built and that the server has no `SIGTERM` handler. Neither is true of `main`. This pull request changes only the four delivery documents.
 
 ## 8. Commands
 

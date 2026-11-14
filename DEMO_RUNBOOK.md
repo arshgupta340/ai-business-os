@@ -2,7 +2,7 @@ DRAFT
 
 # Demo runbook
 
-**Task:** S-06. **Updated:** 2026-11-14. **Describes:** the code on `main` at commit `50d4c80`, merged into branch `arsh/S-06-docs`.
+**Task:** S-06. **Updated:** 2026-11-14. **Describes:** the code on `main` at commit `4f1bed8`, merged into branch `arsh/S-06-docs`.
 
 This is a draft script. It is not a record of a demo that happened. No rehearsal by a person is recorded for any step in it, so every step is marked "Not rehearsed". Where a script has verified part of a step against real services, the step says which part and where. The complete list of real checks is in `SECURITY_NOTES.md` section 2.
 
@@ -138,7 +138,7 @@ If a signed request is refused with 401 or 403, the address the provider signed 
 npm run dev -w @abos/web
 ```
 
-That guide was written before the full server was deployed. Its statements that the server serves only the health route and the builder, and that the price route is missing, are out of date.
+That guide also lists what the screen shows after sign-in when the business list fails to load, and what each of those states means. It says the first run against the deployed server should be treated as a test.
 
 ### 2.7 Preflight, 30 minutes before
 
