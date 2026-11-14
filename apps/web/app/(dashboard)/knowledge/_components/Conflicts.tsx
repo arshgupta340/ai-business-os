@@ -27,6 +27,7 @@ import {ApiErrorBanner} from './ApiErrorBanner';
 import {ProposalNotice} from './ProposalNotice';
 import {
   KIND_LABELS,
+  conflictVariationId,
   describeValue,
   factKeyLabel,
   findVariation,
@@ -76,7 +77,7 @@ export function ConflictCard({businessId, conflict, facts, catalog, onResolved, 
   const file = useFile(businessId, uploadedFact?.fileId);
   const price = isPriceConflict(conflict);
   const view = conflictView(conflict.state, conflict.required);
-  const match = price ? findVariation(catalog, conflict.key) : undefined;
+  const match = price ? findVariation(catalog, conflictVariationId(conflict)) : undefined;
   const subject = match
     ? `${match.item.name}, ${match.variation.name}`
     : factKeyLabel(conflict.kind, conflict.key, uploadedFact?.value ?? uploaded?.value);

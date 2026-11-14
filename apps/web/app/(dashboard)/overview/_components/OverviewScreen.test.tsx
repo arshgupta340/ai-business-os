@@ -68,6 +68,6 @@ describe('OverviewScreen', () => {
   it('links each agent card to its agent page', async () => {
     renderOverview();
     const cards = await screen.findAllByRole('link', {name: /^Open /});
-    expect(cards.map((c) => c.getAttribute('href')).sort()).toEqual(['/agents/agt_pizza_01', '/agents/agt_pizza_faq_01']);
+    expect(cards.map((c) => c.getAttribute('href')).sort()).toEqual(['/agents/agt_pizza_01', '/agents/agt_pizza_faq_01', '/agents/agt_pizza_paused_88']);
   });
 });

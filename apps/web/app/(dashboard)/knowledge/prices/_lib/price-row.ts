@@ -7,6 +7,7 @@
  */
 import type {ActivityEvent, ApprovalRequest, BusinessFact, CatalogItem, FactConflict, PriceEditApprovalPayload} from '@/lib/api';
 import {statusView, type StatusView} from '@/lib/status';
+import {conflictVariationId, menuItemNames} from '../../_components/knowledge-model';
 
 export const SQUARE_STEP = 'square.catalog.price.update';
 export const SYNC_STEP = 'local.catalog.sync';
@@ -187,8 +188,9 @@ const normalize = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
 /**
  * The open menu price conflict for a variation, if any. The docs say a draft
  * menu_item fact is compared with the catalog on item and variation names
- * (DATA-MODEL section 5). The fixtures also use the Square variation id as the
- * conflict key. Either match counts.
+ * (DATA-MODEL section 5). A conflict may also name the Square variation, in a
+ * candidate's `value.variationId` (the shared fixtures) or as its key. Either
+ * match counts.
  */
 export function priceConflictFor(
   item: Pick<CatalogItem, 'name'>,
@@ -200,13 +202,13 @@ export function priceConflictFor(
     if (c.kind !== 'menu_item' || c.state !== 'open') continue;
     const upload = c.candidates.find((x) => x.sourceType === 'upload');
     const draft = upload?.factId ? facts.find((f) => f.id === upload.factId) : undefined;
-    const draftValue = (draft?.value ?? {}) as {item?: unknown; variation?: unknown};
-    const byKey = c.key === variation.id;
+    const names = menuItemNames(draft?.value);
+    const byKey = conflictVariationId(c) === variation.id;
     const byName =
-      typeof draftValue.item === 'string' &&
-      typeof draftValue.variation === 'string' &&
-      normalize(draftValue.item) === normalize(item.name) &&
-      normalize(draftValue.variation) === normalize(variation.name);
+      names.item !== undefined &&
+      names.variation !== undefined &&
+      normalize(names.item) === normalize(item.name) &&
+      normalize(names.variation) === normalize(variation.name);
     if (!byKey && !byName) continue;
     const value = (upload?.value ?? {}) as {priceMinor?: unknown};
     return {conflictId: c.id, ...(typeof value.priceMinor === 'number' ? {uploadedPriceMinor: value.priceMinor} : {})};

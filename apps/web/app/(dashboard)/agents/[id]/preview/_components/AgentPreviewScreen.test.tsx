@@ -356,7 +356,7 @@ describe('Agent preview', {timeout: 30000}, () => {
   });
 
   it('shows a paused fixture agent as paused, with the simulated call off', async () => {
-    renderScreen('agt_pizza_faq_01');
+    renderScreen('agt_pizza_paused_88');
     expect(await screen.findByText('This agent is paused')).toBeTruthy();
     expect(screen.getByText(/Simulated call is off: This agent is paused/)).toBeTruthy();
   });

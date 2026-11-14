@@ -128,6 +128,20 @@ describe("price_edit", () => {
   });
 });
 
+describe("simulateSheetsDisconnected", () => {
+  it("switches Google Sheets to the shared disconnected health until reset, keeping the degraded calendar", async () => {
+    const before = await api.getIntegrationsHealth(PIZZA);
+    expect(before.google_sheets.state).toBe("connected");
+    expect(before.google_calendar.state).toBe("degraded");
+    mockControls.simulateSheetsDisconnected?.();
+    const after = await api.getIntegrationsHealth(PIZZA);
+    expect(after.google_sheets).toMatchObject({ state: "disconnected", detail: "Reconnect Google Sheets to resume sync." });
+    expect(after.google_calendar.state).toBe("degraded");
+    await mockControls.reset();
+    expect((await api.getIntegrationsHealth(PIZZA)).google_sheets.state).toBe("connected");
+  });
+});
+
 describe("reset", () => {
   it("tells subscribers so the activity feed can drop its events", async () => {
     let calls = 0;

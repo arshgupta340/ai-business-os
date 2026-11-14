@@ -6,6 +6,7 @@ import {http, HttpResponse} from 'msw';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {createApiQueryClient, queryKeys} from '@/lib/api';
 import {BusinessProvider} from '@/lib/session';
+import {approvalPriceEditPending} from '@abos/contracts/fixtures';
 import {getState, server} from '@/mocks/server';
 import {requests, useMockServer} from '@/mocks/test-setup';
 import {whenIdle} from '@/mocks/server';
@@ -71,7 +72,13 @@ async function button(text: string): Promise<HTMLElement> {
 }
 
 const MARG_LG = 2;
+/** Pepperoni Medium ($18.00). Pepperoni Large has the shared pending price edit (apv_demo_p01, 2200 to 1900). */
+const PEP_MD = 4;
 const PEP_LG = 5;
+
+/** The price_edit approval this test created, not the seeded pending one. */
+const createdPriceEdit = () =>
+  getState().approvals.find((a) => a.bundleType === 'price_edit' && a.state === 'PENDING' && a.id !== approvalPriceEditPending.id)!;
 
 const proposeRequests = () => requests.filter((r) => r.method === 'POST' && r.url.includes('/catalog/prices/propose'));
 
@@ -105,7 +112,7 @@ describe('PricesScreen', () => {
     await within(marg).findByText('Your uploaded menu says');
     expect(within(marg).getByText('$21.00')).toBeTruthy();
     expect(within(marg).getByText(/To prefer the uploaded price, change the price here/)).toBeTruthy();
-    expect(within(await row(PEP_LG)).queryByText('Your uploaded menu says')).toBeNull();
+    expect(within(await row(PEP_MD)).queryByText('Your uploaded menu says')).toBeNull();
     expect(requests.some((r) => r.url.includes('/resolve'))).toBe(false);
   });
 
@@ -129,7 +136,7 @@ describe('PricesScreen', () => {
     await screen.findByText('Price change request');
     expect(proposeRequests()).toHaveLength(1);
     expect(await proposeRequests()[0].json()).toEqual({variationId: 'SQ_VAR_MARG_LG', newPriceMinor: 1999, currency: 'USD'});
-    const created = getState().approvals.find((a) => a.bundleType === 'price_edit' && a.state === 'PENDING')!;
+    const created = createdPriceEdit();
     expect(created.payload).toMatchObject({fromPriceMinor: 2000, newPriceMinor: 1999});
     // The dialog shows the approval the server returned, old and new price.
     expect(await screen.findByText(created.id)).toBeTruthy();
@@ -173,33 +180,41 @@ describe('PricesScreen', () => {
 
   it('leaves the price unchanged when the owner rejects', async () => {
     renderScreen();
-    await propose(PEP_LG, '23.50');
+    await propose(PEP_MD, '23.50');
     fireEvent.click(await button('Reject'));
     fireEvent.click(await button('Reject request'));
-    const pep = await row(PEP_LG);
+    const pep = await row(PEP_MD);
     await within(pep).findByText('Rejected, price unchanged');
-    expect(within(pep).getByText('$22.00')).toBeTruthy();
+    expect(within(pep).getByText('$18.00')).toBeTruthy();
     expect(within(pep).getByText(/The price is unchanged/)).toBeTruthy();
-    expect(getState().catalog.find((c) => c.squareItemId === 'SQ_ITEM_PEP')!.variations[2].priceMinor).toBe(2200);
+    expect(getState().catalog.find((c) => c.squareItemId === 'SQ_ITEM_PEP')!.variations[1].priceMinor).toBe(1800);
   });
 
   it('shows a pending confirmation with a button that reopens the dialog, and expiry leaves the price unchanged', async () => {
     const {qc} = renderScreen();
-    await propose(PEP_LG, '23.50');
+    await propose(PEP_MD, '23.50');
     await screen.findByText('Price change request');
     fireEvent.click(screen.getAllByRole('button', {name: /close/i})[0]);
-    const pep = await row(PEP_LG);
+    const pep = await row(PEP_MD);
     await within(pep).findByText('Waiting for your confirmation');
     fireEvent.click(within(pep).getByRole('button', {name: 'Review and confirm'}));
     await screen.findByText('Price change request');
     fireEvent.click(screen.getAllByRole('button', {name: /close/i})[0]);
 
-    const apv = getState().approvals.find((a) => a.bundleType === 'price_edit' && a.state === 'PENDING')!;
+    const apv = createdPriceEdit();
     apv.state = 'EXPIRED';
     apv.decidedAt = new Date().toISOString(); // contract: decidedAt is present on every state but PENDING
     await refetch(qc, 'approvals');
-    await within(await row(PEP_LG)).findByText('Expired, price unchanged');
-    expect(within(await row(PEP_LG)).getByText('$22.00')).toBeTruthy();
+    await within(await row(PEP_MD)).findByText('Expired, price unchanged');
+    expect(within(await row(PEP_MD)).getByText('$18.00')).toBeTruthy();
+  });
+
+  it('shows the seeded pending price edit on its row, with the price unchanged until it is approved', async () => {
+    renderScreen();
+    const pep = await row(PEP_LG);
+    await within(pep).findByText('Waiting for your confirmation');
+    expect(within(pep).getByText('$22.00')).toBeTruthy();
+    expect(within(pep).getByRole('button', {name: 'Review and confirm'})).toBeTruthy();
   });
 
   it('shows each documented propose error with its own message', async () => {
