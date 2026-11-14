@@ -26,6 +26,19 @@ import { PLAIN_SPEECH_RULE, plainSpeech } from './plain';
 import type { CallsStore } from '../../compose/ports';
 
 const MAX_TOOL_CALLS_PER_TURN = 8;
+
+/**
+ * Live run 2026-11-14: turns carry only spoken text, so after propose_order the model no longer saw its
+ * own tool result and told the caller nothing was submitted. Once the call has a proposal (stage
+ * CUSTOMER_CONFIRMED, kept on the call row), every later turn is told so. The phone relay needs no such
+ * line: its Realtime session keeps the function call outputs in the conversation.
+ */
+export function proposalSentNote(template: AgentSpec['template'], stage: CallStage): string | undefined {
+  if (stage !== 'CUSTOMER_CONFIRMED') return undefined;
+  return template === 'appointment_booker'
+    ? 'On this call you already sent this booking request to the shop for approval with propose_booking. If the caller asks or says goodbye, tell them the request was sent to the shop for approval and they will hear once the owner approves it. Do not call propose_booking again, and never say it is not submitted.'
+    : 'On this call you already sent this order to the shop for approval with propose_order. If the caller asks or says goodbye, tell them the order was sent to the shop for approval and that a payment link will follow once the owner approves it. Do not call propose_order again, and never say it is not submitted.';
+}
 const MAX_SESSIONS = 200;
 
 export interface SimCallDeps {
@@ -132,9 +145,10 @@ export function registerSimCall(app: FastifyInstance, deps: SimCallDeps): void {
         return result;
       };
       let reply: string;
+      const sentNote = proposalSentNote(spec.template, s.stage);
       try {
         ({ reply } = await deps.model.respond({
-          instructions: `${agentInstructions(spec as Parameters<typeof agentInstructions>[0], String(agent.business_name))}\n${PLAIN_SPEECH_RULE}`,
+          instructions: `${agentInstructions(spec as Parameters<typeof agentInstructions>[0], String(agent.business_name))}\n${PLAIN_SPEECH_RULE}${sentNote ? `\n${sentNote}` : ''}`,
           history: s.history, message: input.message, tools, now: deps.now(), executeTool,
         }));
       } catch {

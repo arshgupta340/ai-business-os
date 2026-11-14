@@ -41,3 +41,24 @@ describe('payment reconcile poll', () => {
     await webhooks.stop();
   });
 });
+
+describe('reconcile failure log', () => {
+  it('names the error codes, never an ID or free text', async () => {
+    const { reconcileErrorCodes } = await import('../../src/compose/webhooks');
+    const routine = Object.assign(new Error('PAYMENT: location mismatch'), { code: 'P0001' });
+    const withId = Object.assign(new Error('PAYMENT: order ord_1234567890 not found'), { code: 'P0001' });
+    const { AppError } = await import('../../src/errors');
+    const square = Object.assign(new Error('Status code: 401 body {"token":"x"}'), { name: 'SquareError', statusCode: 401 });
+    const codes = reconcileErrorCodes(new AggregateError([routine, withId, new AppError('INTEGRATION_UNAVAILABLE', 'Square down'), square, 'weird']));
+    expect(codes).toEqual(['P0001 PAYMENT: location mismatch', 'P0001 PAYMENT', 'INTEGRATION_UNAVAILABLE', 'SquareError 401', 'unknown']);
+  });
+
+  it('logs the codes when a pass fails', async () => {
+    const warn = vi.fn();
+    const db = { query: vi.fn(async () => { throw Object.assign(new Error('PAYMENT: location mismatch'), { code: 'P0001' }); }), transaction: vi.fn() };
+    const providers = { square: { findPaymentForOrder: vi.fn(async () => []) } } as unknown as SeamDeps['providers'];
+    const seam = { env: parseEnv({}), db, providers, now: () => new Date(), newId: (p: string) => `${p}1`, log: { ...silentLog, warn } } as unknown as SeamDeps;
+    await createDbWebhooks(seam, async () => undefined).reconcileNow();
+    expect(warn).toHaveBeenCalledWith({ job: 'reconcile', codes: ['P0001 PAYMENT: location mismatch'] }, 'payment reconciliation will retry');
+  });
+});

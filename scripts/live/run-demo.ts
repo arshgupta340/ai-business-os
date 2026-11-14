@@ -98,8 +98,8 @@ async function simulatedCall(agentId: string, businessId: string, proposeTool: '
     for (const e of t.toolTrace) check(e.mocked === false, 'sim-call tools are real');
     const p = t.toolTrace.find((e) => e.tool === proposeTool && e.output?.ok === true);
     if (p) {
-      await simTurn(agentId, businessId, { callId, message: 'Thanks, bye.', end: true });
-      return { callId: callId!, proposalId: String(p.output.proposalId), approvalId: String(p.output.approvalId), turns: i + 1 };
+      const bye = await simTurn(agentId, businessId, { callId, message: 'Thanks, bye.', end: true });
+      return { callId: callId!, proposalId: String(p.output.proposalId), approvalId: String(p.output.approvalId), turns: i + 1, bye: bye.reply };
     }
     if (i === lines.length - 1) await simTurn(agentId, businessId, { callId, message: 'Bye.', end: true });
   }
@@ -163,6 +163,8 @@ async function flowPizza() {
   log('FLOW 1 pizza order: simulated call with the real model');
   const call = await simulatedCall('agt_pizza_01', PIZZA, 'propose_order', pizzaLines('Testy McFake'));
   log(`proposal ${short(call.proposalId)} approval ${short(call.approvalId)} after ${call.turns} caller turns`);
+  const byeOk = /approv/i.test(call.bye) && /payment link|link/i.test(call.bye) && !/(haven.t|not) (been )?(submitted|sent)/i.test(call.bye);
+  log(`closing line mentions approval and the payment link, no denial: ${byeOk}`);
   const a = await approvalFor(PIZZA, call.approvalId);
   check(a.state === 'PENDING' && a.bundleType === 'order_bundle' && a.subjectId === call.proposalId, 'pending order_bundle approval for the order');
   check(a.payload.messageChannel === 'qr_only' && !('messageRecipient' in a.payload), 'qr_only, no recipient');
@@ -207,8 +209,11 @@ async function flowPizza() {
   const final = await order(call.proposalId);
   log(`Square idempotency key equals the database key: ${short(sq.idempotency_key)} (link ${short(final.squarePaymentLinkId)}, Square order ${short(final.squareOrderId)})`);
   state.pizza = { orderId: call.proposalId, approvalId: call.approvalId, payloadHash: a.payloadHash, squareOrderId: final.squareOrderId, totalMinor: final.totalMinor, currency: final.currency };
-  record('1 pizza order', final.status === 'PAYMENT_PENDING',
-    `order ${short(call.proposalId)} AWAITING_OWNER_APPROVAL -> ${[...seen].join(' -> ')}; 1 Square link (${short(final.squarePaymentLinkId)}), QR host ${host}; ${timeToLink}`);
+  const feed = (await q<{ t: string }>("select payload->>'to' as t from public.activity_events where business_id = $1 and type = 'order.status_changed' and payload->>'orderId' = $2 order by occurred_at, id", [PIZZA, call.proposalId])).map((r) => r.t);
+  const feedOk = feed.join(',') === 'AWAITING_OWNER_APPROVAL,APPROVED,CREATING_CHECKOUT,PAYMENT_LINK_READY,PAYMENT_PENDING';
+  log(`feed order by occurred_at: ${feed.join(' > ')} (in order: ${feedOk})`);
+  record('1 pizza order', final.status === 'PAYMENT_PENDING' && byeOk && feedOk,
+    `closing line ok=${byeOk}, feed in order=${feedOk}; order ${short(call.proposalId)} AWAITING_OWNER_APPROVAL -> ${[...seen].join(' -> ')}; 1 Square link (${short(final.squarePaymentLinkId)}), QR host ${host}; ${timeToLink}`);
 }
 
 async function loadPizzaState() {
@@ -223,24 +228,42 @@ async function flowPay() {
   await loadPizzaState();
   check(state.pizza, 'a pizza order from flow 1 or --order <id>');
 
-  // ----- FLOW 2: pay in the sandbox without a card form -----
-  log('FLOW 2 sandbox payment with the published test nonce');
-  check(process.env.SQUARE_ENVIRONMENT === 'sandbox', 'SQUARE_ENVIRONMENT is exactly sandbox');
-  check(new URL(SQUARE_SANDBOX).host === 'connect.squareupsandbox.com', 'sandbox host');
+  // ----- FLOW 2: SIMULATED customer payment in the sandbox, without a card form -----
+  // Decision by the lead (2026-11-14): open the payment link's DRAFT order through UpdateOrder, then pay
+  // it with Square's published sandbox nonce. Sandbox only; every line is labelled SIMULATED.
+  const sim = (m: string) => log(`SIMULATED ${m}`);
+  sim('FLOW 2 sandbox payment with the published test nonce');
+  if (process.env.SQUARE_ENVIRONMENT !== 'sandbox' || new URL(SQUARE_SANDBOX).host !== 'connect.squareupsandbox.com') {
+    sim('refused: SQUARE_ENVIRONMENT must be exactly sandbox and the host the sandbox host');
+    record('2 sandbox payment', false, 'SIMULATED refused: not sandbox');
+    return;
+  }
   const p = state.pizza;
-  // Stable per order (and attempt): a rerun cannot pay twice. --pay-attempt N only after a declined attempt.
+  const sqHeaders = { Authorization: `Bearer ${env('SQUARE_ACCESS_TOKEN')}`, 'Content-Type': 'application/json', 'Square-Version': '2025-01-23' };
+  const errs = (b: Json) => (b.errors as Json[] | undefined)?.map((e) => `${e.code} ${e.field ?? ''} ${String(e.detail ?? '').slice(0, 160)}`).join(' | ') ?? '';
+  const sqOrder = (await (await fetch(`${SQUARE_SANDBOX}/v2/orders/${p.squareOrderId}`, { headers: sqHeaders, redirect: 'error' })).json() as Json).order as Json;
+  sim(`Square order ${short(p.squareOrderId)} state ${sqOrder?.state} version ${sqOrder?.version} total ${sqOrder?.total_money?.amount}`);
+  // Stable keys per order (and attempt): a rerun cannot open or pay twice. --pay-attempt N only after a declined attempt.
   const ai = args.indexOf('--pay-attempt');
-  const payKey = `pay-${p.orderId.slice(-24)}-${ai >= 0 ? args[ai + 1] : '1'}`;
+  const attempt = ai >= 0 ? args[ai + 1] : '1';
+  if (sqOrder?.state === 'DRAFT') {
+    const up = await fetch(`${SQUARE_SANDBOX}/v2/orders/${p.squareOrderId}`, { method: 'PUT', redirect: 'error', headers: sqHeaders,
+      body: JSON.stringify({ idempotency_key: `open-${p.orderId.slice(-24)}-${attempt}`, order: { location_id: env('SQUARE_LOCATION_ID'), version: sqOrder.version, state: 'OPEN' } }) });
+    const upBody = (await up.json()) as Json;
+    sim(`UpdateOrder state OPEN: HTTP ${up.status} ${up.ok ? `state ${upBody.order?.state} version ${upBody.order?.version}` : errs(upBody)}`);
+    if (!up.ok || upBody.order?.state !== 'OPEN') { record('2 sandbox payment', false, `SIMULATED UpdateOrder refused: HTTP ${up.status} ${errs(upBody)}`); return; }
+  } else if (sqOrder?.state !== 'OPEN') { record('2 sandbox payment', false, `SIMULATED Square order is ${sqOrder?.state}, not payable`); return; }
+  const payKey = `pay-${p.orderId.slice(-24)}-${attempt}`;
   const tPay = Date.now();
-  const payRes = await fetch(`${SQUARE_SANDBOX}/v2/payments`, { method: 'POST', redirect: 'error',
-    headers: { Authorization: `Bearer ${env('SQUARE_ACCESS_TOKEN')}`, 'Content-Type': 'application/json', 'Square-Version': '2025-01-23' },
+  const payRes = await fetch(`${SQUARE_SANDBOX}/v2/payments`, { method: 'POST', redirect: 'error', headers: sqHeaders,
     body: JSON.stringify({ source_id: 'cnon:card-nonce-ok', idempotency_key: payKey.slice(0, 45), order_id: p.squareOrderId,
       amount_money: { amount: p.totalMinor, currency: p.currency }, location_id: env('SQUARE_LOCATION_ID'), autocomplete: true }) });
   const payBody = (await payRes.json()) as Json;
   const payment = payBody.payment as Json | undefined;
+  sim(`CreatePayment: HTTP ${payRes.status} ${payRes.ok ? `payment ${short(payment?.id)} ${payment?.status} ${payment?.amount_money?.amount} ${payment?.amount_money?.currency}` : errs(payBody)}`);
   record('2 sandbox payment', payRes.ok && payment?.status === 'COMPLETED',
-    payRes.ok ? `payment ${short(payment?.id)} ${payment?.status} ${payment?.amount_money?.amount} ${payment?.amount_money?.currency}, order ${short(payment?.order_id)}`
-      : `HTTP ${payRes.status} ${(payBody.errors as Json[] | undefined)?.map((e) => `${e.code} ${e.field ?? ''} ${String(e.detail ?? '').slice(0, 160)}`).join(' | ')}`);
+    payRes.ok ? `SIMULATED UpdateOrder OPEN + CreatePayment ${short(payment?.id)} ${payment?.status} ${payment?.amount_money?.amount} ${payment?.amount_money?.currency}, order ${short(payment?.order_id)}`
+      : `SIMULATED HTTP ${payRes.status} ${errs(payBody)}`);
   if (!payRes.ok) return;
 
   // ----- FLOW 3: reconciliation (poll or the owner's recovery route) -----
@@ -248,7 +271,8 @@ async function flowPay() {
   const pollWait = await waitFor('PAID_VERIFIED by the poll', 75_000, async () => {
     const o = await order(p.orderId);
     return ['PAID_VERIFIED', 'FULFILLMENT_READY'].includes(o.status) ? o.status : undefined;
-  }, 2000).catch(() => undefined);
+  }, 1000).catch(() => undefined);
+  const payToPaid = pollWait ? Date.now() - tPay : undefined;
   let via = 'reconcile poll';
   if (!pollWait) {
     via = 'owner recovery route (orders/:id/cancel, which reconciles and refuses)';
@@ -263,7 +287,7 @@ async function flowPay() {
   const payToVerified = Date.now() - tPay;
   const receipts = await q("select payment_id, amount_minor, currency, environment from public.payment_receipts where order_id = $1", [p.orderId]);
   const events = (await q<{ type: string }>("select type from public.activity_events where business_id = $1 and (payload->>'orderId' = $2 or correlation_id = $2) order by occurred_at", [PIZZA, p.orderId])).map((e) => e.type);
-  log(`receipts: ${receipts.length}; events: ${events.join(', ')}`);
+  log(`receipts: ${receipts.length} (${receipts.map((r) => `${short(r.payment_id)} ${r.amount_minor} ${r.currency} ${r.environment}`).join(', ')}); events: ${events.join(', ')}`);
   let sheetOk = false;
   let sheetDetail = 'no sync job';
   if (paid) {
@@ -278,7 +302,7 @@ async function flowPay() {
     }
   }
   record('3 reconciliation', !!paid && receipts.length === 1 && sheetOk,
-    `${paid ? 'PAID_VERIFIED -> FULFILLMENT_READY' : 'not verified'} via ${via}; payment->FULFILLMENT_READY ${payToVerified} ms; ${receipts.length} payment_receipts row; ${sheetDetail}`);
+    `${paid ? 'PAID_VERIFIED -> FULFILLMENT_READY' : 'not verified'} via ${via}; payment->PAID_VERIFIED ${payToPaid ?? '?'} ms (poll every 30 s), ->FULFILLMENT_READY ${payToVerified} ms; ${receipts.length} payment_receipts row; ${sheetDetail}`);
 }
 
 async function flowNegative() {
