@@ -1,6 +1,12 @@
-import {EmptyState} from '@/components/EmptyState';
+import {Suspense} from 'react';
+import {LoadingState} from '@/components/LoadingState';
+import {LiveOperations} from './_components/LiveOperations';
 
-// Placeholder. Task U-05 replaces this file.
+// Live operations (U-05). The selected call is linkable: /activity?call=<callId>.
 export default function ActivityPage() {
-  return <EmptyState title="Activity" description="Live operations. Task U-05 builds this screen." headingLevel={1} />;
+  return (
+    <Suspense fallback={<LoadingState label="Loading calls" />}>
+      <LiveOperations />
+    </Suspense>
+  );
 }
