@@ -116,8 +116,9 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
     let menu: CatalogItem[] | undefined;
     if (opts.menu !== undefined && capCheck.tools.includes('read_catalog')) {
       try {
-        const read = await withDeadline(opts.menu.snapshot(resolution.businessId), MENU_SNAPSHOT_TIMEOUT_MS, undefined);
+        const read = await withDeadline(opts.menu.snapshot(resolution.businessId), opts.menuTimeoutMs ?? MENU_SNAPSHOT_TIMEOUT_MS, undefined);
         if (read !== undefined) menu = structuredClone(read).filter((item) => item.businessId === resolution.businessId);
+        else logger.warn({ agentVersionId: resolution.agentVersionId }, 'voice: the menu was not read for the prompt; the agent will use read_catalog');
       } catch (err) {
         logger.warn({ ...errorInfo(err) }, 'voice: could not read the menu for the prompt; the agent will use read_catalog');
       }

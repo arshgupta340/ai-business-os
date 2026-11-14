@@ -20,7 +20,7 @@ afterEach(async () => {
   app = undefined;
 });
 
-async function build(opts: { resolution?: LiveAgentResolution; facts?: () => Promise<FactsSnapshot>; menu?: () => Promise<CatalogItem[]>; validator?: VoicePluginOptions['twilioValidator']; rootWebsocket?: boolean } = {}) {
+async function build(opts: { resolution?: LiveAgentResolution; facts?: () => Promise<FactsSnapshot>; menu?: () => Promise<CatalogItem[]>; menuTimeoutMs?: number; validator?: VoicePluginOptions['twilioValidator']; rootWebsocket?: boolean } = {}) {
   const calls = fakeCalls();
   let resolution = opts.resolution ?? live;
   const liveAgent = { resolve: vi.fn(async () => resolution) };
@@ -41,7 +41,7 @@ async function build(opts: { resolution?: LiveAgentResolution; facts?: () => Pro
   app = Fastify();
   // The app may register the WebSocket plugin at the root; the voice plugin then reuses it.
   if (opts.rootWebsocket !== false) await app.register(websocket);
-  await app.register(voicePlugin, { publicServerUrl: `${PUBLIC_URL}/`, liveAgent, facts, ...(menu ? { menu } : {}), calls, events, toolsetFactory, twilioValidator, openaiSocketFactory, messageChannel: 'surge', logger, twilioBusinessId: 'biz_pizza_01' });
+  await app.register(voicePlugin, { publicServerUrl: `${PUBLIC_URL}/`, liveAgent, facts, ...(menu ? { menu } : {}), ...(opts.menuTimeoutMs !== undefined ? { menuTimeoutMs: opts.menuTimeoutMs } : {}), calls, events, toolsetFactory, twilioValidator, openaiSocketFactory, messageChannel: 'surge', logger, twilioBusinessId: 'biz_pizza_01' });
   await app.ready();
   const a = app;
   const post = (signature = 'good', form = FORM) =>
@@ -226,6 +226,23 @@ describe('voice plugin: /ws/phone', () => {
     expect(text).not.toContain('Menu, prices before tax:');
     expect(text).toContain('Build the cart only from IDs returned by read_catalog');
     expect(text).toContain('Opening hours: Monday 11 AM to 9 PM.');
+  });
+
+  it('a menu read that never answers does not hold the call: it starts without the menu', async () => {
+    const t = await build({ menu: () => new Promise<CatalogItem[]>(() => undefined), menuTimeoutMs: 20 });
+    const res = await t.post();
+    expect(res.statusCode).toBe(200);
+    expect(tokenOf(res.body)).toBeDefined();
+    expect(t.calls.startCall).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(t.lines)).toContain('the menu was not read for the prompt');
+  });
+
+  it('B1: a retried webhook with a menu port gets the same token and reads the menu once', async () => {
+    const t = await build({ menu: async () => pizzaCatalog });
+    const first = tokenOf((await t.post()).body);
+    const second = tokenOf((await t.post()).body);
+    expect(second).toBe(first);
+    expect(t.menu?.snapshot).toHaveBeenCalledTimes(1);
   });
 
   it('never puts menu rows of another business in the prompt', async () => {

@@ -21,6 +21,9 @@ export const MAX_KNOWLEDGE_CHARS = 6000;
 const MAX_FIELD_CHARS = 200;
 const MAX_FAQS = 20;
 const MAX_POLICIES = 20;
+const MAX_SERVICES = 30;
+/** Provider IDs go into the prompt as they are, so only this plain shape is let through. */
+const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 const DAYS: [HoursKey, string][] = [
   ['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday'],
@@ -64,7 +67,7 @@ export function nowLine(nowMs: number, timeZone: string): string | undefined {
     const raw = part('timeZoneName').replace('GMT', '');
     const offset = raw === '' ? '+00:00' : raw;
     const date = `${part('year')}-${part('month')}-${part('day')}`;
-    return `Now: ${spoken}, shop time (${timeZone}). Today is ${date}. Give tools a time in this form: ${date}T18:30:00${offset}.`;
+    return `Now: ${spoken}, shop time (${timeZone}). Today is ${date}. Give tools a time in this form: ${date}T18:30:00${offset}. That offset is for today; when a tool returns a slot time, copy it exactly.`;
   } catch {
     return undefined;
   }
@@ -127,9 +130,10 @@ function serviceLines(facts: FactsSnapshot): string[] {
     const parsed = ServiceOfferingSchema.safeParse(f.value);
     if (!parsed.success) continue;
     const s = parsed.data;
+    if (!SAFE_ID.test(s.id)) continue;
     out.push(`${clean(s.name, 80)}: ${s.durationMinutes} minutes, ${dollars(s.priceMinor)}, service id ${s.id}.`);
   }
-  return out;
+  return out.slice(0, MAX_SERVICES);
 }
 
 /** The menu with the exact IDs a cart needs, so an order can be quoted without a search. */
@@ -139,12 +143,15 @@ export function menuLines(menu: readonly CatalogItem[]): string[] {
   for (const item of menu) {
     const name = clean(item.name, 80);
     if (name === '' || item.variations.length === 0) continue;
+    // An item whose IDs are not plain provider IDs is left out; the agent can still find it with read_catalog.
+    if (!SAFE_ID.test(item.squareItemId) || item.variations.some((v) => !SAFE_ID.test(v.id))) continue;
     if (!item.available) { items.push(`${name}: not available today.`); continue; }
     const sizes = item.variations.map((v) => `${clean(v.name, 40)} ${dollars(v.priceMinor)} (variation id ${v.id})`).join(', ');
     const options: string[] = [];
     for (const list of item.modifierLists) {
       const label = clean(list.name, 60);
       if (label === '' || list.modifiers.length === 0) continue;
+      if (!SAFE_ID.test(list.id) || list.modifiers.some((m) => !SAFE_ID.test(m.id))) continue;
       options.push(label);
       if (!lists.has(list.id)) {
         const choose = list.selectionType === 'SINGLE' ? 'choose one' : 'choose any';
@@ -177,10 +184,13 @@ export function buildKnowledge(args: { facts?: FactsSnapshot | undefined; menu?:
     { lines: [...head, ...servicesBlock, ...faqs], hasMenu: false },
     { lines: [...head, ...servicesBlock], hasMenu: false },
   ];
+  // Last resort: the time and the hours alone, which are always short.
+  const core = [now, hours].filter((l): l is string => l !== undefined);
   for (const c of candidates) {
     const text = c.lines.join('\n');
     if (text === '' || text.length > MAX_KNOWLEDGE_CHARS) continue;
     return { text, hasHours: hours !== undefined, hasMenu: c.hasMenu, hasServices: services.length > 0 };
   }
+  if (core.length > 0) return { text: core.join('\n'), hasHours: hours !== undefined, hasMenu: false, hasServices: false };
   return undefined;
 }

@@ -94,12 +94,19 @@ export function bookingWaitScript(channel: MessageChannelSetting): { consented: 
   };
 }
 
+/** Names only the topics that are really in the shop data, so a missing one still goes to its tool. */
+function knownLine(topics: string[]): string {
+  const have = topics.filter((t) => t !== '');
+  const list = have.length > 1 ? `${have.slice(0, -1).join(', ')} and ${have[have.length - 1]}` : have[0] ?? 'the shop';
+  return `You already know the shop data at the end of these instructions. Answer questions about ${list} from it at once, with no tool call.`;
+}
+
 /** How the agent talks. The same for every template. */
 const STYLE_LINES = [
   'Talk like a quick, friendly person at the counter. One short sentence at a time.',
   'Ask one question at a time, in eight words or fewer, and only for what is still missing. If the caller gives several details at once, keep them all and skip those questions.',
   'Never say you are checking, looking something up or pulling something up, and never ask the caller to hold or wait.',
-  'Tool calls are silent. A turn in which you call a tool has the tool call and no words: never announce it, as in "I will get your total" or "sending this now". Speak only after the tool result arrives. The most you may say before a tool call is "Got it."',
+  'Tool calls are silent. Never announce one, as in "I will get your total" or "sending this now". The most you may say before a tool call is "Got it." Say the answer only after the tool result arrives.',
   'Do not repeat back what the caller just said, do not praise their choice, and do not list the menu or services unless they ask.',
 ];
 
@@ -117,8 +124,8 @@ export function buildInstructions(spec: AgentSpec, facts: InstructionFacts): str
       `You are the phone assistant for ${sentence(name)} You answer questions about the menu, prices, hours and policies, and take pickup orders.`,
       `Speak first. Your first sentence tells the caller they are speaking with an AI assistant. Open with: "${openingLine(spec, name, 'What can I get for you?')}"`,
       ...STYLE_LINES,
-      known
-        ? 'You already know the shop data at the end of these instructions. Answer questions about hours, prices, the menu and policies from it at once, with no tool call. Never guess an item, price, hour or policy. If the answer is not in the shop data and no tool has it, say you do not have that information.'
+      knowledge !== undefined
+        ? `${knownLine([knowledge.hasHours ? 'hours' : '', knowledge.hasMenu ? 'the menu and prices' : '', 'policies'])}${knowledge.hasMenu ? '' : ' The menu is not in the shop data: use read_catalog for the menu and prices.'}${knowledge.hasHours ? '' : ' Opening hours are not in the shop data: use read_business_facts for hours.'} Never guess an item, price, hour or policy. If the answer is not in the shop data and no tool has it, say you do not have that information.`
         : 'Answer only from tool results. Never guess an item, price, hour or policy. If a tool has no answer, say you do not have that information.',
       knowledge?.hasMenu === true
         ? 'Build the cart from the item, variation and modifier IDs in the menu below. Call read_catalog only for something that is not listed. Never state a total that did not come from quote_order. Never compute, round or discount. Tool results give prices in cents; say them as dollars. If the cart changes, call quote_order again.'
@@ -138,7 +145,7 @@ export function buildInstructions(spec: AgentSpec, facts: InstructionFacts): str
       lines.push('Do not ask for a number. The payment link will be shown at the counter. Record that the caller has not consented to messages.');
     }
     lines.push(
-      'As soon as you have the items, the name and the time, your whole turn is the quote_order call, with no words before it. When the total comes back, read the order back in one sentence, with every item, the total, the name, the pickup time and the number if there is one, and ask: "Shall I send this to the shop for approval?" For example: "One large pepperoni, twenty-three ninety-two with tax, for Sam at six thirty. Shall I send this to the shop for approval?" Call propose_order only after a yes.',
+      'As soon as you have the items, the name and the time, call quote_order and do not announce it. When the total comes back, read the order back in one sentence, with every item, the total, the name, the pickup time and the number if there is one, and ask: "Shall I send this to the shop for approval?" The pattern is: "One large pepperoni, {total} with tax, for {name} at {time}. Shall I send this to the shop for approval?" Call propose_order only after a yes.',
       READBACK_LINE,
       CANNOT_TAKE_LINE,
       `After propose_order succeeds, say: "${canMessage ? wait.consented : wait.declined}"${canMessage ? ` If the caller declined messages, say instead: "${wait.declined}"` : ''}`,
@@ -150,13 +157,13 @@ export function buildInstructions(spec: AgentSpec, facts: InstructionFacts): str
       `You are the phone assistant for ${sentence(name)} You answer questions about services, prices and hours, and book appointments.`,
       `Speak first. Your first sentence tells the caller they are speaking with an AI assistant. Open with: "${openingLine(spec, name, 'How can I help?')}"`,
       ...STYLE_LINES,
-      known
-        ? 'You already know the shop data at the end of these instructions. Answer questions about services, prices, hours and policies from it at once, with no tool call. Never guess a price, hour or slot. If the answer is not in the shop data and no tool has it, say you do not have that information.'
+      knowledge !== undefined
+        ? `${knownLine([knowledge.hasServices ? 'services and prices' : '', knowledge.hasHours ? 'hours' : '', 'policies'])}${knowledge.hasServices ? '' : ' Services are not in the shop data: use read_business_facts for services and prices.'}${knowledge.hasHours ? '' : ' Opening hours are not in the shop data: use read_business_facts for hours.'} Never guess a price, hour or slot. If the answer is not in the shop data and no tool has it, say you do not have that information.`
         : 'Answer only from tool results. Never guess a price, hour or slot. Prices are in cents; say them as dollars.',
       knowledge?.hasServices === true
         ? 'Offer only the services in the shop data and only slots from read_calendar_availability.'
         : 'Offer only services from read_business_facts and only slots from read_calendar_availability.',
-      'Book with these questions, in this order, and skip any the caller already answered: "Which service would you like?" Then "What day works for you?" Then your whole turn is the read_calendar_availability call, with no words before it. When the slots come back, offer up to three times, for example: "I have ten, eleven thirty or two. Which works?" Then "What name is it under?"',
+      'Book with these questions, in this order, and skip any the caller already answered: "Which service would you like?" Then "What day works for you?" Then call read_calendar_availability and do not announce it or say you will check the times. When the slots come back, offer up to three times, for example: "I have ten, eleven thirty or two. Which works?" Then "What name is it under?"',
       'All times are in the shop timezone. Do not ask the caller about timezones.',
     );
     if (canMessage) {

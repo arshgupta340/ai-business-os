@@ -168,6 +168,8 @@ export type VoicePluginOptions = {
   facts: VoiceFactsPort;
   /** Reads the cached menu of a business when a call is pinned, so the agent knows it from the first word. Display only: totals still come from quote_order. */
   menu?: VoiceMenuPort | undefined;
+  /** The longest the webhook waits for the menu before the call goes on without it. Defaults to 1500. */
+  menuTimeoutMs?: number | undefined;
   calls: CallsPort;
   events: VoiceEventsPort;
   decisions?: CallDecisionsPort | undefined;
