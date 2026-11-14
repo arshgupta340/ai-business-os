@@ -3,7 +3,6 @@
 // step, so "zero" means they had the chance and did nothing.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { APPROVAL_EXPIRY_MS, type ToolResult } from '@abos/contracts';
-import { READBACK_MIN_MS } from '../../src/tools/real/index';
 import { ageApproval, currentRole } from '../support/db';
 import { createWorld, nextLocalDate, type World } from '../e2e/world';
 import {
@@ -45,10 +44,8 @@ describe('proposals', () => {
       if (!quoted.ok) throw new Error(`quote failed: ${quoted.reason}`);
       const input = { cart: CART, quoteId: quoted.quote.quoteId, fulfillment: { type: 'pickup', pickupAt: pickupAt() },
         contact: { name: 'Sam', messageRecipient: RECIPIENT, messageConsent: true, consentAt: new Date().toISOString() } };
-      // The first call only presents the number for the read-back; nothing is stored yet.
-      expect(await phone.call('propose_order', input)).toMatchObject({ ok: true, missingFields: ['contact.messageRecipient.readBack'] });
-      expect(await count(w, 'orders where call_id = $1', [phone.callId])).toBe(0);
-      w.clock.advance(READBACK_MIN_MS + 100);
+      // Since B-15 the deployed toolset proposes qr_only and stores the proposal on the first call
+      // (no read-back step). Adapted after the merge; the suite was written against the read-back.
       const proposed = await phone.call('propose_order', input) as { ok: true; proposalId: string; approvalId: string };
       expect(proposed).toMatchObject({ ok: true, missingFields: [] });
       await runEverything();
@@ -72,8 +69,7 @@ describe('proposals', () => {
       const slots = await phone.call('read_calendar_availability', { serviceId: 'svc_haircut', date: nextLocalDate([3, 4], 4) }) as ToolResult<'read_calendar_availability'>;
       if (!slots.ok) throw new Error(`no slots: ${slots.reason}`);
       const input = { serviceId: 'svc_haircut', startUtc: slots.slots[0]!.startUtc, customer: { name: 'Ana', messageRecipient: '+15555550124', messageConsent: true } };
-      await phone.call('propose_booking', input);
-      w.clock.advance(READBACK_MIN_MS + 100);
+      // Since B-15 the toolset stores the proposal (qr_only) on the first call; adapted after the merge.
       const proposed = await phone.call('propose_booking', input) as { ok: true; proposalId: string; approvalId: string };
       expect(proposed).toMatchObject({ ok: true, missingFields: [] });
       await runEverything();

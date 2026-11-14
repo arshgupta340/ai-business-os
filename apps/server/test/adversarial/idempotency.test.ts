@@ -7,7 +7,6 @@ import { createSquareAdapterForTest } from '../../src/adapters/square/testing';
 import { createDbExecutor } from '../../src/compose/executor';
 import { notWiredExecutor, type SeamDeps } from '../../src/compose/seams';
 import { currentRole } from '../support/db';
-import { READBACK_MIN_MS } from '../../src/tools/real/index';
 import { LOCATION_ID, OWNER, createWorld, fakeSquareClient, nextLocalDate, zonedIso, type World } from '../e2e/world';
 import {
   BARBER, NONE, PIZZA, TZ, approve, bookingProposal, count, counts, decide, delta, filterCalendarListByProperty, getApproval, order, paymentEvent, pizzaOrder, pizzaToPaymentPending, postSquare, sim, statusOf, steps, type Step,
@@ -38,16 +37,20 @@ describe('a worker that dies between claim and finish', () => {
 
   function seamDeps(): SeamDeps {
     const c = w.app.composed;
-    return { env: c.env, db: c.db, engine: c.engine, providers: c.providers, interim: c.interim, now: c.now, newId: c.newId, log: silentLog };
+    return { env: c.env, db: c.db, engine: c.engine, providers: c.providers, now: c.now, newId: c.newId, log: silentLog };
   }
-  /** Test-only time travel on the database clock: the running lease was taken 16 minutes ago. */
-  const staleLease = (approvalId: string) => w.t.admin((q) => q.query("update public.action_executions set locked_at = locked_at - interval '16 minutes' where approval_id = $1 and status = 'RUNNING'", [approvalId]));
+  /**
+   * Test-only time travel on the database clock: the running lease was taken 16 minutes ago. Since the
+   * reworked 0005 a claim carries lease_deadline, which recovery reads first, so it moves back too
+   * (adapted after the merge; the suite was written when only locked_at counted).
+   */
+  const staleLease = (approvalId: string) => w.t.admin((q) => q.query("update public.action_executions set locked_at = locked_at - interval '16 minutes', lease_deadline = lease_deadline - interval '16 minutes' where approval_id = $1 and status = 'RUNNING'", [approvalId]));
 
   it('runs as abos_app', async () => { expect(await currentRole(w.t.db)).toBe('abos_app'); });
 
   it('during CreatePaymentLink: recovered to NEEDS_REVIEW, no second create, the same three keys, no message', async () => {
     const before = counts(w);
-    const { orderId, approvalId } = await pizzaOrder(w);
+    const { callId, orderId, approvalId } = await pizzaOrder(w);
     await approve(w, PIZZA, approvalId);
     const queued = await steps(w, approvalId);
     expect(queued.map((x) => x.status)).toEqual(['QUEUED', 'QUEUED', 'QUEUED']);
@@ -60,14 +63,14 @@ describe('a worker that dies between claim and finish', () => {
     hanging.client.checkout.paymentLinks.create = async ({ idempotencyKey: key }) => { hanging.writes.push('checkout.paymentLinks.create'); hanging.createKeys.push(key); reached(); return new Promise(() => {}); };
     const deps = seamDeps();
     const crashed = createDbExecutor({ ...deps, providers: { ...deps.providers, square: createSquareAdapterForTest(hanging.client, { locationId: LOCATION_ID, environment: 'sandbox', now: () => new Date() }) } },
-      { workerId: 'worker-crashed-checkout', interim: deps.interim });
+      { workerId: 'worker-crashed-checkout' });
     void crashed.tick();
     await sent;
     expect(hanging.createKeys).toEqual([queued[0]!.idempotency_key]);
     expect((await steps(w, approvalId)).map((x) => x.status)).toEqual(['RUNNING', 'QUEUED', 'QUEUED']);
 
     // Worker B: leaves a live lease alone, and sends a stale one to review, never back to QUEUED.
-    const healthy = createDbExecutor(deps, { workerId: 'worker-b-checkout', interim: deps.interim });
+    const healthy = createDbExecutor(deps, { workerId: 'worker-b-checkout' });
     await healthy.drain();
     expect((await steps(w, approvalId))[0]!.status).toBe('RUNNING');
     await staleLease(approvalId);
@@ -82,7 +85,9 @@ describe('a worker that dies between claim and finish', () => {
     // One provider write in total, by the worker that died. The healthy worker made none.
     expect(hanging.writes).toEqual(['checkout.paymentLinks.create']);
     expect(delta(w, before)).toEqual(NONE);
-    expect(await count(w, "activity_events where correlation_id = $1 and type = 'execution.failed' and payload->>'nextStatus' = 'NEEDS_REVIEW'", [approvalId])).toBe(1);
+    // The reworked 0005 recovery routine writes this event on the call's journey ID (private.journey), not
+    // the approval ID; adapted after the merge.
+    expect(await count(w, "activity_events where correlation_id = $1 and type = 'execution.failed' and payload->>'nextStatus' = 'NEEDS_REVIEW'", [callId])).toBe(1);
   });
 
   describe('during the message send', () => {
@@ -97,7 +102,7 @@ describe('a worker that dies between claim and finish', () => {
       let reached!: () => void;
       const sent = new Promise<void>((resolve) => { reached = resolve; });
       const crashed = createDbExecutor({ ...deps, providers: { ...deps.providers, message: { channel: 'surge', send: async (input) => { received.push(input); reached(); return new Promise(() => {}); } } } },
-        { workerId: 'worker-crashed-message', interim: deps.interim });
+        { workerId: 'worker-crashed-message' });
       // Worker A creates the checkout, then dies inside the send: the provider has the message, we have no answer.
       expect(await crashed.tick()).toBe(true);
       void crashed.tick();
@@ -105,7 +110,7 @@ describe('a worker that dies between claim and finish', () => {
       expect(received.map((m) => m.idempotencyKey)).toEqual([queued[1]!.idempotency_key]);
       expect((await steps(w, ids.approvalId)).map((x) => x.status)).toEqual(['SUCCEEDED', 'RUNNING', 'QUEUED']);
 
-      const healthy = createDbExecutor(deps, { workerId: 'worker-b-message', interim: deps.interim });
+      const healthy = createDbExecutor(deps, { workerId: 'worker-b-message' });
       await healthy.drain();
       expect((await steps(w, ids.approvalId))[1]!.status).toBe('RUNNING');
       await staleLease(ids.approvalId);
@@ -297,7 +302,7 @@ describe('provider timeouts and ambiguous replies', () => {
     expect(delta(w, before)).toEqual({ square: 0, messages: 1, calendar: 1, sheets: 1 });
   });
 
-  it('Calendar times out and the event never appears: every retry uses the same event ID, three attempts, then review; no confirmation', async () => {
+  it('Calendar times out and the event never appears: the one attempt uses the step key as event ID, then review; no confirmation', async () => {
     const before = counts(w);
     const original = w.calendar.client.events.insert;
     const inserted: string[] = [];
@@ -314,9 +319,12 @@ describe('provider timeouts and ambiguous replies', () => {
     // Google works again. Nothing may insert on its own after the attempts are used up.
     await kickAndSettle(w);
     const s = await steps(w, b.approvalId);
-    // FLOWS 5: up to 3 attempts, each on the event ID that is the step's key, so none can create a second event.
-    expect(inserted).toEqual([s[0]!.idempotency_key, s[0]!.idempotency_key, s[0]!.idempotency_key]);
-    expect(s.map((x) => [x.status, x.attempts])).toEqual([['FAILED', 3], ['QUEUED', 0], ['QUEUED', 0]]);
+    // The insert is on the event ID that is the step's key. Since review finding 6 (commit 5cc989e) an
+    // insert whose follow-up lookup cannot establish the outcome is outcome unknown: the step goes to
+    // NEEDS_REVIEW on its first attempt instead of retrying (adapted after the merge; the suite was
+    // written when it retried three times and then FAILED).
+    expect(inserted).toEqual([s[0]!.idempotency_key]);
+    expect(s.map((x) => [x.status, x.attempts])).toEqual([['NEEDS_REVIEW', 1], ['QUEUED', 0], ['QUEUED', 0]]);
     await expectDatabaseKeys(BARBER, b.bookingId, b.approvalId, s);
     expect(w.calendar.events.has(s[0]!.idempotency_key)).toBe(false);
     expect((await w.t.db.query('select status, google_event_id from bookings where id = $1', [b.bookingId])).rows).toEqual([{ status: 'RETRY_REQUIRED', google_event_id: null }]);
@@ -370,18 +378,21 @@ describe('provider timeouts and ambiguous replies', () => {
     it('approving both books the slot once: one Calendar event, one confirmation, the second booking is never booked', async () => {
       const before = counts(w);
       const startUtc = zonedIso(nextLocalDate([3, 4], 8), '15:00', TZ);
+      // With consent, through the composed proposal port on a live simulated call, as test/e2e/flows.test.ts
+      // does (the toolset proposes qr_only since B-15). Adapted after the merge from the read-back flow.
+      let op = 0;
       const propose = async (name: string, to: string) => {
-        let r: { ok: boolean; proposalId: string; approvalId: string } | undefined;
-        w.model.push(async ({ executeTool }) => {
-          const input = { serviceId: 'svc_haircut', startUtc, customer: { name, messageRecipient: to, messageConsent: true } };
-          await executeTool('propose_booking', input);
-          w.clock.advance(READBACK_MIN_MS + 100);
-          r = await executeTool('propose_booking', input) as typeof r;
-          return 'proposed';
-        });
-        await sim(w, 'agt_barber_01', BARBER, { message: 'A haircut at three please', end: true });
-        expect(r).toMatchObject({ ok: true });
-        return { bookingId: r!.proposalId, approvalId: r!.approvalId };
+        w.model.push(async () => 'One moment.', async () => 'Thanks, the owner will confirm.');
+        const opened = await sim(w, 'agt_barber_01', BARBER, { message: 'A haircut at three please' });
+        const callId = opened.body.callId;
+        const call = (await w.t.db.query('select agent_version_id from calls where id = $1', [callId])).rows[0] as { agent_version_id: string };
+        const made = await w.app.composed.toolsetPorts.proposals.createBookingProposal({ businessId: BARBER, agentVersionId: call.agent_version_id, callId,
+          correlationId: callId, operationId: `op-adv-same-slot-${++op}`, signal: new AbortController().signal, serviceId: 'svc_haircut', startUtc,
+          customer: { name, messageRecipient: to, messageConsent: true }, messageChannel: w.app.composed.providers.messageChannel });
+        await sim(w, 'agt_barber_01', BARBER, { callId, message: 'Thanks', end: true });
+        expect(made).toMatchObject({ ok: true });
+        if (!made.ok) throw new Error(made.reason);
+        return { bookingId: made.bookingId, approvalId: made.approvalId };
       };
       first = await propose('Ana', '+15555550124');
       second = await propose('Bo', '+15555550125');

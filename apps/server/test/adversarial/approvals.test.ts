@@ -308,13 +308,20 @@ describe('a payload changed after the proposal', () => {
     expect(delta(w, before)).toEqual(NONE);
   });
 
-  // The runtime role may update orders. Each change below makes the order disagree with the signed
-  // material, so the unchanged hash can no longer approve it.
+  // Since 0006 (orders_material_guard) the runtime role can no longer change an order's cart, quote,
+  // total, contact or fulfillment, and each change below first asserts that refusal. The suite was
+  // written when abos_app could; to keep the downstream check (the decision and the executor compare
+  // the order with the signed material) the change is then made as the table owner, whom the guard
+  // does not cover. Adapted after the merge.
   const BIGGER: Cart = { lines: [{ ...CART.lines[0]!, quantity: 20 }] };
+  const changeAs = async (sql: string, params: unknown[]) => {
+    await expect(w.t.db.query(sql, params)).rejects.toThrow(/protected order material/);
+    await w.t.admin(async (q) => { await q.query(sql, params); });
+  };
   it.each([
-    ['cart', async (orderId: string) => { await w.t.db.query('update orders set cart = $2::jsonb, cart_hash = $3 where id = $1', [orderId, JSON.stringify(BIGGER), await cartHash(BIGGER)]); }],
-    ['total', async (orderId: string) => { await w.t.db.query('update orders set total_minor = 1 where id = $1', [orderId]); }],
-    ['pickup time', async (orderId: string) => { await w.t.db.query(`update orders set fulfillment = jsonb_set(fulfillment, '{pickupAt}', to_jsonb($2::text)) where id = $1`, [orderId, pickupAt('19:30')]); }],
+    ['cart', async (orderId: string) => { await changeAs('update public.orders set cart = $2::jsonb, cart_hash = $3 where id = $1', [orderId, JSON.stringify(BIGGER), await cartHash(BIGGER)]); }],
+    ['total', async (orderId: string) => { await changeAs('update public.orders set total_minor = 1 where id = $1', [orderId]); }],
+    ['pickup time', async (orderId: string) => { await changeAs(`update public.orders set fulfillment = jsonb_set(fulfillment, '{pickupAt}', to_jsonb($2::text)) where id = $1`, [orderId, pickupAt('19:30')]); }],
   ] as const)('order %s changed in the database after the proposal: the old hash is refused, zero writes', async (_field, change) => {
     const before = counts(w);
     const { orderId, approvalId } = await pizzaOrder(w);
@@ -334,7 +341,7 @@ describe('a payload changed after the proposal', () => {
     it('the approval passes, the executor refuses the step: no Square call, no message', async () => {
       const before = counts(w);
       ids = await pizzaOrder(w);
-      await w.t.db.query('update orders set cart = $2::jsonb where id = $1', [ids.orderId, JSON.stringify(BIGGER)]);
+      await changeAs('update public.orders set cart = $2::jsonb where id = $1', [ids.orderId, JSON.stringify(BIGGER)]);
       await approve(w, PIZZA, ids.approvalId);
       await quiesce();
       expect((await steps(w, ids.approvalId)).map((x) => [x.status, x.attempts])).toEqual([['FAILED', 1], ['QUEUED', 0], ['QUEUED', 0]]);
@@ -342,10 +349,9 @@ describe('a payload changed after the proposal', () => {
       expect(await count(w, 'message_dispatches where approval_id = $1', [ids.approvalId])).toBe(0);
       expect(delta(w, before)).toEqual(NONE);
     });
-    // DEFECT (see the pull request): the refused order stays APPROVED, which the dashboard labels
-    // "Creating checkout", although its first step is FAILED and nothing will ever run. The state
-    // machine has no move from APPROVED to RECOVERY_REQUIRED, so the executor's own move is rolled back.
-    it.fails('the refused order is surfaced for review (RECOVERY_REQUIRED) instead of staying APPROVED', async () => {
+    // Was DEFECT 4 in the pull request (the refused order stayed APPROVED). Fixed on arsh/integration
+    // before the merge (the reworked 0005 routines move it), so this is a plain test now.
+    it('the refused order is surfaced for review (RECOVERY_REQUIRED) instead of staying APPROVED', async () => {
       expect((await order(w, ids.orderId)).status).toBe('RECOVERY_REQUIRED');
     });
   });
@@ -354,7 +360,7 @@ describe('a payload changed after the proposal', () => {
     const before = counts(w);
     const sentBefore = w.messages.sent.length;
     const { orderId, approvalId } = await pizzaOrder(w, { recipient: '+15555550155' });
-    await w.t.db.query(`update orders set contact = jsonb_set(contact, '{messageRecipient}', to_jsonb($2::text)) where id = $1`, [orderId, ATTACKER]);
+    await changeAs(`update public.orders set contact = jsonb_set(contact, '{messageRecipient}', to_jsonb($2::text)) where id = $1`, [orderId, ATTACKER]);
     await approve(w, PIZZA, approvalId);
     await quiesce();
     const sent = w.messages.sent.slice(sentBefore);

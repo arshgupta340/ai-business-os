@@ -27,7 +27,7 @@ let api: Route[] = [];
 let targets: Record<string, Target> = {};
 /** Strings that belong to the victim. None may appear in a response to anyone else. */
 let leaks: string[] = [];
-let ids: { approvalId: string; orderId: string; callId: string; paidOrderId: string; bookingId: string; bookingApprovalId: string; sessionId: string; fileId: string; conflictId: string; payloadHash: string };
+let ids: { approvalId: string; orderId: string; callId: string; paidOrderId: string; bookingId: string; bookingApprovalId: string; sessionId: string; fileId: string; conflictId: string; payloadHash: string; executionId: string };
 
 const keyOf = (r: Route) => `${r.method} ${r.url}`;
 const json = (res: Res): Record<string, unknown> => { try { return JSON.parse(res.body) as Record<string, unknown>; } catch { return {}; } };
@@ -78,8 +78,9 @@ beforeAll(async () => {
   expect(file.extractionState).toBe('EXTRACTED');
   const approval = await getApproval(w, PIZZA, pending.approvalId);
   const paidRow = await order(w, paid.orderId);
+  const executionId = ((await w.t.db.query('select id from action_executions where approval_id = $1 order by step_index limit 1', [paid.approvalId])).rows[0] as { id: string }).id;
   ids = { approvalId: pending.approvalId, orderId: pending.orderId, callId: pending.callId, paidOrderId: paid.orderId, bookingId: booking.bookingId, bookingApprovalId: booking.approvalId,
-    sessionId: (session.json() as { id: string }).id, fileId, conflictId: file.conflictIds?.[0] ?? 'cfl_adv_missing', payloadHash: approval.payloadHash };
+    sessionId: (session.json() as { id: string }).id, fileId, conflictId: file.conflictIds?.[0] ?? 'cfl_adv_missing', payloadHash: approval.payloadHash, executionId };
 
   const pizza = (id: string, extra: Partial<Target> = {}): Target => ({ business: PIZZA, otherOwned: BARBER, id, ...extra });
   targets = {
@@ -108,13 +109,17 @@ beforeAll(async () => {
     'POST /api/agents/:id/rollback': pizza('agt_pizza_01', { body: () => ({ toVersionId: 'agv_pizza_01_v1', confirm: true, makeLive: true }) }),
     'GET /api/files/:id': pizza(ids.fileId),
     'POST /api/conflicts/:id/resolve': pizza(ids.conflictId, { body: () => ({ resolution: 'keep_authoritative' }) }),
+    // Routes implemented on arsh/integration after the suite was written (SHOULD tier); added after the merge.
+    'POST /api/businesses/:id/catalog/prices/propose': pizza(PIZZA, { body: () => ({ variationId: 'SQ_VAR_PEP_LG', newPriceMinor: 1, currency: 'USD' }) }),
+    'POST /api/orders/:id/cancel': pizza(ids.paidOrderId, { body: () => ({}) }),
+    'POST /api/executions/:id/resolve': pizza(ids.executionId, { body: () => ({ action: 'retry' }) }),
   };
   for (const [key, target] of Object.entries(targets)) if (key.startsWith('GET ')) targets[`HEAD ${key.slice(4)}`] = target;
 
   leaks = [
     ids.payloadHash, RECIPIENT, '+15555550166', '+15555550167', CUSTOMER, 'Zebulon', FILE_NAME, paidRow.checkout_url!, paidRow.square_order_id!, paidRow.square_payment_link_id!,
     'Demo Pizza', 'Demo Barbershop', 'Pizza Order Assistant', 'Booking Assistant', 'Pepperoni', 'Margherita', 'SQ_VAR_', 'thanks for calling',
-    ids.approvalId, ids.orderId, ids.paidOrderId, ids.callId, ids.bookingId, ids.bookingApprovalId, ids.sessionId, ids.fileId, 'agv_pizza', 'agv_barber', 'usr_owner_01', OWNER_AUTH, 'owner@example.com',
+    ids.approvalId, ids.orderId, ids.paidOrderId, ids.callId, ids.bookingId, ids.bookingApprovalId, ids.sessionId, ids.fileId, ids.executionId, 'agv_pizza', 'agv_barber', 'usr_owner_01', OWNER_AUTH, 'owner@example.com',
   ];
 }, 120_000);
 afterAll(async () => { await w?.close(); });
