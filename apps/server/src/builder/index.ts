@@ -1,9 +1,10 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { AgentService, CreateAgentBodySchema, noLiveAgent, type LiveAgentReader } from './agents';
+import { AgentService, CreateAgentBodySchema, type LiveAgentReader } from './agents';
 import { NotConfiguredAuth, requireBusiness, UnverifiedSeedOwnerAuth, type BuilderAuth } from './auth';
 import { builderAuthMode, parseBuilderEnv } from './env';
 import { registerExtractionRoutes, withConflicts, type ExtractionOptions } from './extraction/index';
+import { createPublishStores, registerPublishRoutes, type PublishOptions } from './publish/index';
 import { AgentRunRequestSchema, AgentStatusSchema, type ToolHandler } from './pending-contracts';
 import type { AgentModel } from './runner/agent-model';
 import { MockToolset } from './runner/mock-toolset';
@@ -34,7 +35,9 @@ import { registerVoiceRoutes, type RealtimeMinter } from './voice/index';
 //        POST /api/builder/sessions/:id/messages
 //   3.4  GET /api/agents, POST /api/agents, GET /api/agents/:id,
 //        POST /api/agents/:id/preview, POST /api/agents/:id/test
-// Publish, pause, versions and rollback are task B-17. sim-call is Arsh's.
+//        POST /api/agents/:id/publish, POST /api/agents/:id/pause,
+//        GET /api/agents/:id/versions, POST /api/agents/:id/rollback (publish/)
+// sim-call and /api/live-agent are Arsh's.
 //
 // The server entry registers this plugin with no options, so every dependency
 // has an in-memory or recorded default. Tests and later tasks pass real ones.
@@ -54,6 +57,7 @@ export interface BuilderPluginOptions {
   now?: () => Date;
   realtimeMinter?: RealtimeMinter;
   extraction?: ExtractionOptions;
+  publish?: PublishOptions;
 }
 
 const SessionIdParams = z.object({ id: z.string().regex(/^bld_[A-Za-z0-9_]{1,64}$/) });
@@ -113,8 +117,12 @@ export const builderPlugin: FastifyPluginAsync<BuilderPluginOptions> = async (ap
   const knowledge = withConflicts(baseKnowledge, extraction.conflicts);
   const toolset = options.toolset ?? new MockToolset(now);
 
-  const builder = new BuilderSessionService({ sessions, agents, draftFacts, knowledge, model: builderModel, now });
-  const agentService = new AgentService({ agents, sessions, liveAgent: options.liveAgent ?? noLiveAgent, now });
+  // ---- publish, pause, versions, rollback (tasks B-17, B-27). Draft writers
+  // get a guarded store, so a draft write cannot undo a publish or a pause.
+  const publish = createPublishStores(options.publish, source);
+  const draftAgents = publish.guardDraftWrites(agents);
+  const builder = new BuilderSessionService({ sessions, agents: draftAgents, draftFacts, knowledge, model: builderModel, now });
+  const agentService = new AgentService({ agents: draftAgents, sessions, liveAgent: options.liveAgent ?? publish.liveAgentReader, activeVersions: publish.versions, now });
   const runs = new AgentRunService({ agents, knowledge, runner: new MockTextRunner(toolset, agentModel, now), toolset });
 
   registerVoiceRoutes(app, { auth, sessions, env: source, now, minter: options.realtimeMinter });
@@ -176,4 +184,6 @@ export const builderPlugin: FastifyPluginAsync<BuilderPluginOptions> = async (ap
     const body = parseOrThrow(AgentRunRequestSchema, request.body ?? {});
     return runs.test(scope.businessId, id, body, request.correlationId);
   });
+
+  registerPublishRoutes(app, { ...publish, auth, agents, agentService, conflicts: extraction.conflicts, knowledge: baseKnowledge, now });
 };
