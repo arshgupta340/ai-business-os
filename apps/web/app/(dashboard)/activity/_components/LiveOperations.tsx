@@ -1,6 +1,6 @@
 'use client';
 
-import {useCallback, useMemo, useState} from 'react';
+import {useCallback, useEffect, useMemo, useState} from 'react';
 import {usePathname, useRouter, useSearchParams} from 'next/navigation';
 import {useQueryClient} from '@tanstack/react-query';
 import {Banner} from '@astryxdesign/core/Banner';
@@ -102,6 +102,12 @@ export function LiveOperations() {
     selectedParam
       ? journeys.find(({journey}) => journey.callId === selectedParam)
       : ((followSince ? journeys.find(({journey}) => journey.startedAt >= followSince) : undefined) ?? visible[0] ?? journeys[0]);
+
+  // A link to one call (?call=) opens the tab that holds it, and follows it there when it finishes.
+  const linkedFinished = selectedParam ? journeys.find(({journey}) => journey.callId === selectedParam)?.journey.finished : undefined;
+  useEffect(() => {
+    if (linkedFinished !== undefined) setTab(linkedFinished ? 'finished' : 'active');
+  }, [selectedParam, linkedFinished]);
 
   const select = useCallback(
     (callId: string | null) => {

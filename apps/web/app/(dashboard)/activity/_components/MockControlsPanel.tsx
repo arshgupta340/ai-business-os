@@ -1,6 +1,7 @@
 'use client';
 
 import {useEffect, useRef, useState} from 'react';
+import {useQueryClient} from '@tanstack/react-query';
 import {Badge} from '@astryxdesign/core/Badge';
 import {Button} from '@astryxdesign/core/Button';
 import {Card} from '@astryxdesign/core/Card';
@@ -22,6 +23,7 @@ type Action = {businessId: string; run: (c: MockControls) => unknown; note: stri
  */
 export function MockControlsPanel({onStarted, onReset}: {onStarted: () => void; onReset: () => void}) {
   const controls = useMockControls();
+  const queryClient = useQueryClient();
   const {businessId, setBusinessId} = useBusiness();
   const [pending, setPending] = useState<Action | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -101,6 +103,22 @@ export function MockControlsPanel({onStarted, onReset}: {onStarted: () => void; 
             label="Rejected webhook"
             onClick={() => queue({businessId: PIZZA, run: (c) => c.simulateRejectedWebhook(), note: 'A Square webhook with a bad signature was rejected.'})}
           />
+          {controls.simulateSheetsDisconnected ? (
+            <Button
+              label="Sheets disconnects"
+              onClick={() =>
+                queue({
+                  businessId: businessId ?? PIZZA,
+                  run: (c) => {
+                    c.simulateSheetsDisconnected?.();
+                    // Health refetches once a minute; show it in the top bar and Integrations now.
+                    void queryClient.invalidateQueries();
+                  },
+                  note: 'Google Sheets now reports disconnected until you reset the mock data.',
+                })
+              }
+            />
+          ) : null}
           <Button
             label="Reset mock data"
             variant="ghost"

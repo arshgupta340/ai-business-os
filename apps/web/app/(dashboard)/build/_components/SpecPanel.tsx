@@ -9,6 +9,7 @@ import {Divider} from '@astryxdesign/core/Divider';
 import {Heading} from '@astryxdesign/core/Heading';
 import {HStack} from '@astryxdesign/core/HStack';
 import {Icon} from '@astryxdesign/core/Icon';
+import {Link} from '@astryxdesign/core/Link';
 import {List, ListItem} from '@astryxdesign/core/List';
 import {ProgressBar} from '@astryxdesign/core/ProgressBar';
 import {Text} from '@astryxdesign/core/Text';
@@ -23,10 +24,11 @@ import {
   continueState,
   ESCALATION_LABELS,
   groupCapabilities,
+  groupStopConditions,
   missingFieldQuestion,
   SCOPE_LABELS,
-  stopConditionLabel,
   TEMPLATE_LABELS,
+  type StopLine,
   WRITE_POLICY_LABELS,
 } from '../_lib/spec';
 
@@ -102,6 +104,28 @@ function Capabilities({ids}: {ids: readonly string[] | undefined}) {
   );
 }
 
+function StopLines({lines}: {lines: StopLine[]}) {
+  return (
+    <List density="compact" edge="flush" listStyle="disc">
+      {lines.map((line) => (
+        <ListItem
+          key={line.key}
+          label={
+            <Text type="body">
+              {line.label}{' '}
+              {line.link ? (
+                <Link href={line.link.href} type="inherit">
+                  {line.link.label}
+                </Link>
+              ) : null}
+            </Text>
+          }
+        />
+      ))}
+    </List>
+  );
+}
+
 function ProposedChangeRow({businessId, approvalId, bundleType}: {businessId: string; approvalId: string; bundleType: string}) {
   const approval = useApproval(businessId, approvalId);
   const state = approval.data?.state;
@@ -135,6 +159,7 @@ export function SpecPanel({businessId}: {businessId: string}) {
     hasOwnerTurn: thread.hasOwnerTurn,
   });
   const existingAgentId = session?.agentId;
+  const stops = groupStopConditions(notes.stopConditions);
 
   const onContinue = async () => {
     if (!session || !gate.canContinue || createAgent.isPending) return;
@@ -183,13 +208,19 @@ export function SpecPanel({businessId}: {businessId: string}) {
           ) : null}
         </VStack>
 
-        {notes.stopConditions.length > 0 ? (
+        {stops.blocking.length > 0 ? (
           <Banner status="error" title="This draft is blocked" description="Resolve these before you continue." collapsible={false}>
-            <List density="compact" edge="flush" listStyle="disc">
-              {notes.stopConditions.map((stop) => (
-                <ListItem key={stop.code} label={<Text type="body">{stopConditionLabel(stop.code)}</Text>} />
-              ))}
-            </List>
+            <StopLines lines={stops.blocking} />
+          </Banner>
+        ) : null}
+
+        {stops.beforePublish.length > 0 ? (
+          <Banner
+            status="warning"
+            title="Needed before you publish"
+            description="You can create the draft now. Publishing stays off until these are done."
+            collapsible={false}>
+            <StopLines lines={stops.beforePublish} />
           </Banner>
         ) : null}
 

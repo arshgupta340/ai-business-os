@@ -133,12 +133,12 @@ test.describe('demo walk in mock mode', () => {
       await page.getByRole('button', {name: 'Start pizza call', exact: true}).click();
       await expect(page.getByText('Mock pizza call started.')).toBeVisible();
 
-      // The detail follows the new call. The fixtures already hold one pending
-      // order (apv_pizza_pending), so wait for a Review link that is not that one.
+      // The detail follows the new call. The shared fixtures already hold pending
+      // orders (apv_demo_04, apv_demo_qr), so wait for a Review link that is not one of them.
       const review = page.getByRole('link', {name: 'Review and approve'});
       await expect
         .poll(async () => ((await review.count()) === 1 ? await review.getAttribute('href') : null), {timeout: SLOW})
-        .toMatch(/^\/approvals\?id=apv_(?!pizza_pending)/);
+        .toMatch(/^\/approvals\?id=apv_(?!demo_)/);
       approvalHref = (await review.getAttribute('href'))!;
       await expect(page.getByText('Waiting for your approval', {exact: true}).first()).toBeVisible();
       await expect(page.getByText(/caller ending in 0123/)).toBeVisible();
@@ -160,7 +160,8 @@ test.describe('demo walk in mock mode', () => {
         dialog.getByRole('term').filter({hasText: new RegExp(`^${term}$`)}).locator('xpath=following-sibling::*[1]');
       await expect(valueOf('Total')).toHaveText(/^\$\d+\.\d{2}\s*Sandbox$/);
       await expect(valueOf('Total').getByText('Sandbox', {exact: true})).toBeVisible();
-      await expect(valueOf('Customer')).toHaveText('Sam');
+      // The scripted caller is the caller of the shared pizza timeline (orderFulfilled).
+      await expect(valueOf('Customer')).toHaveText('Maya');
 
       await dialog.getByRole('button', {name: 'Approve', exact: true}).click();
       // The status badge and the outcome card both say Approved, from the state the server returned.

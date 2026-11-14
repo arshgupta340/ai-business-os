@@ -62,12 +62,13 @@ function useLiveRoute(agent: Agent): LiveRoute {
   if (!live.data.agentId) return {phoneNumber, answeredBy: 'nobody'};
   if (live.data.agentId === agent.id) return {phoneNumber, answeredBy: 'this'};
   const bizName = businesses.find((b) => b.id === live.data!.businessId)?.name;
-  // Another business is named, and so is the ID when both agents share a name.
+  // Another business is named. When both agents share a name, the other one is
+  // told apart by its version, never by its raw ID.
   const otherName = other.data
     ? live.data.businessId !== agent.businessId && bizName
       ? `${other.data.name} (${bizName})`
       : other.data.name === agent.name
-        ? `${other.data.name} (${other.data.id})`
+        ? `The other ${other.data.name}${other.data.activeVersion ? ` (version ${other.data.activeVersion.version})` : ''}`
         : other.data.name
     : undefined;
   return {phoneNumber, answeredBy: 'other', otherName};

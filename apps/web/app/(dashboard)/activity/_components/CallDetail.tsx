@@ -25,7 +25,8 @@ import {SandboxBadge} from '@/components/SandboxBadge';
 import {StatusBadge} from '@/components/StatusBadge';
 import {CheckoutPanel} from './CheckoutPanel';
 import {describeEvent} from './describe';
-import {actionLabel, deriveJourney, isHalted, syncStatusView, type Journey, type JourneyInput} from './journey';
+import {actionLabel, deriveJourney, isHalted, syncStatusView, waitingOn, type Journey, type JourneyInput} from './journey';
+import {ProviderHealthNotice, providersForSteps} from '@/components/ProviderHealthNotice';
 import {JourneyStepper, NoticeView, Panel, useNow} from './ui';
 
 /** A customer who declined messages has no recipient (SPEC 2.9), so nothing is sent. */
@@ -159,7 +160,7 @@ function BundleSteps({journey}: {journey: Journey}) {
   const halted = isHalted(journey);
   const notRun = {...statusView('execution', 'SKIPPED'), label: 'Not run'};
   return (
-    <Panel title="Approved steps">
+    <Panel title={approved ? 'Approved steps' : 'Steps in this request'}>
       {!approved ? (
         <Text type="body" color="secondary">
           {approval?.state === 'PENDING' ? 'Nothing runs until you approve.' : 'None of these steps ran.'}
@@ -248,6 +249,7 @@ export function CallDetail({
   if (journey.approval && !journey.approval.expiresAt && approval.data) journey.approval.expiresAt = approval.data.expiresAt;
 
   const duration = durationText(journey);
+  const wait = waitingOn(journey);
   const callView = journey.call ? statusView('call', journey.call.status) : null;
 
   return (
@@ -284,9 +286,13 @@ export function CallDetail({
                 </HStack>
               ) : null}
             </HStack>
-            <HStack>
+            <HStack gap={3} vAlign="center" wrap="wrap">
               <StatusBadge label={journey.headline.label} tone={journey.headline.tone} />
+              <Text type="display-3" weight="semibold">
+                {`Waiting on: ${wait.who}`}
+              </Text>
             </HStack>
+            <Text type="large">{wait.what}</Text>
             {journey.payment?.state === 'verified' ? (
               <Text type="large">
                 Paid (sandbox), verified with Square. Payment {journey.payment.squarePaymentId}.
@@ -298,6 +304,9 @@ export function CallDetail({
       </Card>
 
       <ApprovalCallout journey={journey} />
+      {!journey.finished && journey.kind !== 'call_only' ? (
+        <ProviderHealthNotice businessId={businessId} providers={journeyProviders(journey)} />
+      ) : null}
       {journey.notices.map((notice) => (
         <NoticeView key={notice.key} notice={notice} />
       ))}
@@ -327,4 +336,14 @@ export function CallDetail({
       <EventLog journey={journey} timeZone={timeZone} />
     </VStack>
   );
+}
+
+/** The providers the rest of this call depends on: its approved or proposed bundle. */
+function journeyProviders(journey: Journey) {
+  const bundle = journey.approval?.actionBundle.length
+    ? journey.approval.actionBundle
+    : journey.kind === 'booking'
+      ? ['calendar.event.create', 'message.booking.confirm', 'sheets.booking.append']
+      : ['square.checkout.create', 'message.checkout.send', 'sheets.order.append'];
+  return providersForSteps(bundle);
 }

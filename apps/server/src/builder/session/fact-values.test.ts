@@ -26,6 +26,20 @@ describe('typed fact values from chat answers', () => {
     }
   });
 
+  it('refuses a range rather than picking one end of it (review)', () => {
+    for (const text of ['15 to 20 minutes', 'between 1 and 2 hours', '1-2 hours', 'fifteen to twenty minutes', 'forty five minutes', 'about 10 or 15 minutes']) {
+      expect(typedFactValue('policy.pickup_window', text), text).toEqual({ ok: false, hint: expect.stringContaining('length of time') });
+      expect(typedFactValue('policy.min_notice', text).ok, text).toBe(false);
+    }
+    // One number with its unit still reads, in digits or in words.
+    expect(typedFactValue('policy.pickup_window', '20 minutes')).toMatchObject({ ok: true, value: { minutes: 20 } });
+    expect(typedFactValue('policy.pickup_window', 'About fifteen minutes.')).toMatchObject({ ok: true, value: { minutes: 15 } });
+    expect(typedFactValue('policy.pickup_window', 'forty-five minutes')).toMatchObject({ ok: true, value: { minutes: 45 } });
+    expect(typedFactValue('policy.min_notice', 'At least 2 hours before the appointment.')).toMatchObject({ ok: true, value: { minutes: 120 } });
+    expect(typedFactValue('policy.min_notice', 'a day')).toMatchObject({ ok: true, value: { minutes: 1440 } });
+    expect(typedFactValue('policy.min_notice', '2 hours (120 minutes)')).toMatchObject({ ok: true, value: { minutes: 120 } });
+  });
+
   it('reads yes or no for special requests, and consent wording as given', () => {
     expect(typedFactValue('policy.special_requests', 'Yes, we accept them.')).toMatchObject({ ok: true, value: { allowed: true } });
     expect(typedFactValue('policy.special_requests', 'No special requests.')).toMatchObject({ ok: true, value: { allowed: false } });

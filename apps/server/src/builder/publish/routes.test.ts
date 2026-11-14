@@ -567,16 +567,78 @@ describe('rollback', () => {
     expect((await get(h.app, `/api/agents/${id}?${PIZZA}`)).json()).toMatchObject({ state: 'paused', activeVersionId: v1.id });
   });
 
-  it('a paused agent that answers the number stays paused on rollback, and the number follows its new version', async () => {
+  // API.md 3.4: a paused agent stays paused, and the number follows only if
+  // the agent is live. This replaces the test in which the number followed a
+  // paused agent's rollback.
+  it('a paused agent that answers the number stays paused on rollback, and the number does not move', async () => {
     const h = await harness();
     const id = await createAgent(h);
     const v1 = (await publish(h, id, { confirm: true, makeLive: true })).json().version;
     await editDraft(h, id, 'Second goal.');
-    await publish(h, id, { confirm: true, makeLive: true });
+    const v2 = (await publish(h, id, { confirm: true, makeLive: true })).json().version;
     await post(h.app, `/api/agents/${id}/pause?${PIZZA}`);
+    const pointer = await h.liveAgents.get();
+    expect(pointer).toMatchObject({ agentId: id, agentVersionId: v2.id });
+    h.events.events.length = 0;
     const res = (await post(h.app, `/api/agents/${id}/rollback?${PIZZA}`, { toVersionId: v1.id, confirm: true })).json();
     expect(res.agent).toMatchObject({ state: 'paused', activeVersionId: v1.id, isLiveAgent: true });
+    expect(await h.liveAgents.get()).toEqual(pointer);
+    expect(h.events.events.map((e) => [e.type, e.payload])).toEqual([
+      ['agent.published', { agentId: id, agentVersionId: v1.id, version: 1, rolledBackFrom: v2.id }],
+    ]);
+  });
+
+  it('after a paused rollback, the next publish moves the number to the version active then', async () => {
+    // Reactivation: the draft is set back to v1's content, so publish reuses v1.
+    const h = await harness();
+    const id = await createAgent(h);
+    const v1 = (await publish(h, id, { confirm: true, makeLive: true })).json().version;
+    await editDraft(h, id, 'Second goal.');
+    const v2 = (await publish(h, id, { confirm: true, makeLive: true })).json().version;
+    await post(h.app, `/api/agents/${id}/pause?${PIZZA}`);
+    await post(h.app, `/api/agents/${id}/rollback?${PIZZA}`, { toVersionId: v1.id, confirm: true });
+    await editDraft(h, id, PIZZA_SPEC.goal);
+    h.events.events.length = 0;
+    const resumed = (await publish(h, id, { confirm: true, makeLive: false })).json();
+    expect(resumed.version.id).toBe(v1.id);
+    expect(resumed.agent).toMatchObject({ state: 'live', activeVersionId: v1.id, isLiveAgent: true });
     expect(await h.liveAgents.get()).toMatchObject({ agentId: id, agentVersionId: v1.id });
+    expect(h.events.events.map((e) => [e.type, e.payload])).toEqual([
+      ['live_agent.changed', { phoneNumberLast4: '0142', agentId: id, agentVersionId: v1.id, previousAgentId: id }],
+      ['agent.published', { agentId: id, agentVersionId: v1.id, version: 1, phoneNumberLast4: '0142' }],
+    ]);
+
+    // A changed draft: publish writes v3 and the number follows it.
+    const h2 = await harness();
+    const id2 = await createAgent(h2);
+    const w1 = (await publish(h2, id2, { confirm: true, makeLive: true })).json().version;
+    await editDraft(h2, id2, 'Second goal.');
+    const w2 = (await publish(h2, id2, { confirm: true, makeLive: true })).json().version;
+    await post(h2.app, `/api/agents/${id2}/pause?${PIZZA}`);
+    await post(h2.app, `/api/agents/${id2}/rollback?${PIZZA}`, { toVersionId: w1.id, confirm: true });
+    expect((await h2.liveAgents.get())?.agentVersionId).toBe(w2.id);
+    const w3 = (await publish(h2, id2, { confirm: true, makeLive: false })).json().version;
+    expect(w3.version).toBe(3);
+    expect(await h2.liveAgents.get()).toMatchObject({ agentId: id2, agentVersionId: w3.id });
+  });
+
+  it('an open required conflict that only the database knowledge reports blocks a rollback, as it blocks a publish', async () => {
+    let conflicts: string[] = [];
+    const h = await harness({ knowledge: pizzaKnowledge((ctx) => ({ ...ctx, openRequiredConflictIds: conflicts })) });
+    const id = await createAgent(h);
+    const v1 = (await publish(h, id)).json().version;
+    await editDraft(h, id, 'Second goal.');
+    const v2 = (await publish(h, id)).json().version;
+    conflicts = ['cfl_db_02'];
+    h.events.events.length = 0;
+    const blocked = await post(h.app, `/api/agents/${id}/rollback?${PIZZA}`, { toVersionId: v1.id, confirm: true });
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json()).toMatchObject({ code: 'CONFLICT_UNRESOLVED', details: { conflictIds: ['cfl_db_02'] } });
+    expect((await get(h.app, `/api/agents/${id}?${PIZZA}`)).json().activeVersionId).toBe(v2.id);
+    expect((await h.liveAgents.get())?.agentVersionId).toBe(v2.id);
+    expect(h.events.events).toHaveLength(0);
+    conflicts = [];
+    expect((await post(h.app, `/api/agents/${id}/rollback?${PIZZA}`, { toVersionId: v1.id, confirm: true })).statusCode).toBe(200);
   });
 
   it('rollback with makeLive true (in the package RollbackBodySchema) moves the number to the agent', async () => {
@@ -649,6 +711,53 @@ describe('publish: stop conditions (FLOWS.md, Builder stop conditions)', () => {
       expect(res.json()).toMatchObject({ code: 'VALIDATION_FAILED', details: { issues: [{ code }] } });
       expect(res.json().details.issues).toHaveLength(1);
     }
+  });
+
+  it('a required fact that is not verified (the pickup window) is VALIDATION_FAILED with missing_required_fact; with it verified, the agent publishes', async () => {
+    const h = await harness({ knowledge: pizzaKnowledge((ctx) => ({ ...ctx, verifiedFacts: ctx.verifiedFacts.filter((f) => f.key !== 'pickup_window') })) });
+    const id = await createAgent(h);
+    const res = await publish(h, id);
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ code: 'VALIDATION_FAILED' });
+    expect(res.json().details.issues).toEqual([
+      { path: 'policy.pickup_window', code: 'missing_required_fact', message: 'The agent needs a confirmed answer for the pickup window.' },
+    ]);
+    expect(await h.versions.listByAgent('biz_pizza_01', id)).toHaveLength(0);
+    expect(h.events.events).toHaveLength(0);
+
+    const full = await harness();
+    const ok = await publish(full, await createAgent(full));
+    expect(ok.statusCode).toBe(200);
+  });
+
+  it('every missing required fact is reported, next to the other codes, and name and goal are left to spec validation', async () => {
+    const knowledge = pizzaKnowledge((ctx) => ({
+      ...ctx,
+      profile: { id: ctx.profile.id, name: ctx.profile.name, category: ctx.profile.category },
+      verifiedFacts: ctx.verifiedFacts.filter((f) => !(f.kind === 'hours' && (f.key === 'mon' || f.key === 'sun')) && f.key !== 'special_requests'),
+    }));
+    const h = await harness({ knowledge });
+    const id = await createAgent(h);
+    const issues = (await publish(h, id)).json().details.issues as { path: string; code: string }[];
+    expect(issues.map((i) => [i.code, i.path])).toEqual([
+      ['missing_timezone', 'missing_timezone'],
+      ['missing_required_fact', 'hours.mon'],
+      ['missing_required_fact', 'hours.sun'],
+      ['missing_required_fact', 'policy.special_requests'],
+    ]);
+  });
+
+  it('a booking agent without verified services or notice is refused with both fields', async () => {
+    const knowledge: BusinessKnowledge = {
+      async getContext(businessId) {
+        const ctx = await new FixtureBusinessKnowledge().getContext(businessId);
+        return ctx && { ...ctx, verifiedFacts: ctx.verifiedFacts.filter((f) => f.kind !== 'service' && f.key !== 'min_notice') };
+      },
+    };
+    const h = await harness({ knowledge });
+    const id = await createAgent(h, BOOKING_SPEC, BARBER);
+    const res = await publish(h, id, { confirm: true, makeLive: false }, BARBER);
+    expect(res.json().details.issues.map((i: { path: string }) => i.path)).toEqual(['services', 'policy.min_notice']);
   });
 
   it('a consent policy is not needed by an agent that sends no messages', async () => {

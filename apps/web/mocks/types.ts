@@ -17,23 +17,8 @@ import type {
   LiveAgent,
   MessageDispatch,
   Order,
-  SyncJobState,
-  SyncRecordType,
-  SyncTarget,
+  SyncJob,
 } from "@abos/contracts";
-
-/** A sync_jobs row (DATA-MODEL.md). Not exposed by any endpoint; seen through sync.* events. */
-export interface SyncJob {
-  id: string;
-  businessId: string;
-  target: SyncTarget;
-  recordType?: SyncRecordType;
-  recordId?: string;
-  status: SyncJobState;
-  attempts: number;
-  createdAt: string;
-  updatedAt: string;
-}
 
 /** An agent as stored. isLiveAgent and activeVersion are computed when served. */
 export type AgentRecord = Omit<Agent, "isLiveAgent" | "activeVersion">;
@@ -67,8 +52,8 @@ export interface MockState {
   health: IntegrationHealth;
 }
 
-export const OWNER_USER_ID = "usr_owner_01";
-export const PHONE_NUMBER = "+15555550199";
+// The shared world's constants, under the names the mock already used.
+export { OWNER_USER_ID, DEMO_PHONE_NUMBER as PHONE_NUMBER, BARBER_CALENDAR_ID } from "@abos/contracts/fixtures";
+export { SEEDED_TIMEZONE as TIMEZONE } from "@abos/contracts";
+/** The message channel of every seeded consenting customer. */
 export const MESSAGE_CHANNEL = "surge" as const;
-export const TIMEZONE = "America/Los_Angeles";
-export const BARBER_CALENDAR_ID = "demo-barber@group.calendar.google.com";

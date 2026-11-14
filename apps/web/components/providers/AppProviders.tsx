@@ -18,7 +18,7 @@ export function AppProviders({children}: {children: ReactNode}) {
         <AuthProvider>
           {/* Data layer: React Query, plus the MSW worker in mock mode. */}
           <ApiProvider>
-            {/* useBusiness(): the list comes from GET /api/businesses, with the seeded list as fallback. */}
+            {/* useBusiness(): the list comes from GET /api/businesses. Only mock mode shows the seeded list while it loads or after it fails; real mode shows nothing the server has not returned. */}
             <ApiBusinessProvider>
               <SessionErrorHandler />
               {children}

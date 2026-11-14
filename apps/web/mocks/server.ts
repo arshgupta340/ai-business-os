@@ -9,5 +9,5 @@ setBuilderSessionStore(null);
 export const server = setupServer(...handlers);
 
 export { mockControls } from "./timeline";
-export { resetDb, getState, advanceMockClock, setApprovalExpiry, setBuilderSessionStore, saveBuilderSessions, restoreBuilderSessions, BUILDER_SESSIONS_STORAGE_KEY } from "./db";
+export { ready, resetDb, getState, advanceMockClock, isEmptyBusiness, setApprovalExpiry, setBuilderSessionStore, saveBuilderSessions, restoreBuilderSessions, BUILDER_SESSIONS_STORAGE_KEY } from "./db";
 export { setMockTiming, FAST_TIMING, DEFAULT_TIMING, whenIdle } from "./scheduler";

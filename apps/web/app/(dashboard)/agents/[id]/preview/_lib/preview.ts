@@ -4,6 +4,7 @@
  * and the publish error text. No React here, so every rule is unit tested.
  */
 import type {AgentRunResponse, AgentSpec, AgentStatus, ApiError, FactConflict, GuardrailRule, ToolName} from '@/lib/api';
+import {PROVIDER_LABELS} from '@/components/shell/ConnectionHealth';
 import {formatMoney} from '@/lib/format';
 
 export type TraceEntry = AgentRunResponse['toolTrace'][number];
@@ -220,6 +221,11 @@ export function activityHref(callId: string): string {
 
 // ------------------------------------------------------------ publish errors
 
+export type FixLink = {label: string; href: string};
+
+/** One thing the owner must fix before the server publishes, with where to fix it. */
+export type PublishFix = {text: string; links: FixLink[]};
+
 export type PublishErrorView = {
   title: string;
   message: string;
@@ -227,12 +233,16 @@ export type PublishErrorView = {
   next?: {label: string; href: string};
   canRetry: boolean;
   conflictIds: string[];
+  /** Spec validation issues (no code), as "path: message". */
   issues: string[];
+  /** Stop conditions (issues with a code), one plain sentence each. */
+  fixes: PublishFix[];
 };
 
 function issuesOf(error: ApiError): string[] {
   const issues = Array.isArray(error.details?.issues) ? error.details.issues : [];
   return issues
+    .filter((issue) => !(isObj(issue) && typeof issue.code === 'string'))
     .map((issue) => {
       if (!isObj(issue)) return '';
       const path = typeof issue.path === 'string' ? issue.path : '';
@@ -242,12 +252,116 @@ function issuesOf(error: ApiError): string[] {
     .filter(Boolean);
 }
 
+const SETTINGS_LINK: FixLink = {label: 'Open Settings', href: '/settings'};
+const KNOWLEDGE_LINK: FixLink = {label: 'Open Business Knowledge', href: '/knowledge'};
+
+function builderLink(builderHref: string | null): FixLink {
+  return builderHref ? {label: 'Answer it in the builder chat', href: builderHref} : {label: 'Answer it in the builder chat', href: '/build'};
+}
+
+const DAY_NAMES: Record<string, string> = {
+  mon: 'Monday',
+  tue: 'Tuesday',
+  wed: 'Wednesday',
+  thu: 'Thursday',
+  fri: 'Friday',
+  sat: 'Saturday',
+  sun: 'Sunday',
+};
+
+/** What is missing, per field the builder checks (apps/server/src/builder/session/requirements.ts). */
+const FACT_FIELD_TEXT: Record<string, string> = {
+  'policy.pickup_window': 'How soon a pickup order is ready is not set.',
+  'policy.special_requests': 'Whether you accept special requests on an order is not set.',
+  'policy.min_notice': 'How much notice you need before an appointment is not set.',
+  'policy.message_consent': 'How the agent asks for consent before it sends a text message is not set.',
+};
+
+const CATALOG_TEXT = 'The catalog has no items. Sync it from Square or upload a menu in Business Knowledge.';
+const SERVICES_TEXT = 'The list of services is missing. Upload a service list in Business Knowledge.';
+const CHAT_HINT = ' Add it in Business Knowledge or answer it in the builder chat.';
+
+function missingFactFix(path: string, builderHref: string | null): PublishFix | null {
+  if (path === 'catalog.items') return {text: CATALOG_TEXT, links: [KNOWLEDGE_LINK]};
+  if (path === 'services') return {text: SERVICES_TEXT, links: [KNOWLEDGE_LINK]};
+  const day = /^hours\.(mon|tue|wed|thu|fri|sat|sun)$/.exec(path)?.[1];
+  const text = day ? `The opening hours for ${DAY_NAMES[day]} are not set.` : FACT_FIELD_TEXT[path];
+  return text ? {text: `${text}${CHAT_HINT}`, links: [KNOWLEDGE_LINK, builderLink(builderHref)]} : null;
+}
+
+/**
+ * One fix per stop condition the server named in details.issues
+ * (VALIDATION_FAILED from publish). A code the web app does not know falls
+ * back to the server's message.
+ */
+export function stopConditionFixes(error: ApiError, builderHref: string | null): PublishFix[] {
+  const issues = Array.isArray(error.details?.issues) ? error.details.issues : [];
+  const fixes: PublishFix[] = [];
+  for (const issue of issues) {
+    if (!isObj(issue) || typeof issue.code !== 'string') continue;
+    const path = typeof issue.path === 'string' ? issue.path : '';
+    const serverText = typeof issue.message === 'string' && issue.message ? issue.message : error.message;
+    let fix: PublishFix | null = null;
+    switch (issue.code) {
+      case 'missing_timezone':
+        fix = {text: 'The business has no time zone. Check the business profile in Settings.', links: [SETTINGS_LINK]};
+        break;
+      case 'missing_message_consent_policy':
+        fix = {
+          text: `The agent sends text messages, but there is no message consent policy.${CHAT_HINT}`,
+          links: [KNOWLEDGE_LINK, builderLink(builderHref)],
+        };
+        break;
+      case 'empty_catalog':
+        fix = {text: CATALOG_TEXT, links: [KNOWLEDGE_LINK]};
+        break;
+      case 'missing_required_fact':
+        fix = missingFactFix(path, builderHref);
+        break;
+    }
+    fixes.push(fix ?? {text: serverText, links: []});
+  }
+  return fixes;
+}
+
+/** Owner-facing name of a provider key, with the labels the Integrations screen uses. */
+export function providerName(key: string): string {
+  return (PROVIDER_LABELS as Record<string, string>)[key] ?? key;
+}
+
+function joinNames(names: readonly string[]): string {
+  if (names.length <= 1) return names[0] ?? '';
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+/**
+ * The providers an INTEGRATION_UNAVAILABLE answer names. `notConnected` is true
+ * when the server listed them in details.providers: publish then checked the
+ * health record and found them disconnected or unknown. A single
+ * details.provider is a call that failed during the request.
+ */
+export function unavailableProviders(error: ApiError): {names: string[]; notConnected: boolean} {
+  const list = Array.isArray(error.details?.providers) ? error.details.providers.filter((p): p is string => typeof p === 'string') : [];
+  if (list.length > 0) return {names: list.map(providerName), notConnected: true};
+  const one = typeof error.details?.provider === 'string' ? error.details.provider : null;
+  return {names: one ? [providerName(one)] : [], notConnected: false};
+}
+
+/** "Twilio and OpenAI are not connected." or "Square is not responding." */
+export function unavailableSentence(error: ApiError, fallbackName = 'A provider'): string {
+  const {names, notConnected} = unavailableProviders(error);
+  const subject = names.length ? joinNames(names) : fallbackName;
+  const plural = names.length > 1;
+  return notConnected ? `${subject} ${plural ? 'are' : 'is'} not connected.` : `${subject} ${plural ? 'are' : 'is'} not responding.`;
+}
+
 export function publishErrorView(error: ApiError, builderHref: string | null): PublishErrorView {
   const builder = builderHref ? {label: 'Back to the builder', href: builderHref} : {label: 'Open the builder', href: '/build'};
   const base = {
     canRetry: false,
     conflictIds: [] as string[],
     issues: [] as string[],
+    fixes: [] as PublishFix[],
   };
   switch (error.code) {
     case 'CONFLICT_UNRESOLVED': {
@@ -271,11 +385,13 @@ export function publishErrorView(error: ApiError, builderHref: string | null): P
         next: builder,
       };
     case 'INTEGRATION_UNAVAILABLE': {
-      const provider = typeof error.details?.provider === 'string' ? error.details.provider : 'A provider';
+      const {notConnected} = unavailableProviders(error);
       return {
         ...base,
         title: 'Publish did not finish',
-        message: `${provider} is not responding. Nothing was published. Try again in a moment.`,
+        message: `${unavailableSentence(error)} Nothing was published. ${
+          notConnected ? 'Check them on the Integrations screen, then try again.' : 'Try again in a moment.'
+        }`,
         next: {label: 'Check integrations', href: '/integrations'},
         canRetry: true,
       };
@@ -287,14 +403,27 @@ export function publishErrorView(error: ApiError, builderHref: string | null): P
         message: 'The server refuses payment work until Square is set to sandbox. Nothing was published.',
         next: {label: 'Check integrations', href: '/integrations'},
       };
-    case 'VALIDATION_FAILED':
+    case 'VALIDATION_FAILED': {
+      const fixes = stopConditionFixes(error, builderHref);
+      const issues = issuesOf(error);
+      if (fixes.length > 0) {
+        return {
+          ...base,
+          title: 'Publish was refused: some details are missing',
+          message: 'Nothing was published. Fix each item below, then publish again.',
+          ...(issues.length > 0 ? {next: builder} : {}),
+          issues,
+          fixes,
+        };
+      }
       return {
         ...base,
         title: 'Publish was refused: the draft is not valid',
         message: error.message,
         next: builder,
-        issues: issuesOf(error),
+        issues,
       };
+    }
     case 'NOT_FOUND':
       return {
         ...base,

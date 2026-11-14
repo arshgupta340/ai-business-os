@@ -1,11 +1,12 @@
 // The one place every route group is registered. Dependencies come from the composition root
 // (compose/index.ts); tests pass overrides through the same options.
 import { randomUUID } from 'node:crypto';
-import { ERROR_CODE_INFO, WEBHOOK_ENDPOINTS, type ErrorCode } from '@abos/contracts';
+import { ERROR_CODE_INFO, ResolveConflictBodySchema, WEBHOOK_ENDPOINTS, type ErrorCode } from '@abos/contracts';
 import cors from '@fastify/cors';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { healthRoutes } from './api/health';
 import { apiRoutes } from './api/routes';
+import { resolveConflictKeepCurrent } from './api/conflicts';
 import { registerSimCall } from './api/simcall/index';
 import { pricesPlugin } from './api/prices/index';
 import { createRecoveryPlugin } from './api/recovery/index';
@@ -114,7 +115,7 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
   // database conflict sent to the in-memory resolve route would be a silent 404, so it gets a contract
   // error naming the route that resolves it on the database instead.
   if (composed.databaseProbe) {
-    app.addHook('preHandler', async (request) => {
+    app.addHook('preHandler', async (request, reply) => {
       const match = /^\/api\/conflicts\/([^/?]+)\/resolve$/.exec(request.url.split('?')[0] ?? '');
       if (!match || request.method !== 'POST') return;
       // Only for an authenticated owner of that conflict's business; anything else goes on to the
@@ -122,8 +123,19 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
       const auth = composed.builder.auth;
       const owner = auth ? await auth.authenticate(request).catch(() => null) : null;
       if (!auth || !owner) return;
-      const found = (await composed.db.query('select business_id from public.fact_conflicts where id = $1', [decodeURIComponent(match[1]!)])).rows[0] as { business_id: string } | undefined;
+      const conflictId = decodeURIComponent(match[1]!);
+      const found = (await composed.db.query('select business_id, kind from public.fact_conflicts where id = $1', [conflictId])).rows[0] as { business_id: string; kind: string } | undefined;
       if (!found || !(await auth.ownsBusiness(owner, found.business_id))) return;
+      // "Keep the current value": resolved here on the database, with no approval (nothing external is written).
+      if (ResolveConflictBodySchema.safeParse(request.body).success) {
+        const conflict = await resolveConflictKeepCurrent(composed.db, { conflictId, businessId: found.business_id, ownerUserId: owner.userId, newId: composed.newId });
+        return reply.code(200).send({ conflict });
+      }
+      // Any other choice is an edit. A redirect answer is never worth retrying, so retryable is false.
+      if (found.kind === 'menu_item') {
+        throw new AppError('CAPABILITY_NOT_ALLOWED', 'A Square price is changed with a price change. Change the price, sync, then keep the current value on this conflict.', undefined, false,
+          { use: ['POST /api/businesses/:id/catalog/prices/propose', 'POST /api/conflicts/:id/resolve with resolution keep_authoritative'] });
+      }
       throw new AppError('INTEGRATION_UNAVAILABLE', 'This conflict is resolved from the facts list on this server.', undefined, false,
         { use: 'POST /api/businesses/:id/facts/propose with resolvesConflictId' });
     });

@@ -128,6 +128,20 @@ describe("price_edit", () => {
   });
 });
 
+describe("simulateSheetsDisconnected", () => {
+  it("switches Google Sheets to the shared disconnected health until reset, keeping the degraded calendar", async () => {
+    const before = await api.getIntegrationsHealth(PIZZA);
+    expect(before.google_sheets.state).toBe("connected");
+    expect(before.google_calendar.state).toBe("degraded");
+    mockControls.simulateSheetsDisconnected?.();
+    const after = await api.getIntegrationsHealth(PIZZA);
+    expect(after.google_sheets).toMatchObject({ state: "disconnected", detail: "Reconnect Google Sheets to resume sync." });
+    expect(after.google_calendar.state).toBe("degraded");
+    await mockControls.reset();
+    expect((await api.getIntegrationsHealth(PIZZA)).google_sheets.state).toBe("connected");
+  });
+});
+
 describe("reset", () => {
   it("tells subscribers so the activity feed can drop its events", async () => {
     let calls = 0;
@@ -178,5 +192,60 @@ describe("builder session persistence", () => {
     } finally {
       setBuilderSessionStore(null);
     }
+  });
+});
+
+describe("simulateEmptyBusiness", () => {
+  it("leaves one business with nothing until reset, and keeps the other business as it was", async () => {
+    const BARBER = "biz_barber_01";
+    const barberAgentsBefore = (await api.listAgents(BARBER)).items.length;
+    mockControls.simulateEmptyBusiness?.(PIZZA);
+    expect((await api.listAgents(PIZZA)).items).toEqual([]);
+    expect((await api.listCalls(PIZZA)).items).toEqual([]);
+    expect((await api.listOrders(PIZZA)).items).toEqual([]);
+    expect((await api.listApprovals(PIZZA, { state: "PENDING" })).items).toEqual([]);
+    expect((await api.listActivity(PIZZA)).items).toEqual([]);
+    const facts = await api.getFacts(PIZZA);
+    expect(facts.items).toEqual([]);
+    expect(facts.conflicts).toEqual([]);
+    expect((await api.getCatalog(PIZZA)).items).toEqual([]);
+    expect((await api.getTelemetry(PIZZA)).metrics).toEqual([]);
+    // The business is still there, and nothing answers the number for it.
+    expect((await api.getBusiness(PIZZA)).id).toBe(PIZZA);
+    expect((await api.getLiveAgent()).agentId).toBeUndefined();
+    expect((await api.listAgents(BARBER)).items.length).toBe(barberAgentsBefore);
+
+    await mockControls.reset();
+    expect((await api.listAgents(PIZZA)).items.length).toBeGreaterThan(0);
+    expect((await api.getTelemetry(PIZZA)).metrics.length).toBeGreaterThan(0);
+  });
+});
+
+describe("simulateRequestFailure", () => {
+  it("fails matching GET requests with the error envelope until cleared", async () => {
+    mockControls.simulateRequestFailure?.({ path: "/api/calls" });
+    await expect(api.listCalls(PIZZA)).rejects.toMatchObject({ code: "INTERNAL", retryable: true, kind: "http" });
+    await expect(api.listCalls(PIZZA)).rejects.toMatchObject({ code: "INTERNAL" });
+    // Other paths and other methods still answer.
+    await expect(api.listOrders(PIZZA)).resolves.toBeDefined();
+    mockControls.clearRequestFailures?.();
+    await expect(api.listCalls(PIZZA)).resolves.toBeDefined();
+  });
+
+  it("answers an invalid body, a chosen code, a limited number of times, and stops at reset", async () => {
+    mockControls.simulateRequestFailure?.({ path: "/api/agents", mode: "invalid", times: 1 });
+    await expect(api.listAgents(PIZZA)).rejects.toMatchObject({ kind: "invalid_response" });
+    await expect(api.listAgents(PIZZA)).resolves.toBeDefined();
+
+    mockControls.simulateRequestFailure?.({ path: "/api/approvals", method: "POST", code: "INTEGRATION_UNAVAILABLE", message: "Square is not answering." });
+    const { items } = await api.listApprovals(PIZZA, { state: "PENDING" });
+    await expect(
+      api.decideApproval(PIZZA, items[0].id, { decision: "approve", payloadHash: items[0].payloadHash }),
+    ).rejects.toMatchObject({ code: "INTEGRATION_UNAVAILABLE", message: "Square is not answering." });
+    await mockControls.reset();
+    const fresh = await api.listApprovals(PIZZA, { state: "PENDING" });
+    await expect(
+      api.decideApproval(PIZZA, fresh.items[0].id, { decision: "approve", payloadHash: fresh.items[0].payloadHash }),
+    ).resolves.toBeDefined();
   });
 });

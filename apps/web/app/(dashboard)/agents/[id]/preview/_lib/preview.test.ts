@@ -161,3 +161,99 @@ describe('publishErrorView', () => {
     expect(new Set(titles).size).toBe(titles.length);
   });
 });
+
+// The real server's answers (origin/arsh/integration):
+// apps/server/src/builder/publish/service.ts assertStopConditions and STOP_MESSAGES,
+// apps/server/src/builder/publish/integrations.ts unavailableIntegrations,
+// apps/server/src/builder/publish/catalog-sync.ts runCatalogSync.
+const realError = (code: ApiError['code'], message: string, details: Record<string, unknown>, status: number, retryable: boolean) =>
+  new ApiError({code, message, status, retryable, details, kind: 'http', correlationId: 'cor_pub_1'});
+
+const stopError = (issues: unknown[]) =>
+  realError('VALIDATION_FAILED', 'The agent cannot be published until these are fixed.', {issues}, 400, false);
+
+describe('publishErrorView with the real builder answers', () => {
+  it('turns each stop condition code into one plain sentence with a link', () => {
+    const view = publishErrorView(
+      stopError([
+        {path: 'missing_timezone', code: 'missing_timezone', message: 'The business has no time zone.'},
+        {path: 'missing_message_consent_policy', code: 'missing_message_consent_policy', message: 'The message consent policy is missing.'},
+        {path: 'empty_catalog', code: 'empty_catalog', message: 'The agent needs a catalog, and the catalog has no items.'},
+      ]),
+      '/build?session=bld_1',
+    );
+    expect(view.fixes).toHaveLength(3);
+    const [timezone, consent, catalog] = view.fixes;
+    expect(timezone.text).toMatch(/time zone/);
+    expect(timezone.links.map((l) => l.href)).toEqual(['/settings']);
+    expect(consent.text).toMatch(/consent/);
+    expect(consent.links.map((l) => l.href)).toEqual(['/knowledge', '/build?session=bld_1']);
+    expect(catalog.text).toMatch(/Square/);
+    expect(catalog.text).toMatch(/menu/);
+    expect(catalog.links.map((l) => l.href)).toEqual(['/knowledge']);
+    // Stop conditions are not shown as raw "path: message" lines.
+    expect(view.issues).toEqual([]);
+    for (const fix of view.fixes) {
+      expect(fix.text).not.toMatch(/missing_|empty_catalog|:/);
+      expect(fix.text).not.toMatch(/\u2014/);
+    }
+  });
+
+  it('names the field for missing_required_fact and falls back to the server message for an unknown code', () => {
+    const view = publishErrorView(
+      stopError([
+        {path: 'hours.mon', code: 'missing_required_fact', message: 'hours.mon is missing.'},
+        {path: 'policy.pickup_window', code: 'missing_required_fact', message: 'policy.pickup_window is missing.'},
+        {path: 'catalog.items', code: 'missing_required_fact', message: 'catalog.items is missing.'},
+        {path: 'whatever', code: 'brand_new_code', message: 'A new rule the web app does not know.'},
+      ]),
+      null,
+    );
+    expect(view.fixes[0].text).toMatch(/Monday/);
+    expect(view.fixes[0].links.map((l) => l.href)).toEqual(['/knowledge', '/build']);
+    expect(view.fixes[1].text).toMatch(/pickup/);
+    expect(view.fixes[2].text).toMatch(/catalog/);
+    expect(view.fixes[2].links.map((l) => l.href)).toEqual(['/knowledge']);
+    expect(view.fixes[3].text).toBe('A new rule the web app does not know.');
+  });
+
+  it('keeps spec validation issues, which have no code, as they were', () => {
+    const view = publishErrorView(
+      realError('VALIDATION_FAILED', 'The agent spec is not complete.', {issues: [{path: 'greeting', message: 'Required'}]}, 400, false),
+      null,
+    );
+    expect(view.issues).toEqual(['greeting: Required']);
+    expect(view.fixes).toEqual([]);
+    expect(view.message).toBe('The agent spec is not complete.');
+  });
+
+  it('names every provider that is not connected, with the Integrations labels', () => {
+    const view = publishErrorView(
+      realError(
+        'INTEGRATION_UNAVAILABLE',
+        'A provider this agent needs is not reachable right now. Try again.',
+        {provider: 'twilio', providers: ['twilio', 'google_calendar', 'message_channel']},
+        503,
+        true,
+      ),
+      null,
+    );
+    expect(view.message).toMatch(/^Twilio, Google Calendar and Message channel are not connected\./);
+    expect(view.message).not.toMatch(/twilio|google_calendar|not responding/);
+    expect(view.next?.href).toBe('/integrations');
+    expect(view.canRetry).toBe(true);
+    const one = publishErrorView(
+      realError('INTEGRATION_UNAVAILABLE', 'x', {provider: 'openai', providers: ['openai']}, 503, true),
+      null,
+    );
+    expect(one.message).toMatch(/^OpenAI is not connected\./);
+  });
+
+  it('says a provider is not responding when only one provider failed during publish', () => {
+    const view = publishErrorView(
+      realError('INTEGRATION_UNAVAILABLE', 'The catalog sync with Square failed. Try publishing again.', {provider: 'square'}, 503, true),
+      null,
+    );
+    expect(view.message).toMatch(/^Square is not responding\./);
+  });
+});

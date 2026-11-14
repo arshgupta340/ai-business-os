@@ -23,10 +23,11 @@ import {
 } from '@/lib/api';
 import {formatMoney} from '@/lib/format';
 import {conflictView} from '@/lib/status';
-import {ApiErrorBanner} from './ApiErrorBanner';
+import {ApiErrorBanner, isResolveOnFactsList} from './ApiErrorBanner';
 import {ProposalNotice} from './ProposalNotice';
 import {
   KIND_LABELS,
+  conflictVariationId,
   describeValue,
   factKeyLabel,
   findVariation,
@@ -76,7 +77,7 @@ export function ConflictCard({businessId, conflict, facts, catalog, onResolved, 
   const file = useFile(businessId, uploadedFact?.fileId);
   const price = isPriceConflict(conflict);
   const view = conflictView(conflict.state, conflict.required);
-  const match = price ? findVariation(catalog, conflict.key) : undefined;
+  const match = price ? findVariation(catalog, conflictVariationId(conflict)) : undefined;
   const subject = match
     ? `${match.item.name}, ${match.variation.name}`
     : factKeyLabel(conflict.kind, conflict.key, uploadedFact?.value ?? uploaded?.value);
@@ -84,16 +85,38 @@ export function ConflictCard({businessId, conflict, facts, catalog, onResolved, 
   const keepLabel = price && authority?.sourceType === 'square' ? 'Keep the Square price' : 'Keep the current value';
   const busy = resolve.isPending || propose.isPending;
 
+  // On a server whose resolve route cannot reach this conflict, the kept value
+  // goes through facts/propose with resolvesConflictId instead: a fact_edit
+  // approval that resolves the conflict only when the owner confirms it.
+  const proposeKept = () => {
+    if (!authority) return;
+    propose.mutate(
+      {resolvesConflictId: conflict.id, value: authority.value, reason: 'Kept the current value'},
+      {
+        onSuccess: ({approval: created}) => setApproval({id: created.id, state: created.state}),
+        onError: (error) => {
+          if (isApiError(error) && error.code === 'INVALID_STATE') onRefetch();
+        },
+      },
+    );
+  };
+
   const keep = () =>
     resolve.mutate(
       {conflictId: conflict.id},
       {
         onSuccess: ({conflict: answered}) => onResolved(answered),
         onError: (error) => {
+          if (isResolveOnFactsList(error)) {
+            // A price comes from Square and is never a fact edit, so only other kinds go through propose.
+            if (!price) proposeKept();
+            return;
+          }
           if (isApiError(error) && (error.code === 'INVALID_STATE' || error.code === 'NOT_FOUND')) onRefetch();
         },
       },
     );
+  const viaFactsList = isResolveOnFactsList(resolve.error);
 
   const useUploaded = () => {
     if (!uploaded) return;
@@ -140,7 +163,14 @@ export function ConflictCard({businessId, conflict, facts, catalog, onResolved, 
         </Grid>
 
         {approval ? (
-          <ProposalNotice approval={approval} />
+          <VStack gap={1}>
+            {viaFactsList ? (
+              <Text type="body">
+                A confirmation is waiting in Approvals. The conflict stays open until you confirm the change there.
+              </Text>
+            ) : null}
+            <ProposalNotice approval={approval} />
+          </VStack>
         ) : (
           <VStack gap={2}>
             <HStack gap={2} wrap="wrap">
@@ -167,7 +197,16 @@ export function ConflictCard({businessId, conflict, facts, catalog, onResolved, 
             )}
           </VStack>
         )}
-        {resolve.error ? <ApiErrorBanner title="The conflict was not resolved" error={resolve.error} /> : null}
+        {resolve.error && !viaFactsList ? <ApiErrorBanner title="The conflict was not resolved" error={resolve.error} /> : null}
+        {viaFactsList && price ? (
+          <VStack gap={1}>
+            <ApiErrorBanner title="The conflict was not resolved" error={resolve.error} />
+            <Text type="supporting">
+              A price conflict cannot be resolved from this screen on this server yet. Nothing changed, and the Square price is
+              still the one your agents use.
+            </Text>
+          </VStack>
+        ) : null}
         {propose.error ? <ApiErrorBanner title="The change was not sent" error={propose.error} /> : null}
       </VStack>
     </Card>

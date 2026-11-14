@@ -10,6 +10,7 @@ import {useRouter} from 'next/navigation';
 import {AppShell} from '@astryxdesign/core/AppShell';
 import {TopNav, TopNavHeading} from '@astryxdesign/core/TopNav';
 import {LoadingState} from '@/components/LoadingState';
+import {BusinessListGate} from '@/lib/session';
 import {useAuth} from '@/lib/session/auth';
 import {ApprovalsBadgeSync} from './ApprovalsBadgeSync';
 import {SandboxBanner} from './SandboxBanner';
@@ -46,7 +47,7 @@ function ShellFrame({children}: {children: ReactNode}) {
         />
       }
       sideNav={<Sidebar pendingApprovalsCount={pendingApprovalsCount} />}>
-      {status === 'signed_in' ? children : <LoadingState label="Checking sign-in" />}
+      {status === 'signed_in' ? <BusinessListGate>{children}</BusinessListGate> : <LoadingState label="Checking sign-in" />}
     </AppShell>
   );
 }

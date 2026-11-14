@@ -233,6 +233,13 @@ describe('other database checks', () => {
     fails(MessageDispatchSchema, { ...m, deliveredAt: undefined });
     fails(MessageDispatchSchema, { ...m, channel: 'surge', status: 'SENT' });
   });
+  it('MessageDispatch: agentphone (D-12) can reach DELIVERED and SENT', () => {
+    const m = { id: 'msg_1', businessId: 'biz_pizza_01', executionId: 'exe_2', subjectId: 'ord_1', channel: 'agentphone', recipient: '+15555550123',
+      template: 'checkout_link', status: 'DELIVERED', providerMessageId: 'msg_ap_1', idempotencyKey: 'cd'.repeat(32), sentAt: createdAt, deliveredAt: createdAt,
+      createdAt, updatedAt: createdAt };
+    passes(MessageDispatchSchema, m);
+    passes(MessageDispatchSchema, { ...m, status: 'SENT', deliveredAt: undefined });
+  });
 });
 
 describe('server-only transitions from the review', () => {

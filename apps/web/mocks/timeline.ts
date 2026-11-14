@@ -15,7 +15,8 @@ import type { MockControls } from "@/lib/api/mock-bridge";
 import { publishMockReset, useMockControls as useMockControlsFromBridge } from "@/lib/api/mock-bridge";
 import type { Call, CallStage } from "@abos/contracts";
 import * as db from "./db";
-import { BARBER, BARBER_AGENT_ID, BARBER_AGENT_V1, PIZZA, PIZZA_AGENT_ID } from "./fixtures";
+import { BARBER_BUSINESS_ID as BARBER, PIZZA_BUSINESS_ID as PIZZA } from "@abos/contracts";
+import { barberAgent, barberVersionV1, bookingVerified, orderFulfilled, pizzaAgent, pizzaVersionV2 } from "@abos/contracts/fixtures";
 import { cancel, schedule, timing } from "./scheduler";
 
 /** The scripted call that has not reached its proposal yet, if any. */
@@ -39,9 +40,15 @@ function runStages(call: Call, stages: CallStage[], onDone: () => Promise<void>,
   );
 }
 
+const PIZZA_AGENT_ID = pizzaAgent.id;
+const BARBER_AGENT_ID = barberAgent.id;
+/** The scripted callers are the callers of the shared pizza and booking timelines. */
+const PIZZA_CALLER = { name: orderFulfilled.contact.name, messageRecipient: orderFulfilled.contact.messageRecipient! };
+const BOOKING_CALLER = { name: bookingVerified.customer.name, messageRecipient: bookingVerified.customer.messageRecipient! };
+
 function pizzaAgentVersion(): string {
   const agent = db.getAgentRecord(PIZZA, PIZZA_AGENT_ID);
-  return agent.activeVersionId ?? "agv_pizza_01_v2";
+  return agent.activeVersionId ?? pizzaVersionV2.id;
 }
 
 export function startPizzaCall(): Promise<{ callId: string; orderId: string; approvalId: string }> {
@@ -51,13 +58,13 @@ export function startPizzaCall(): Promise<{ callId: string; orderId: string; app
       agentId: PIZZA_AGENT_ID,
       agentVersionId: pizzaAgentVersion(),
       channel: "phone",
-      callerLast4: "0123",
+      callerLast4: PIZZA_CALLER.messageRecipient.slice(-4),
     });
     runStages(
       call,
       ["COLLECTING", "VALIDATING", "CUSTOMER_CONFIRMED"],
       async () => {
-        const { order, approval } = await db.proposeOrderOnCall(call, { name: "Sam", messageRecipient: "+15555550123" });
+        const { order, approval } = await db.proposeOrderOnCall(call, PIZZA_CALLER);
         // P-07: the caller may hang up while the shop reviews the order.
         schedule(() => db.endCall(call, "completed"), timing.callTurnMs);
         resolve({ callId: call.id, orderId: order.id, approvalId: approval.id });
@@ -72,15 +79,15 @@ export function startBookingCall(options: { slotConflict?: boolean } = {}): Prom
     const call = db.startCall({
       businessId: BARBER,
       agentId: BARBER_AGENT_ID,
-      agentVersionId: db.getAgentRecord(BARBER, BARBER_AGENT_ID).activeVersionId ?? BARBER_AGENT_V1,
+      agentVersionId: db.getAgentRecord(BARBER, BARBER_AGENT_ID).activeVersionId ?? barberVersionV1.id,
       channel: "phone",
-      callerLast4: "0124",
+      callerLast4: BOOKING_CALLER.messageRecipient.slice(-4),
     });
     runStages(
       call,
       ["SLOT_SEARCH", "PROPOSAL", "CUSTOMER_CONFIRMED"],
       async () => {
-        const { booking, approval } = await db.proposeBookingOnCall(call, { name: "Ana", messageRecipient: "+15555550124" }, options);
+        const { booking, approval } = await db.proposeBookingOnCall(call, BOOKING_CALLER, options);
         schedule(() => db.endCall(call, "completed"), timing.callTurnMs);
         resolve({ callId: call.id, bookingId: booking.id, approvalId: approval.id });
       },
@@ -154,6 +161,11 @@ export async function reset(): Promise<void> {
   publishMockReset();
 }
 
+/** Google Sheets reports disconnected (the shared integrationHealthDisconnected). */
+export function simulateSheetsDisconnected(): void {
+  db.disconnectSheets();
+}
+
 export const mockControls: MockControls = {
   startPizzaCall,
   startBookingCall,
@@ -167,6 +179,14 @@ export const mockControls: MockControls = {
   simulateExtractionFailed,
   simulateCatalogSyncFailed,
   simulateQrOnlyChannel,
+  simulateSheetsDisconnected,
+  simulateEmptyBusiness: (businessId) => {
+    db.emptyBusiness(businessId);
+    // Screens drop what they hold and refetch, the same as after reset().
+    publishMockReset();
+  },
+  simulateRequestFailure: (rule) => db.addRequestFailure(rule),
+  clearRequestFailures: () => db.clearRequestFailures(),
 };
 
 /** Returns mockControls in mock mode once the worker started, otherwise null. Same hook as "@/lib/api". */

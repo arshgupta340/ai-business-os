@@ -117,11 +117,12 @@ export function networkError(cause: unknown): ApiError {
 export function invalidResponseError(path: string, status: number, correlationId: string | null, issues: unknown): ApiError {
   return new ApiError({
     code: "INTERNAL",
-    message: `The server response for ${path} did not match the contract.`,
+    // Owner-facing. The path and the schema issues stay in details for support.
+    message: "The server sent an answer this screen cannot read, so nothing is shown. Reload the page. If it keeps happening, tell the person who runs the server.",
     status,
     correlationId: correlationId ?? undefined,
     retryable: false,
-    details: { issues },
+    details: { issues, path },
     kind: "invalid_response",
   });
 }

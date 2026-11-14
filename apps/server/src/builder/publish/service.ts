@@ -4,8 +4,8 @@ import { assertContractEvent } from '../events';
 import { assertNoOpenRequiredConflict, type ConflictStore } from '../extraction/index';
 import { getCapability, toolsForCapabilities, TOOL_CAPABILITY, validateCapabilitySet } from '../registry';
 import { BuilderAgentSpecSchema } from '../spec';
-import type { BusinessKnowledge } from '../session/knowledge';
-import { publishStopConditions } from '../session/requirements';
+import type { BusinessContext, BusinessKnowledge } from '../session/knowledge';
+import { missingFactMessage, publishStopConditions } from '../session/requirements';
 import type { AgentDraftStore, AgentRecord } from '../session/stores';
 import { isoZ } from '../time';
 import { apiError, canonicalJson, newId } from '../util';
@@ -107,7 +107,8 @@ export class PublishService {
       const active = await this.activeVersion(agent);
       if (!active) throw apiError('INTERNAL', 'The agent has no active version.');
       // SPEC 2.9 (proposed): rollback moves only the active version. A paused
-      // agent stays paused, so it cannot take the number here either.
+      // agent stays paused, so it cannot take the number here, and the number
+      // does not follow it either (goLive with keepState).
       if (agent.state === 'paused' && input.makeLive) {
         throw apiError('INVALID_STATE', 'A paused agent cannot take the number. Publish it first.', { state: agent.state });
       }
@@ -115,6 +116,9 @@ export class PublishService {
         throw apiError('INVALID_STATE', 'That version is already the active one.', { state: agent.state, activeVersionId: active.id });
       }
       await assertNoOpenRequiredConflict(this.deps.conflicts, agent.businessId);
+      // The same database knowledge check as publish, so a conflict that
+      // exists only in the database blocks a rollback too.
+      await this.assertNoKnowledgeConflict(agent.businessId);
       // The registry may have changed since the target was published.
       this.validateSpec(target.spec);
 
@@ -162,21 +166,35 @@ export class PublishService {
   // Not checked, because the builder has no data for them: which products must
   // have a price, and ambiguous product mappings (FLOWS stop conditions 1, 2).
   private async assertStopConditions(agent: AgentRecord, spec: AgentSpec): Promise<void> {
-    const context = await this.deps.knowledge.getContext(agent.businessId);
-    if (!context) throw apiError('NOT_FOUND', 'Business not found.');
-    if (context.openRequiredConflictIds.length > 0) {
-      throw apiError('CONFLICT_UNRESOLVED', 'Resolve the open conflicts before publishing.', { conflictIds: [...context.openRequiredConflictIds] });
-    }
+    const context = await this.assertNoKnowledgeConflict(agent.businessId);
     const stops = publishStopConditions(spec, context);
     if (stops.length > 0) {
+      // A missing required fact names its field in `path`. The other codes
+      // keep `path` equal to the code.
       throw apiError('VALIDATION_FAILED', 'The agent cannot be published until these are fixed.', {
-        issues: stops.map((c) => ({ path: c.code, code: c.code, message: STOP_MESSAGES[c.code] })),
+        issues: stops.map((c) =>
+          c.code === 'missing_required_fact' && c.path
+            ? { path: c.path, code: c.code, message: missingFactMessage(c.path) }
+            : { path: c.code, code: c.code, message: STOP_MESSAGES[c.code] },
+        ),
       });
     }
     const down = await unavailableIntegrations(this.deps.integrations, spec);
     if (down.length > 0) {
       throw apiError('INTEGRATION_UNAVAILABLE', 'A provider this agent needs is not reachable right now. Try again.', { provider: down[0], providers: down });
     }
+  }
+
+  // An open required conflict that the business knowledge (the database)
+  // reports is CONFLICT_UNRESOLVED. Publish and rollback both run it, after
+  // the extraction store check. Returns the context it read.
+  private async assertNoKnowledgeConflict(businessId: string): Promise<BusinessContext> {
+    const context = await this.deps.knowledge.getContext(businessId);
+    if (!context) throw apiError('NOT_FOUND', 'Business not found.');
+    if (context.openRequiredConflictIds.length > 0) {
+      throw apiError('CONFLICT_UNRESOLVED', 'Resolve the open conflicts before publishing.', { conflictIds: [...context.openRequiredConflictIds] });
+    }
+    return context;
   }
 
   private async getAgent(businessId: string, agentId: string): Promise<AgentRecord> {
@@ -245,13 +263,19 @@ export class PublishService {
 
   // Sets the agent live on this version, moves or follows the phone number,
   // and writes the events. Called under the agent's lock.
-  // With keepState (a rollback of a paused agent), only the active version moves.
+  // With keepState (a rollback of a paused agent), only the active version
+  // moves: the agent stays paused, the live agent pointer is not touched and
+  // no live_agent.changed is written, even when this agent holds the number
+  // (API.md 3.4: the number follows only if the agent is live). The pointer
+  // then still names the version that was active before the rollback. The
+  // next publish moves it to the version active then, because this agent
+  // still holds the number.
   private async goLive(agent: AgentRecord, version: AgentVersionRecord, opts: { moveNumber: boolean; rolledBackFrom?: string; keepState?: boolean }): Promise<PublishResponse> {
     const at = this.timestamp();
     const updated: AgentRecord = { ...agent, state: opts.keepState ? agent.state : 'live', activeVersionId: version.id, updatedAt: at };
     await this.deps.agents.update(updated);
 
-    const answers = await this.deps.lock.run(LIVE_AGENT_LOCK, async () => {
+    const answers = opts.keepState ? false : await this.deps.lock.run(LIVE_AGENT_LOCK, async () => {
       const current = await this.deps.liveAgents.get();
       const isThisAgent = current?.agentId === agent.id && current.businessId === agent.businessId;
       // makeLive moves the number to this agent. If this agent already answers
@@ -308,6 +332,8 @@ export class PublishService {
   }
 }
 
+// Messages for the codes whose path is the code. missing_required_fact uses
+// missingFactMessage, which names the field.
 const STOP_MESSAGES: Record<string, string> = {
   missing_timezone: 'The business has no time zone.',
   missing_message_consent_policy: 'The message consent policy is missing.',

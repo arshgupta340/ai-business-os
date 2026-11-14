@@ -260,6 +260,31 @@ export function sourceTypeLabel(sourceType: BusinessFact['sourceType']): string 
   }
 }
 
+/**
+ * The Square variation a menu price conflict is about. A candidate may name it
+ * (`value.variationId`, as the shared fixtures do), or the conflict key is the
+ * variation ID itself.
+ */
+export function conflictVariationId(conflict: Pick<FactConflict, 'key' | 'candidates'>): string {
+  for (const c of conflict.candidates) {
+    const v = c.value;
+    if (isRecord(v) && typeof v.variationId === 'string') return v.variationId;
+  }
+  return conflict.key;
+}
+
+/**
+ * Item and variation names of a draft menu_item value. Both spellings occur:
+ * `{item, variation}` and `{itemName, variationName}` (the shared fixtures).
+ */
+export function menuItemNames(value: unknown): {item?: string; variation?: string} {
+  if (!isRecord(value)) return {};
+  const item = typeof value.item === 'string' ? value.item : typeof value.itemName === 'string' ? value.itemName : undefined;
+  const variation =
+    typeof value.variation === 'string' ? value.variation : typeof value.variationName === 'string' ? value.variationName : undefined;
+  return {item, variation};
+}
+
 /** Finds the catalog item and variation for a Square variation ID. */
 export function findVariation(
   items: readonly CatalogItem[] | undefined,
@@ -311,9 +336,8 @@ export function factKeyLabel(kind: FactKind, key: string, value?: unknown): stri
   if (kind === 'hours' && (WEEKDAYS as readonly string[]).includes(key)) return WEEKDAY_NAMES[key as Weekday];
   if (kind === 'service' && isRecord(value) && typeof value.name === 'string') return value.name;
   if (kind === 'faq' && isRecord(value) && typeof value.question === 'string') return value.question;
-  if (kind === 'menu_item' && isRecord(value) && typeof value.item === 'string') {
-    return typeof value.variation === 'string' ? `${value.item}, ${value.variation}` : value.item;
-  }
+  const menu = kind === 'menu_item' ? menuItemNames(value) : {};
+  if (menu.item) return menu.variation ? `${menu.item}, ${menu.variation}` : menu.item;
   if (kind === 'menu_item') return key;
   return humanizeKey(key);
 }
@@ -338,9 +362,10 @@ export function describeValue(kind: FactKind, value: unknown): ValueText {
     if (parts.length) return {text: parts.join(', '), hasMoney};
   }
   if (kind === 'menu_item') {
+    const {item, variation} = menuItemNames(value);
     const parts: string[] = [];
-    if (typeof value.item === 'string') parts.push(value.item);
-    if (typeof value.variation === 'string') parts.push(value.variation);
+    if (item) parts.push(item);
+    if (variation) parts.push(variation);
     if (price) parts.push(price);
     if (parts.length) return {text: parts.join(', '), hasMoney};
   }
