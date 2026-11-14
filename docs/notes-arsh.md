@@ -9,11 +9,29 @@ Each spike is a standalone project with its own README. The README has the steps
 | Task | Folder | State on 2026-11-13 |
 |---|---|---|
 | B-02 Square | `scripts/spikes/square` | Prepared. Typechecks, 12 tests pass. Not run against Square. |
-| B-03 Phone voice | `scripts/spikes/voice` | Prepared. Typechecks, 19 tests pass. Not run on a real call. |
+| B-03 Phone voice | `scripts/spikes/voice` | OpenAI leg proven on 2026-11-13 with `npm run probe`: 11 of 11 checks pass on `gpt-realtime-2.1`. The Twilio leg and a real call are still to run. |
 | B-04 Message channel | `scripts/spikes/message` | Prepared. Typechecks, 70 tests pass. Nothing sent. |
 | B-05 Google | `scripts/spikes/google` | Prepared. Typechecks, 29 tests pass. Not run against Google. |
 
 Go or no-go for each is still open. Record the result here when the spike has been run.
+
+## Results
+
+### B-03, OpenAI leg (2026-11-13, `npm run probe` in `scripts/spikes/voice`)
+
+Run against `gpt-realtime-2.1` with the same session setup the phone relay uses, with no Twilio.
+
+| Check | Result |
+|---|---|
+| Session shape accepted: G.711 u-law both ways, voice `alloy`, `server_vad`, one tool | Pass |
+| Model speaks first with no caller input | Pass, first audio after 698 ms |
+| Audio deltas carry `item_id` | Pass |
+| A question triggers the tool (`function_call` in `response.done`) | Pass, 1,121 ms |
+| The tool result comes back as speech | Pass, first audio after 812 ms |
+
+Still unverified, needs Twilio and a phone: the Media Stream leg, barge-in by voice and its truncate offset, the Twilio signature through a tunnel, trial account behavior, end-to-end time to first audio on a call.
+
+Builder model: one strict structured-output call on `gpt-6-astra` through the Responses API returned valid JSON. `OPENAI_BUILDER_MODEL` is set to it.
 
 ## Found while preparing the spikes
 

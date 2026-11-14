@@ -4,6 +4,16 @@ A real phone call to the Twilio number is answered by the OpenAI Realtime speech
 
 This folder is its own npm project. It is not part of the root workspaces. Nothing here writes audio or transcripts to disk.
 
+## Check the OpenAI side first, with no phone
+
+With only `OPENAI_API_KEY` and `OPENAI_REALTIME_MODEL` set, run:
+
+```bash
+npm run probe
+```
+
+It opens the same Realtime session the relay uses and prints pass or fail for: the session setup, the model speaking first, the item ID on audio, the tool call, and the spoken answer. Run it before the phone test. If it fails, the phone test will fail for the same reason.
+
 ## Approach
 
 Raw WebSockets with the `ws` package, following Twilio's official sample `twilio-samples/speech-assistant-openai-realtime-api-node`. I did not use the Agents SDK `TwilioRealtimeTransportLayer`. I could not confirm from its docs that it supports `gpt-realtime-2.1`, and the raw relay gives direct control over the stream token check, the mark queue and the timing logs, which are the things this spike has to measure. The real server in `apps/server/src/voice/` can switch later if that looks simpler.
