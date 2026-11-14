@@ -127,11 +127,18 @@ export function createDbRecoveryPorts(deps: Pick<SeamDeps, 'db' | 'now' | 'newId
       }
     },
     async reconcilePayment(order) {
-      if (!deps.reconcile || !providers.square) throw { code: 'INTEGRATION_UNAVAILABLE' };
-      await deps.reconcile();
-      const row = await one(db, 'select * from public.orders where id = $1 and business_id = $2', [order.id, order.businessId]);
-      if (!row) throw { code: 'NOT_FOUND' };
-      return orderFromDbRow(row);
+      // Review finding 3. A linked order is checked with its own bounded Square read. A read that fails or
+      // times out is unknown, and unknown refuses the cancel. A successful read still cannot prove the
+      // link stays unpaid after a cancel (no link deactivation flow exists, and adding that provider
+      // write needs its own approval), so a linked order is never cancelled here: a payment found is
+      // reconciled first (it may verify), and the cancel is refused either way.
+      if (!deps.reconcile || !providers.square || !order.squareOrderId) throw { code: 'INTEGRATION_UNAVAILABLE' };
+      const square = providers.square;
+      const squareOrderId = order.squareOrderId;
+      const payments = await bounded(deps.lookupTimeoutMs ?? RECOVERY_LOOKUP_TIMEOUT_MS, () => square.findPaymentForOrder(squareOrderId)).catch(() => undefined);
+      if (!payments) throw { code: 'INTEGRATION_UNAVAILABLE' };
+      if (payments.length > 0) await deps.reconcile();
+      throw { code: 'INVALID_STATE' };
     },
     clock: { now: deps.now },
     ids: { next: (prefix) => deps.newId(prefix) },

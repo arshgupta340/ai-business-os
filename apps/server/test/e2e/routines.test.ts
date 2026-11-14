@@ -327,3 +327,32 @@ describe('review finding 2: a created checkout survives a failed local completio
     expect(w.squareWrites).toHaveLength(1);
   });
 });
+
+describe('review finding 3: a failed payment check never cancels a linked order', () => {
+  let w: World;
+  beforeAll(async () => { w = await createWorld(); }, 120_000);
+  afterAll(async () => { await w?.close(); });
+
+  it('a paid order whose Square read fails stays as it is; a linked order is not cancelled even when the read succeeds', async () => {
+    const { orderId, approvalId } = await pizzaOrder(w);
+    await approve(w, PIZZA, approvalId);
+    await w.settle();
+    const linked = await order(w, orderId);
+    expect(linked.status).toBe('PAYMENT_PENDING');
+    const total = ((await w.t.db.query('select total_minor from orders where id = $1', [orderId])).rows[0] as { total_minor: number }).total_minor;
+    w.square.addPayment({ id: 'PAY_F3', orderId: linked.square_order_id!, amountMinor: total, status: 'COMPLETED' });
+    const square = w.app.composed.providers.square!;
+    const real = square.findPaymentForOrder;
+    square.findPaymentForOrder = async () => { throw new Error('timeout'); };
+    const cancel = () => w.app.inject({ method: 'POST', url: `/api/orders/${orderId}/cancel?businessId=${PIZZA}`, headers: OWNER, payload: {} });
+    try {
+      const refused = await cancel();
+      expect(refused.json()).toMatchObject({ code: 'INTEGRATION_UNAVAILABLE' });
+      expect((await order(w, orderId)).status).toBe('PAYMENT_PENDING');
+    } finally { square.findPaymentForOrder = real; }
+    // With a working read, the payment found is reconciled and the cancel is still refused.
+    const again = await cancel();
+    expect(again.json()).toMatchObject({ code: 'INVALID_STATE' });
+    expect((await order(w, orderId)).status).toBe('FULFILLMENT_READY');
+  });
+});
