@@ -210,3 +210,34 @@ The builder now imports every schema and type from `@abos/contracts` and uses th
 
 - The shared mock toolset registry has no way to delete a session, only to reset it. Each test session and each preview scenario leaves one small instance in memory until the server restarts.
 
+## Web after the day's merges (2026-11-14)
+
+What reached `main` today on the web side and in the builder, and what is still not verified. `docs/notes-web-real-mode.md` has the endpoint table and the status of each real-mode mismatch. `docs/DEMO-LAPTOP.md` has the steps to run the web app against a server.
+
+### What changed
+
+- #101: the voice retry countdown reads the time left from the voice session's own clock (`retryInMs()` in `apps/web/app/(dashboard)/build/voice/voiceSession.ts`). It also added `docs/DEMO-LAPTOP.md` and `docs/notes-web-real-mode.md`.
+- #102: the web mock seeds from the shared demo world. `apps/web/mocks/seed.ts` calls `materializeFixtures(now)` from `@abos/contracts/fixtures`. The copies under `apps/web/mocks/fixtures` are deleted.
+- #107 (U-10): every UI state can be reached in mock mode. New shared pieces: `ProviderHealthNotice` (`apps/web/components`), `actorName` (`apps/web/lib/format.ts`), and the mock controls `simulateEmptyBusiness`, `simulateRequestFailure`, `clearRequestFailures` and `simulateSheetsDisconnected`. The controls are also on `window.__abosMock` in mock mode.
+- #109: real-mode handling. The business selector never shows a business the server did not return (`apps/web/lib/session/business-list.ts`, `BusinessListGate.tsx`, `ApiBusinessProvider.tsx`). Publish and rollback errors are plain sentences. A failed background refresh keeps the last data and shows `RefreshFailedNotice`. Conflict resolution falls back to the facts list when the server asks for it. A missing price route reads as "The price editor is not available on this server".
+- #106: the builder review fixes from #96 (commit `851200a`). It was merged into the integration branch and reached `main` inside #97. Publish refuses when a required fact is not verified (`missing_required_fact`), a chat turn opens one approval, the turn and publish share one stop condition list, and a rollback of a paused agent does not move the phone number.
+- #97: the integration branch. `main` now registers all 42 contract endpoints, including the price route and the order cancel and execution resolve routes.
+- #110: the server resolves "keep the current value" on a database conflict itself. The web fallback from #109 for that case should no longer be reached against `main`. This comes from reading `apps/server/src/app.ts`, not from a run.
+
+### Earlier notes on this page that no longer hold
+
+The sections above stay as they were written. These statements in them were true on their date and are not true on `main` now:
+
+- "U-01, Assumptions, Connection health": the top bar now reads `GET /api/integrations/health` (`apps/web/components/shell/ConnectionHealth.tsx`).
+- "U-02": `pending-contracts.ts` and `api-shapes.ts` are gone. The web app imports from `@abos/contracts` (#91).
+- "B-16": `proposedChange` is now set when a turn creates a `fact_edit` approval through `proposeFactFromChat` (`apps/server/src/builder/session/service.ts`). With a database, the composed server passes database stores and a real `BuilderAuth` to the builder (`apps/server/src/compose/index.ts`).
+- "B-17 and B-27, Not verified": with a database, publish uses the database version store and the Square catalog sync, and the database live-agent store when `TWILIO_PHONE_NUMBER` is set (`apps/server/src/compose/index.ts`, `builder-publish.ts`). Uploaded files and their conflicts are still held in memory by the builder (comment in `apps/server/src/compose/index.ts`).
+
+### Not verified
+
+- **The web app against the real server with a real sign-in.** No Supabase sign-in was done from the web app, and no call was made from it to the deployed server. Every real-mode statement in these notes comes from reading the code and from tests that use the mock or hand-built error objects. Which commit the deployed server runs was not checked.
+- **Voice with a real microphone (U-12, issue #50, still open).** The voice code is tested against fakes only. Nobody has spoken to the builder in a browser and heard it answer. The items under "B-24, Not verified" still stand.
+- **The outside owner test (U-11, issue #49, still open).** No small-business owner outside the team has tried the builder yet.
+- Supabase Realtime delivery to `useActivityFeed` on a real project.
+- The price editor, conflict resolution, publish and rollback from the web app against a real server. Their error texts were written from the server code and the contract.
+- The Playwright tests run in mock mode only. They do not cover real mode.
