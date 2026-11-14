@@ -1,0 +1,95 @@
+# Render Blueprint for the AI Business OS server.
+#
+# Render looks for render.yaml at the repo root by default. When you create the
+# Blueprint, set "Blueprint Path" to apps/server/deploy/render.yaml, or create
+# the web service by hand from the dashboard (docs/DEPLOY.md, Part 2).
+# Keys checked against render.com/docs/blueprint-spec on 2026-11-13.
+#
+# plan: NOT free. A free web service spins down after 15 minutes without
+# traffic and takes about a minute to wake, which drops phone calls and misses
+# Square and Twilio webhooks. Any paid plan stays up. 0.5c-512mb is the smallest
+# paid plan ID in the Blueprint spec.
+#
+# envVars with sync: false are prompted once, when the Blueprint is first
+# created. Later Blueprint syncs ignore them, so add new ones in the dashboard.
+#
+# DATABASE_ADMIN_URL is deliberately absent. The owner connection is for
+# migrations and the reset script only and must never be set on the host (D-10).
+
+services:
+  - type: web
+    name: abos-server
+    runtime: docker
+    plan: 0.5c-512mb
+    region: oregon
+    # Build context is the repo root, because the server imports packages/.
+    dockerContext: .
+    dockerfilePath: ./apps/server/deploy/Dockerfile
+    dockerCommand: npm run start -w @abos/server
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: PORT
+        value: "4000"
+      - key: SQUARE_ENVIRONMENT
+        value: sandbox
+
+      # Database (restricted abos_app login through the Supabase session pooler)
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+
+      # OpenAI
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_BUILDER_MODEL
+        sync: false
+      - key: OPENAI_REALTIME_MODEL
+        sync: false
+
+      # Square sandbox
+      - key: SQUARE_ACCESS_TOKEN
+        sync: false
+      - key: SQUARE_LOCATION_ID
+        sync: false
+      - key: SQUARE_WEBHOOK_SIGNATURE_KEY
+        sync: false
+      - key: SQUARE_WEBHOOK_URL
+        sync: false
+
+      # Twilio voice
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_PHONE_NUMBER
+        sync: false
+
+      # Message channel: set MESSAGE_CHANNEL and only that channel's keys
+      - key: MESSAGE_CHANNEL
+        sync: false
+      - key: SURGE_API_KEY
+        sync: false
+      - key: ANDROID_GATEWAY_URL
+        sync: false
+      - key: ANDROID_GATEWAY_API_KEY
+        sync: false
+      - key: TWILIO_WHATSAPP_FROM
+        sync: false
+
+      # Google
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: GOOGLE_CALENDAR_ID
+        sync: false
+      - key: GOOGLE_SHEET_ID
+        sync: false
+
+      # This service's own https address, for example https://abos-server.onrender.com
+      - key: PUBLIC_SERVER_URL
+        sync: false
