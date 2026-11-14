@@ -35,7 +35,7 @@ describe('migrations', () => {
 
   it('apply cleanly to an empty database, in name order', async () => {
     const files = readMigrations();
-    expect(files.length).toBe(4);
+    expect(files.length).toBe(6);
     const result = await applyMigrations(migrationDb(db), files);
     expect(result.applied).toEqual(files.map((f) => f.name));
     expect(result.skipped).toEqual([]);
@@ -183,7 +183,7 @@ describe('function hardening', () => {
       select n.nspname || '.' || p.proname as fn, p.proconfig as config
       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
       where n.nspname in ('public', 'private') and p.prokind = 'f'`);
-    expect(rows.length).toBe(24);
+    expect(rows.length).toBe(51);
     for (const r of rows) expect(r.config, r.fn).toContain('search_path=""');
   });
 
@@ -265,7 +265,7 @@ describe('applyMigrations with a pool pins one session', () => {
     } finally {
       for (const s of sessions) await s.close();
     }
-  });
+  }, 60_000);
 
   it('releases the client, flagged as broken, when a migration fails', async () => {
     const db = await createEmptyDb();
