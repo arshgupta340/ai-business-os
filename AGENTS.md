@@ -34,7 +34,8 @@ If a task seems to require breaking one of these, stop and tell your lead.
 | `apps/web/` | Saina |
 | `apps/server/src/builder/` | Saina |
 | `apps/server/src/` everything else | Arsh |
-| `packages/contracts/`, `packages/db/`, `scripts/`, root config and lockfile | Arsh |
+| `packages/contracts/`, `packages/db/`, `scripts/`, root config | Arsh |
+| `package-lock.json` | Shared. It changes when anyone adds a dependency with `npm install <package> -w <workspace>`. Never merge it by hand: rebase, run `npm install`, commit the result. |
 | `docs/` | either lead, by pull request |
 
 Stay inside the directories your task lists. If you need a change somewhere else, open an issue labelled `needs:arsh` or `needs:saina` and carry on with what you can.

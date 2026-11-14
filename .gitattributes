@@ -1,0 +1,5 @@
+# One line-ending style for everyone, whatever the operating system.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.pdf binary

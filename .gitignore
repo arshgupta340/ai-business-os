@@ -28,3 +28,6 @@ Thumbs.db
 
 # per-person Claude settings
 .claude/settings.local.json
+
+# local git worktrees for parallel workers
+.worktrees/

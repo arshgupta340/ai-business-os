@@ -230,7 +230,7 @@ The short version for agents is in `AGENTS.md`. The reasons are here.
 
 **Shared packages**
 - `packages/contracts` is edited by Arsh's side only. Saina's side asks through a `needs:arsh` issue or a `contract` pull request that Arsh approves.
-- The root `package.json` and lockfile are edited by Arsh's side. Saina's side adds dependencies inside `apps/web` and `apps/server/src/builder` workspaces only. Pull and reinstall after every merge that touches the lockfile.
+- The root `package.json` is edited by Arsh's side. Either side adds dependencies to its own workspace with `npm install <package> -w <workspace>`. That changes the one root lockfile, which is expected. Never merge the lockfile by hand: after a rebase, run `npm install` again and commit the regenerated file.
 
 **Notes**
 - Each lead keeps running notes in their own file: `docs/notes-arsh.md` and `docs/notes-saina.md`. Spike results, blockers and unverified assumptions go there. Never both in one file.
