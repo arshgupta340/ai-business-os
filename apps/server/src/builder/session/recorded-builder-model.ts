@@ -8,6 +8,10 @@ import type { BuilderModel, BuilderTurnInput, BuilderTurnOutput } from './model'
 // exists yet. Once a key exists, rerun the scripts against the real model and
 // replace these with captured outputs.
 //
+// The replies name only what every version of the seeded data has. When a
+// field is still missing, the builder adds its question to the reply
+// (session/service.ts composeReply).
+//
 // A turn is found by the owner's text, normalized (case, spacing and trailing
 // punctuation do not matter). An unknown text gets a fixed reply that says the
 // builder is in recorded mode and changes nothing.
@@ -69,7 +73,7 @@ const RECORDINGS: Record<string, BuilderTurnOutput> = {
   [RECORDED_SCRIPTS.pizza[0]]: {
     ...empty,
     reply:
-      'I can build that: a phone agent that answers menu questions, reads back an exact total, and sends each order to you for approval before any payment link goes out. I found your Square menu, your hours and your 20 minute pickup window. One thing is left. How should the agent ask the caller for consent before it texts them the payment link?',
+      'I can build that: a phone agent that answers menu questions, reads back an exact total, and sends each order to you for approval before any payment link goes out. I found your Square menu, your hours and your 20 minute pickup window.',
     template: 'restaurant_order_taker',
     capabilityIds: PIZZA_CAPS,
     confidence: 0.94,
@@ -94,7 +98,7 @@ const RECORDINGS: Record<string, BuilderTurnOutput> = {
   [RECORDED_SCRIPTS.barbershop[0]]: {
     ...empty,
     reply:
-      'I can build that: a phone agent that checks your calendar, offers open slots, and sends each booking to you for approval before it goes on the calendar. I found your hours and three services. Two things are left. How much notice do you need before an appointment, and how should the agent ask for consent before it texts a confirmation?',
+      'I can build that: a phone agent that checks your calendar, offers open slots, and sends each booking to you for approval before it goes on the calendar. I found your hours and three services.',
     template: 'appointment_booker',
     capabilityIds: BARBER_CAPS,
     confidence: 0.93,
@@ -110,7 +114,7 @@ const RECORDINGS: Record<string, BuilderTurnOutput> = {
     capabilityIds: BARBER_CAPS,
     confidence: 0.94,
     answers: [
-      { field: 'policy.minimum_notice', value: 'At least 2 hours before the appointment.' },
+      { field: 'policy.min_notice', value: 'At least 2 hours before the appointment.' },
       { field: 'policy.message_consent', value: 'Ask the customer if we can text them a confirmation. Text only after a clear yes.' },
     ],
   },

@@ -15,7 +15,7 @@
  */
 import type {
   ActivityEvent,
-  ActivityPayloads,
+  ActivityEventPayloads,
   ApprovalState,
   Booking,
   Call,
@@ -27,13 +27,13 @@ import {statusView, type StatusView, type Tone} from '@/lib/status';
 
 // ------------------------------------------------------------- grouping
 
-type EventOf<T extends keyof ActivityPayloads> = ActivityEvent & {type: T};
+type EventOf<T extends keyof ActivityEventPayloads> = ActivityEvent & {type: T};
 
-function payload<T extends keyof ActivityPayloads>(event: ActivityEvent, type: T): ActivityPayloads[T] | null {
-  return event.type === type ? (event.payload as unknown as ActivityPayloads[T]) : null;
+function payload<T extends keyof ActivityEventPayloads>(event: ActivityEvent, type: T): ActivityEventPayloads[T] | null {
+  return event.type === type ? (event.payload as unknown as ActivityEventPayloads[T]) : null;
 }
 
-function is<T extends keyof ActivityPayloads>(type: T) {
+function is<T extends keyof ActivityEventPayloads>(type: T) {
   return (event: ActivityEvent): event is EventOf<T> => event.type === type;
 }
 

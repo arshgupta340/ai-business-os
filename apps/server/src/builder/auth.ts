@@ -1,5 +1,6 @@
+import { BARBER_BUSINESS_ID, BusinessScopeQuerySchema, PIZZA_BUSINESS_ID } from '@abos/contracts';
+import { OWNER_USER_ID } from '@abos/contracts/fixtures';
 import type { FastifyRequest } from 'fastify';
-import { z } from 'zod';
 import { apiError, parseOrThrow } from './util';
 
 // The one auth and business-scope seam for every builder route (API.md section 1).
@@ -20,7 +21,12 @@ import { apiError, parseOrThrow } from './util';
 // owner (P-14), who owns the two seeded businesses. That is not security. The
 // plugin logs a warning naming the variable while it is in use, and refuses
 // the opt-in (logs an error, stays not configured) when NODE_ENV is
-// "production". The real fix is a `BuilderAuth` passed to the plugin once B-08
+// "production".
+//
+// The server listens on all interfaces, so the stand-in also refuses every
+// request that does not come from the loopback address (127.0.0.1, ::1 or
+// ::ffff:127.0.0.1). It reads the socket's own remote address. It never reads
+// X-Forwarded-For or any other header, because a client can set those. The real fix is a `BuilderAuth` passed to the plugin once B-08
 // provides JWT verification and owner lookup.
 
 export interface Owner {
@@ -34,13 +40,25 @@ export interface BuilderAuth {
   readonly verified: boolean;
 }
 
-export const SEED_OWNER_ID = 'usr_owner_01';
-export const SEED_BUSINESS_IDS = ['biz_pizza_01', 'biz_barber_01'] as const;
+export const SEED_OWNER_ID = OWNER_USER_ID;
+export const SEED_BUSINESS_IDS = [PIZZA_BUSINESS_ID, BARBER_BUSINESS_ID] as const;
+
+const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+
+// True only for a loopback socket address. An absent address is not loopback.
+export function isLoopbackAddress(address: string | undefined): boolean {
+  return address !== undefined && LOOPBACK_ADDRESSES.has(address);
+}
 
 export class UnverifiedSeedOwnerAuth implements BuilderAuth {
   readonly verified = false;
 
   async authenticate(request: FastifyRequest): Promise<Owner | null> {
+    // The TCP peer, not request.ip: request.ip would follow X-Forwarded-For if
+    // trustProxy were ever turned on for the app.
+    if (!isLoopbackAddress(request.raw.socket?.remoteAddress)) {
+      throw apiError('UNAUTHENTICATED', 'Development auth accepts requests from this machine only.');
+    }
     const header = request.headers.authorization;
     if (typeof header !== 'string' || !/^Bearer\s+\S+/.test(header)) return null;
     return { userId: SEED_OWNER_ID };
@@ -69,12 +87,11 @@ export interface BusinessScope {
   businessId: string;
 }
 
-const BusinessQuery = z.object({ businessId: z.string().regex(/^biz_[A-Za-z0-9_]{1,64}$/) });
 
 export async function requireBusiness(auth: BuilderAuth, request: FastifyRequest): Promise<BusinessScope> {
   const owner = await auth.authenticate(request);
   if (!owner) throw apiError('UNAUTHENTICATED', 'Sign in to continue.');
-  const { businessId } = parseOrThrow(BusinessQuery, request.query);
+  const { businessId } = parseOrThrow(BusinessScopeQuerySchema, request.query);
   if (!(await auth.ownsBusiness(owner, businessId))) {
     throw apiError('FORBIDDEN_BUSINESS', 'You do not have access to this business.');
   }

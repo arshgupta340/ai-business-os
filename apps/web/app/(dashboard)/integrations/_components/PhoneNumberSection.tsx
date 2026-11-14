@@ -50,7 +50,7 @@ export function PhoneNumberSection({businessId, timeZone}: {businessId: string; 
             {otherBusiness ? (
               <Text type="supporting">Calls to this number go to {otherBusiness}, not to the business selected above.</Text>
             ) : null}
-            <Text type="supporting">Changed {formatRelative(data.updatedAt, timeZone)}.</Text>
+            {data.updatedAt ? <Text type="supporting">Changed {formatRelative(data.updatedAt, timeZone)}.</Text> : null}
           </VStack>
         ) : (
           <EmptyState

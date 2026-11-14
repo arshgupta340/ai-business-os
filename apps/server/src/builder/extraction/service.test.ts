@@ -1,3 +1,4 @@
+import { ActivityEventSchema } from '@abos/contracts';
 import { describe, expect, it } from 'vitest';
 import { AppError } from '../../errors';
 import { FixtureBusinessKnowledge } from '../session/knowledge';
@@ -14,7 +15,7 @@ import {
   InMemoryUploadFactStore,
 } from './stores';
 import { BARBER_ROWS, BARBER_TEXT, HOURS_CSV, INJECTION_TEXT, jpeg, pdf, PIZZA_MENU_TEXT, png, webp, xlsx } from './test-samples';
-import { XLSX_MIME } from './types';
+import { XLSX_MIME } from './file-check';
 
 const PIZZA = 'biz_pizza_01';
 const BARBER = 'biz_barber_01';
@@ -73,7 +74,7 @@ describe('extraction on recorded responses', () => {
     const draft = facts.find((f) => f.key === 'margherita:large')!;
     expect(conflict!.candidates).toEqual([
       { factId: draft.id, sourceType: 'upload', sourceRef: 'page 1', value: { itemName: 'Margherita', variationName: 'Large', priceMinor: 2100, currency: 'USD' } },
-      { sourceType: 'square', sourceRef: 'cat_sq_var_marg_lg', value: { itemName: 'Margherita', variationName: 'Large', priceMinor: 2000, currency: 'USD' } },
+      { sourceType: 'square', sourceRef: 'cat_marg_lg', value: { itemName: 'Margherita', variationName: 'Large', priceMinor: 2000, currency: 'USD' } },
     ]);
     expect(file.conflictIds).toEqual([conflict!.id]);
 
@@ -91,7 +92,7 @@ describe('extraction on recorded responses', () => {
   it('maps barbershop services to their svc_ keys and finds no conflict when prices agree', async () => {
     const { uploadAndWait } = setup();
     const { facts, conflicts } = await uploadAndWait(BARBER, 'prices.xlsx', XLSX_MIME, await xlsx(BARBER_ROWS));
-    expect(facts.filter((f) => f.kind === 'service').map((f) => f.key).sort()).toEqual(['svc_beard', 'svc_cut', 'svc_cut_beard']);
+    expect(facts.filter((f) => f.kind === 'service').map((f) => f.key).sort()).toEqual(['svc_beard_trim', 'svc_haircut', 'svc_haircut_beard']);
     expect(conflicts).toEqual([]);
   });
 
@@ -101,7 +102,7 @@ describe('extraction on recorded responses', () => {
     expect(facts).toHaveLength(7);
     expect(conflicts).toHaveLength(1);
     expect(conflicts[0]).toMatchObject({ kind: 'hours', key: 'fri', required: false });
-    expect(conflicts[0]!.candidates[1]).toEqual({ factId: 'fact_pz_hours_fri', sourceType: 'seed', value: { open: '11:00', close: '22:00' } });
+    expect(conflicts[0]!.candidates[1]).toEqual({ factId: 'fact_pizza_hours_fri', sourceType: 'seed', sourceRef: 'seed:hours', value: { open: '11:00', close: '22:00' } });
   });
 
   it('runs on images and on spreadsheets', async () => {
@@ -163,7 +164,8 @@ describe('document text is data, never an instruction', () => {
     expect(catalog.find((r) => r.squareVariationId === 'SQ_VAR_MARG_LG')!.priceMinor).toBe(2000);
     // The verified facts are untouched.
     const context = await deps.knowledge.getContext(PIZZA);
-    expect(context!.verifiedFacts.every((f) => f.sourceType === 'seed')).toBe(true);
+    expect(context!.verifiedFacts).toEqual((await new FixtureBusinessKnowledge().getContext(PIZZA))!.verifiedFacts);
+    expect(context!.verifiedFacts.some((f) => f.sourceType === 'upload')).toBe(false);
 
     // No document text in logs or events.
     const dump = JSON.stringify({ logs, events: deps.events.events }).toLowerCase();
@@ -237,6 +239,8 @@ describe('conflict resolve and the publish check', () => {
       actorType: 'owner',
       payload: { factId: draft.id, kind: 'menu_item', key: 'margherita:large', fromVersion: 1, toVersion: 1, sourceType: 'upload' },
     });
+    // Every event that reached the sink matches the package's ActivityEventSchema.
+    for (const event of deps.events.events) expect(ActivityEventSchema.safeParse(event).success).toBe(true);
 
     const again = await service.resolveConflict({ businessId: PIZZA, ownerId: OWNER, conflictId: conflict.id }).catch((e: unknown) => e);
     expect(again).toMatchObject({ code: 'INVALID_STATE', status: 409, details: { state: 'resolved' } });
@@ -248,6 +252,6 @@ describe('conflict resolve and the publish check', () => {
     const { service, uploadAndWait } = setup();
     const { conflicts } = await uploadAndWait(PIZZA, 'hours.csv', 'text/csv', Buffer.from(HOURS_CSV));
     const resolved = await service.resolveConflict({ businessId: PIZZA, ownerId: OWNER, conflictId: conflicts[0]!.id });
-    expect(resolved.resolvedFactId).toBe('fact_pz_hours_fri');
+    expect(resolved.resolvedFactId).toBe('fact_pizza_hours_fri');
   });
 });

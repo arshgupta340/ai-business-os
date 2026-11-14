@@ -1,4 +1,6 @@
-import type { AgentSpec } from '../pending-contracts';
+import type { ActivityEventOf, AgentSpec, AgentVersion, KnowledgeSnapshotRef, LiveAgent } from '@abos/contracts';
+
+export type { KnowledgeSnapshotRef };
 
 // Persistence for publish, pause, versions and rollback (tasks B-17, B-27),
 // behind small interfaces. The in-memory versions below run until the
@@ -9,12 +11,8 @@ import type { AgentSpec } from '../pending-contracts';
 // ---------------------------------------------------------------------------
 // agent_versions (DATA-MODEL.md 2.10)
 
-// API.md 3.4 names the two keys. `catalogSyncedAt` is absent when the catalog
-// sync reported no time.
-export interface KnowledgeSnapshotRef {
-  facts: { id: string; version: number }[];
-  catalogSyncedAt?: string;
-}
+// KnowledgeSnapshotRef is the package's: `catalogSyncedAt` is absent when
+// the catalog sync reported no time.
 
 export interface AgentVersionRecord {
   id: string; // agv_
@@ -29,16 +27,8 @@ export interface AgentVersionRecord {
   publishedAt: string;
 }
 
-// AgentVersion as the API returns it (API.md 3.4).
-export interface AgentVersionView {
-  id: string;
-  agentId: string;
-  version: number;
-  spec: AgentSpec;
-  knowledgeSnapshotRef: KnowledgeSnapshotRef;
-  createdBy: string;
-  publishedAt: string;
-}
+// AgentVersion as the API returns it (API.md 3.4, the package's AgentVersion).
+export type AgentVersionView = AgentVersion;
 
 export function toVersionView(v: AgentVersionRecord): AgentVersionView {
   return {
@@ -108,13 +98,9 @@ export class InMemoryAgentVersionStore implements AgentVersionStore {
 // The table, GET /api/live-agent and PUT /api/live-agent are Arsh's. Publish
 // and rollback only need to read the pointer and move it.
 
-export interface LiveAgentPointer {
-  phoneNumber: string;
-  businessId: string;
-  agentId: string;
-  agentVersionId: string;
-  updatedAt: string;
-}
+// The package's LiveAgent with every field present: the store holds a pointer
+// only while an agent answers the number.
+export type LiveAgentPointer = Required<LiveAgent>;
 
 export interface LiveAgentStore {
   // The number this store holds the pointer for.
@@ -141,21 +127,12 @@ export class InMemoryLiveAgentStore implements LiveAgentStore {
 
 // ---------------------------------------------------------------------------
 // Activity events written by publish, pause and rollback (CONTRACTS.md
-// section 7). The real writer (activity_events) belongs to the backend lead
-// and is passed in. Payloads hold IDs, a version number and the last four
-// digits of the phone number only.
+// section 7, the package's ActivityEvent). The real writer (activity_events)
+// belongs to the backend lead and is passed in. Payloads hold IDs, a version
+// number and the last four digits of the phone number only. The service
+// checks every event against ActivityEventSchema before it reaches the sink.
 
-export type PublishActivityEvent = {
-  id: string; // evt_
-  businessId: string;
-  correlationId: string;
-  actorType: 'owner';
-  occurredAt: string;
-} & (
-  | { type: 'agent.published'; payload: { agentId: string; agentVersionId: string; version: number; phoneNumberLast4?: string; rolledBackFrom?: string } }
-  | { type: 'agent.paused'; payload: { agentId: string } }
-  | { type: 'live_agent.changed'; payload: { phoneNumberLast4: string; agentId: string; agentVersionId: string; previousAgentId?: string } }
-);
+export type PublishActivityEvent = ActivityEventOf<'agent.published' | 'agent.paused' | 'live_agent.changed'>;
 
 export interface PublishEventSink {
   write(event: PublishActivityEvent): Promise<void>;

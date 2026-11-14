@@ -1,3 +1,5 @@
+import { E164Schema, ENDPOINTS, PAGE_LIMIT_DEFAULT } from '@abos/contracts';
+import { DEMO_PHONE_NUMBER } from '@abos/contracts/fixtures';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { AgentService, LiveAgentReader } from '../agents';
@@ -5,6 +7,7 @@ import { requireBusiness, type BuilderAuth } from '../auth';
 import type { ConflictStore } from '../extraction/index';
 import type { BusinessKnowledge } from '../session/knowledge';
 import type { AgentDraftStore } from '../session/stores';
+import { checkedResponse } from '../respond';
 import { parseOrThrow } from '../util';
 import { RecordingCatalogSync, type CatalogSync } from './catalog-sync';
 import { KeyedLock } from './lock';
@@ -37,10 +40,9 @@ export interface PublishOptions {
   syncCatalog?: CatalogSync;
 }
 
-// TEMPORARY. The number from API.md 3.6, used only when TWILIO_PHONE_NUMBER is
-// not set, so the in-memory pointer has a number to hold.
-const PLACEHOLDER_NUMBER = '+15555550199';
-const E164 = /^\+[1-9]\d{6,14}$/;
+// The demo number of the shared fixtures (the API.md 3.6 example), used only
+// when TWILIO_PHONE_NUMBER is not set, so the in-memory pointer has a number.
+const PLACEHOLDER_NUMBER = DEMO_PHONE_NUMBER;
 
 export interface PublishStores {
   versions: AgentVersionStore;
@@ -58,7 +60,7 @@ export interface PublishStores {
 
 export function createPublishStores(options: PublishOptions | undefined, env: Record<string, string | undefined>): PublishStores {
   const configured = env.TWILIO_PHONE_NUMBER?.trim();
-  const liveAgents = options?.liveAgents ?? new InMemoryLiveAgentStore(configured && E164.test(configured) ? configured : PLACEHOLDER_NUMBER);
+  const liveAgents = options?.liveAgents ?? new InMemoryLiveAgentStore(configured && E164Schema.safeParse(configured).success ? configured : PLACEHOLDER_NUMBER);
   const lock = new KeyedLock();
   return {
     versions: options?.versions ?? new InMemoryAgentVersionStore(),
@@ -99,46 +101,55 @@ export interface PublishRouteDeps extends PublishStores {
   now: () => Date;
 }
 
-const AgentIdParams = z.object({ id: z.string().regex(/^agt_[A-Za-z0-9_]{1,64}$/) });
-// confirm must be exactly true (API.md 3.4). Anything else is VALIDATION_FAILED.
-const PublishBody = z.strictObject({ confirm: z.literal(true), makeLive: z.boolean().default(false) });
-const PauseBody = z.strictObject({});
-const RollbackBody = z.strictObject({ toVersionId: z.string().regex(/^agv_[A-Za-z0-9_]{1,64}$/), confirm: z.literal(true) });
-const VersionsQuery = z.object({
-  limit: z.coerce.number().int().min(1).max(200).default(50),
-  cursor: z.string().max(200).optional(),
-});
+// Params, bodies and queries are parsed with the endpoint schemas of the
+// package (ENDPOINTS). `confirm` must be exactly true (API.md 3.4); anything
+// else is VALIDATION_FAILED.
+const NoFields = z.strictObject({});
+const E = {
+  publish: ENDPOINTS.publishAgent,
+  pause: ENDPOINTS.pauseAgent,
+  versions: ENDPOINTS.listAgentVersions,
+  rollback: ENDPOINTS.rollbackAgent,
+};
 
 export function registerPublishRoutes(app: FastifyInstance, deps: PublishRouteDeps) {
   const service = new PublishService(deps);
 
   app.post('/api/agents/:id/publish', async (request) => {
     const scope = await requireBusiness(deps.auth, request);
-    const { id } = parseOrThrow(AgentIdParams, request.params);
-    const body = parseOrThrow(PublishBody, request.body ?? {});
-    return service.publish({ businessId: scope.businessId, ownerId: scope.owner.userId, correlationId: request.correlationId }, id, { makeLive: body.makeLive });
+    const { id } = parseOrThrow(E.publish.params, request.params);
+    const body = parseOrThrow(E.publish.body, request.body ?? {});
+    const result = await service.publish({ businessId: scope.businessId, ownerId: scope.owner.userId, correlationId: request.correlationId }, id, { makeLive: body.makeLive ?? false });
+    return checkedResponse('publishAgent', result);
   });
 
   app.post('/api/agents/:id/pause', async (request) => {
     const scope = await requireBusiness(deps.auth, request);
-    const { id } = parseOrThrow(AgentIdParams, request.params);
-    parseOrThrow(PauseBody, request.body ?? {});
-    return service.pause({ businessId: scope.businessId, ownerId: scope.owner.userId, correlationId: request.correlationId }, id);
+    const { id } = parseOrThrow(E.pause.params, request.params);
+    parseOrThrow(E.pause.body, request.body ?? {});
+    // The contract's empty body would drop unknown fields. The builder refuses
+    // them, as it did before, so a mistyped field is not silently ignored.
+    parseOrThrow(NoFields, request.body ?? {});
+    return checkedResponse('pauseAgent', await service.pause({ businessId: scope.businessId, ownerId: scope.owner.userId, correlationId: request.correlationId }, id));
   });
 
   app.get('/api/agents/:id/versions', async (request) => {
     const scope = await requireBusiness(deps.auth, request);
-    const { id } = parseOrThrow(AgentIdParams, request.params);
-    const { businessId: _b, ...rest } = (request.query ?? {}) as Record<string, unknown>;
-    const query = parseOrThrow(VersionsQuery, rest);
-    return service.listVersions(scope.businessId, id, query);
+    const { id } = parseOrThrow(E.versions.params, request.params);
+    const query = parseOrThrow(E.versions.query, request.query ?? {});
+    const page = await service.listVersions(scope.businessId, id, { limit: query.limit ?? PAGE_LIMIT_DEFAULT, ...(query.cursor !== undefined ? { cursor: query.cursor } : {}) });
+    return checkedResponse('listAgentVersions', page);
   });
 
   app.post('/api/agents/:id/rollback', async (request) => {
     const scope = await requireBusiness(deps.auth, request);
-    const { id } = parseOrThrow(AgentIdParams, request.params);
-    const body = parseOrThrow(RollbackBody, request.body ?? {});
-    return service.rollback({ businessId: scope.businessId, ownerId: scope.owner.userId, correlationId: request.correlationId }, id, { toVersionId: body.toVersionId });
+    const { id } = parseOrThrow(E.rollback.params, request.params);
+    const body = parseOrThrow(E.rollback.body, request.body ?? {});
+    const result = await service.rollback({ businessId: scope.businessId, ownerId: scope.owner.userId, correlationId: request.correlationId }, id, {
+      toVersionId: body.toVersionId,
+      makeLive: body.makeLive ?? false,
+    });
+    return checkedResponse('rollbackAgent', result);
   });
 
   return { service };

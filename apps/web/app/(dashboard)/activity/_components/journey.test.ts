@@ -16,7 +16,7 @@ function ev(type: ActivityEvent['type'], payload: Record<string, unknown>, corre
     actorType: 'system',
     occurredAt: new Date(at ?? T0 + n * 1000).toISOString(),
     payload,
-  };
+  } as ActivityEvent; // test events carry only the payload fields a case needs
 }
 
 const call = (over: Partial<Call> = {}): Call => ({

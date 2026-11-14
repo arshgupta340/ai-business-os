@@ -4,7 +4,10 @@
  *
  * - Real mode: subscribes to Supabase Realtime postgres_changes INSERT on
  *   public.activity_events with filter business_id=eq.<businessId> (API.md
- *   section 1). The row arrives in snake_case and is mapped to ActivityEvent.
+ *   section 1). The row arrives in snake_case and is mapped to ActivityEvent
+ *   with activityEventFromRow from @abos/contracts (see realtime-row.ts).
+ *   Every row refetches what it affects; only a row that matches the
+ *   contract is added to `events`.
  * - Mock mode: receives events from the scripted mock timeline through the
  *   mock bridge. No MSW code is imported here.
  *
@@ -14,10 +17,11 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { ActivityEventSchema, type ActivityEvent } from "./pending-contracts";
+import type { ActivityEvent } from "@abos/contracts";
 import { isMockMode } from "./config";
 import { subscribeMockActivity, subscribeMockReset } from "./mock-bridge";
 import { invalidateForEvent } from "./invalidation";
+import { handleRealtimeRow } from "./realtime-row";
 import { queryKeys } from "./query-keys";
 
 export type ActivityFeedStatus =
@@ -41,21 +45,6 @@ export interface ActivityFeed {
   lastEventAt?: string;
 }
 
-/** Map a raw activity_events row (snake_case) to an ActivityEvent. Returns null if it does not fit the contract. */
-export function activityEventFromRow(row: Record<string, unknown>): ActivityEvent | null {
-  const candidate = {
-    id: row.id,
-    businessId: row.business_id,
-    type: row.type,
-    correlationId: row.correlation_id,
-    actorType: row.actor_type,
-    occurredAt: row.occurred_at,
-    payload: row.payload ?? row.payload_json ?? {},
-  };
-  const parsed = ActivityEventSchema.safeParse(candidate);
-  return parsed.success ? parsed.data : null;
-}
-
 let channelCounter = 0;
 
 export function useActivityFeed(businessId: string | null | undefined, options: { limit?: number } = {}): ActivityFeed {
@@ -74,8 +63,11 @@ export function useActivityFeed(businessId: string | null | undefined, options: 
       return;
     }
 
-    const onEvent = (event: ActivityEvent) => {
+    const addEvent = (event: ActivityEvent) => {
       setEvents((prev) => [event, ...prev.filter((e) => e.id !== event.id)].slice(0, limitRef.current));
+    };
+    const onEvent = (event: ActivityEvent) => {
+      addEvent(event);
       invalidateForEvent(queryClient, businessId, event.type);
     };
 
@@ -122,8 +114,9 @@ export function useActivityFeed(businessId: string | null | undefined, options: 
           "postgres_changes",
           { event: "INSERT", schema: "public", table: "activity_events", filter: `business_id=eq.${businessId}` },
           (change: { new: Record<string, unknown> }) => {
-            const event = activityEventFromRow(change.new);
-            if (event) onEvent(event);
+            // Every row refetches, parsed or not (SPEC P-16). Only parsed rows join the feed.
+            const event = handleRealtimeRow(queryClient, businessId, change.new);
+            if (event) addEvent(event);
           },
         )
         .subscribe((state: string) => {

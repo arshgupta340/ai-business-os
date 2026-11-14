@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CapabilityIdSchema, ToolNameSchema } from '../pending-contracts';
+import { CapabilityIdSchema, ToolNameSchema } from '@abos/contracts';
 import { REALTIME_MODEL } from './env';
 import { builderVoiceClientSecretRequest, CLIENT_SECRET_TTL_SECONDS } from './session-config';
 

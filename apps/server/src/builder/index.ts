@@ -1,16 +1,17 @@
+import { ENDPOINTS, PAGE_LIMIT_DEFAULT, type ToolHandler } from '@abos/contracts';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
-import { AgentService, CreateAgentBodySchema, type LiveAgentReader } from './agents';
+import { AgentService, CreateAgentEnvelopeSchema, type LiveAgentReader } from './agents';
 import { NotConfiguredAuth, requireBusiness, UnverifiedSeedOwnerAuth, type BuilderAuth } from './auth';
 import { builderAuthMode, parseBuilderEnv } from './env';
 import { registerExtractionRoutes, withConflicts, type ExtractionOptions } from './extraction/index';
 import { createPublishStores, registerPublishRoutes, type PublishOptions } from './publish/index';
-import { AgentRunRequestSchema, AgentStatusSchema, type ToolHandler } from './pending-contracts';
+import { checkedResponse } from './respond';
 import type { AgentModel } from './runner/agent-model';
-import { MockToolset } from './runner/mock-toolset';
 import { OpenAiAgentModel } from './runner/openai-agent-model';
 import { RecordedAgentModel } from './runner/recorded-agent-model';
 import { AgentRunService } from './runner/service';
+import { SessionMockToolset } from './runner/session-toolset';
 import { MockTextRunner } from './runner/text-runner';
 import { FixtureBusinessKnowledge, type BusinessKnowledge } from './session/knowledge';
 import type { BuilderModel } from './session/model';
@@ -60,19 +61,13 @@ export interface BuilderPluginOptions {
   publish?: PublishOptions;
 }
 
-const SessionIdParams = z.object({ id: z.string().regex(/^bld_[A-Za-z0-9_]{1,64}$/) });
-const AgentIdParams = z.object({ id: z.string().regex(/^agt_[A-Za-z0-9_]{1,64}$/) });
-const CreateSessionBody = z.strictObject({ agentId: z.string().min(1).optional() });
-const MessageBody = z.strictObject({
-  text: z.string().trim().min(1).max(4000),
-  inputMode: z.enum(['text', 'voice']).default('text'),
-});
-const PreviewBody = z.strictObject({ scenarios: z.array(z.string().max(60)).max(10).optional() });
-const ListAgentsQuery = z.object({
-  state: AgentStatusSchema.optional(),
-  limit: z.coerce.number().int().min(1).max(200).default(50),
-  cursor: z.string().max(200).optional(),
-});
+// Params, queries and bodies are parsed with the endpoint schemas of the
+// package (ENDPOINTS). The builder's own limits are checked on top, after the
+// contract schema passes: they cap what reaches a model call.
+const E = ENDPOINTS;
+const MessageLimits = z.object({ text: z.string().trim().min(1).max(4000) });
+const PreviewLimits = z.object({ scenarios: z.array(z.string().max(60)).max(10).optional() });
+const RunLimits = z.object({ message: z.string().max(2000) });
 
 export const builderPlugin: FastifyPluginAsync<BuilderPluginOptions> = async (app, options) => {
   const source = options.env ?? process.env;
@@ -88,7 +83,9 @@ export const builderPlugin: FastifyPluginAsync<BuilderPluginOptions> = async (ap
     const mode = builderAuthMode(source);
     if (mode === 'dev') {
       auth = new UnverifiedSeedOwnerAuth();
-      app.log.warn('BUILDER_DEV_AUTH=1: builder routes use UnverifiedSeedOwnerAuth and the bearer token is NOT verified');
+      app.log.warn(
+        'BUILDER_DEV_AUTH=1: builder routes use UnverifiedSeedOwnerAuth and the bearer token is NOT verified. It answers only requests from the loopback address (127.0.0.1, ::1); any other address gets UNAUTHENTICATED',
+      );
     } else {
       auth = new NotConfiguredAuth();
       if (mode === 'refused_in_production') {
@@ -115,7 +112,8 @@ export const builderPlugin: FastifyPluginAsync<BuilderPluginOptions> = async (ap
   // conflicts from uploads as stop conditions.
   const extraction = registerExtractionRoutes(app, { ...options.extraction, auth, knowledge: baseKnowledge, env, now });
   const knowledge = withConflicts(baseKnowledge, extraction.conflicts);
-  const toolset = options.toolset ?? new MockToolset(now);
+  // The shared mock toolset, one instance per test session, on the runner's clock.
+  const toolset = options.toolset ?? new SessionMockToolset(now);
 
   // ---- publish, pause, versions, rollback (tasks B-17, B-27). Draft writers
   // get a guarded store, so a draft write cannot undo a publish or a pause.
@@ -133,56 +131,64 @@ export const builderPlugin: FastifyPluginAsync<BuilderPluginOptions> = async (ap
   // ---- 3.3 Builder sessions
   app.post('/api/builder/sessions', async (request, reply) => {
     const scope = await requireBusiness(auth, request);
-    const body = parseOrThrow(CreateSessionBody, request.body ?? {});
+    const body = parseOrThrow(E.createBuilderSession.body, request.body ?? {});
     const session = await builder.create({ businessId: scope.businessId, ownerId: scope.owner.userId, ...(body.agentId ? { agentId: body.agentId } : {}) });
-    return reply.status(201).send(session);
+    return reply.status(E.createBuilderSession.successStatus).send(checkedResponse('createBuilderSession', session));
   });
 
   app.get('/api/builder/sessions/:id', async (request) => {
     const scope = await requireBusiness(auth, request);
-    const { id } = parseOrThrow(SessionIdParams, request.params);
-    return builder.get(scope.businessId, id);
+    const { id } = parseOrThrow(E.getBuilderSession.params, request.params);
+    return checkedResponse('getBuilderSession', await builder.get(scope.businessId, id));
   });
 
   app.post('/api/builder/sessions/:id/messages', async (request) => {
     const scope = await requireBusiness(auth, request);
-    const { id } = parseOrThrow(SessionIdParams, request.params);
-    const body = parseOrThrow(MessageBody, request.body ?? {});
-    return builder.message(scope.businessId, id, body);
+    const { id } = parseOrThrow(E.sendBuilderMessage.params, request.params);
+    const body = parseOrThrow(E.sendBuilderMessage.body, request.body ?? {});
+    const { text } = parseOrThrow(MessageLimits, body);
+    return checkedResponse('sendBuilderMessage', await builder.message(scope.businessId, id, { text, inputMode: body.inputMode }));
   });
 
   // ---- 3.4 Agents (builder lane part)
   app.get('/api/agents', async (request) => {
     const scope = await requireBusiness(auth, request);
-    const { businessId: _b, ...rest } = (request.query ?? {}) as Record<string, unknown>;
-    const query = parseOrThrow(ListAgentsQuery, rest);
-    return agentService.list(scope.businessId, query);
+    const query = parseOrThrow(E.listAgents.query, request.query ?? {});
+    const page = await agentService.list(scope.businessId, {
+      limit: query.limit ?? PAGE_LIMIT_DEFAULT,
+      ...(query.state !== undefined ? { state: query.state } : {}),
+      ...(query.cursor !== undefined ? { cursor: query.cursor } : {}),
+    });
+    return checkedResponse('listAgents', page);
   });
 
   app.post('/api/agents', async (request, reply) => {
     const scope = await requireBusiness(auth, request);
-    const body = parseOrThrow(CreateAgentBodySchema, request.body ?? {});
-    return reply.status(201).send(await agentService.create(scope.businessId, body));
+    const body = parseOrThrow(CreateAgentEnvelopeSchema, request.body ?? {});
+    const agent = await agentService.create(scope.businessId, body);
+    return reply.status(E.createAgent.successStatus).send(checkedResponse('createAgent', agent));
   });
 
   app.get('/api/agents/:id', async (request) => {
     const scope = await requireBusiness(auth, request);
-    const { id } = parseOrThrow(AgentIdParams, request.params);
-    return agentService.summary(await agentService.get(scope.businessId, id));
+    const { id } = parseOrThrow(E.getAgent.params, request.params);
+    return checkedResponse('getAgent', await agentService.summary(await agentService.get(scope.businessId, id)));
   });
 
   app.post('/api/agents/:id/preview', async (request) => {
     const scope = await requireBusiness(auth, request);
-    const { id } = parseOrThrow(AgentIdParams, request.params);
-    const body = parseOrThrow(PreviewBody, request.body ?? {});
-    return runs.preview(scope.businessId, id, body.scenarios, request.correlationId);
+    const { id } = parseOrThrow(E.previewAgent.params, request.params);
+    const body = parseOrThrow(E.previewAgent.body, request.body ?? {});
+    parseOrThrow(PreviewLimits, body);
+    return checkedResponse('previewAgent', await runs.preview(scope.businessId, id, body.scenarios, request.correlationId));
   });
 
   app.post('/api/agents/:id/test', async (request) => {
     const scope = await requireBusiness(auth, request);
-    const { id } = parseOrThrow(AgentIdParams, request.params);
-    const body = parseOrThrow(AgentRunRequestSchema, request.body ?? {});
-    return runs.test(scope.businessId, id, body, request.correlationId);
+    const { id } = parseOrThrow(E.testAgent.params, request.params);
+    const body = parseOrThrow(E.testAgent.body, request.body ?? {});
+    parseOrThrow(RunLimits, body);
+    return checkedResponse('testAgent', await runs.test(scope.businessId, id, body, request.correlationId));
   });
 
   registerPublishRoutes(app, { ...publish, auth, agents, agentService, conflicts: extraction.conflicts, knowledge: baseKnowledge, now });

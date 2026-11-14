@@ -1,10 +1,11 @@
+import { ENDPOINTS } from '@abos/contracts';
 import multipart from '@fastify/multipart';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { z } from 'zod';
 import { AppError } from '../../errors';
 import { requireBusiness, type BuilderAuth } from '../auth';
 import type { BuilderEnv } from '../env';
 import type { BusinessKnowledge } from '../session/knowledge';
+import { checkedResponse } from '../respond';
 import { apiError, parseOrThrow } from '../util';
 import type { DocumentExtractor } from './model';
 import { OpenAiDocumentExtractor } from './openai-extractor';
@@ -22,7 +23,7 @@ import {
   type FileStore,
   type UploadFactStore,
 } from './stores';
-import { MAX_UPLOAD_BYTES } from './types';
+import { MAX_UPLOAD_BYTES } from './file-check';
 
 // Files, extraction and conflict resolution routes (task B-21).
 //
@@ -54,10 +55,8 @@ export interface ExtractionDeps extends ExtractionOptions {
   now: () => Date;
 }
 
-const BusinessPathParams = z.object({ id: z.string().regex(/^biz_[A-Za-z0-9_]{1,64}$/) });
-const FileIdParams = z.object({ id: z.string().regex(/^file_[A-Za-z0-9_]{1,64}$/) });
-const ConflictIdParams = z.object({ id: z.string().regex(/^cfl_[A-Za-z0-9_]{1,64}$/) });
-const ResolveBody = z.strictObject({ resolution: z.literal('keep_authoritative') });
+// Params and bodies are parsed with the endpoint schemas of the package.
+const E = { upload: ENDPOINTS.uploadFile, getFile: ENDPOINTS.getFile, resolve: ENDPOINTS.resolveConflict };
 
 function uploadRefused(message: string) {
   return apiError('VALIDATION_FAILED', message, { issues: [{ path: 'file', message }] });
@@ -66,7 +65,7 @@ function uploadRefused(message: string) {
 // The business is in the path for /api/businesses/... (API.md section 1).
 // requireBusiness reads it from the query, so the path value is handed over.
 function withPathBusiness(request: FastifyRequest): FastifyRequest {
-  const { id } = parseOrThrow(BusinessPathParams, request.params);
+  const { id } = parseOrThrow(E.upload.params, request.params);
   return Object.create(request, { query: { value: { businessId: id } } }) as FastifyRequest;
 }
 
@@ -130,21 +129,22 @@ export function registerExtractionRoutes(app: FastifyInstance, deps: ExtractionD
       const business = await requireBusiness(deps.auth, withPathBusiness(request));
       const upload = await readUpload(request);
       const file = await service.upload({ businessId: business.businessId, ownerId: business.owner.userId, ...upload });
-      return reply.status(202).send({ file });
+      return reply.status(E.upload.successStatus).send(checkedResponse('uploadFile', { file }));
     });
 
     scope.get('/api/files/:id', async (request) => {
       const business = await requireBusiness(deps.auth, request);
-      const { id } = parseOrThrow(FileIdParams, request.params);
-      return { file: await service.get(business.businessId, id) };
+      const { id } = parseOrThrow(E.getFile.params, request.params);
+      // The package's getFile response is the FileRecord itself, not { file }.
+      return checkedResponse('getFile', await service.get(business.businessId, id));
     });
 
     scope.post('/api/conflicts/:id/resolve', async (request) => {
       const business = await requireBusiness(deps.auth, request);
-      const { id } = parseOrThrow(ConflictIdParams, request.params);
-      parseOrThrow(ResolveBody, request.body ?? {});
+      const { id } = parseOrThrow(E.resolve.params, request.params);
+      parseOrThrow(E.resolve.body, request.body ?? {});
       const conflict = await service.resolveConflict({ businessId: business.businessId, ownerId: business.owner.userId, conflictId: id });
-      return { conflict };
+      return checkedResponse('resolveConflict', { conflict });
     });
   });
 

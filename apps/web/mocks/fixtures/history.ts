@@ -4,20 +4,29 @@
  * written them (FLOWS.md Flow B and C, API.md 3.7). Times step forward a few
  * seconds at a time from the start time given.
  */
-import type {
-  ActionExecution,
-  ActivityEvent,
-  ActivityEventType,
-  ActivityPayloads,
-  ApprovalRequest,
-  Booking,
-  Call,
-  Order,
-} from "@/lib/api/pending-contracts";
-import { ACTION_CAPABILITY, type ActionType } from "@/lib/api/pending-contracts";
+import {
+  ACTION_TYPE_CAPABILITY,
+  idempotencyKey,
+  type ActionExecution,
+  type ActivityEventPayloads,
+  type ActivityEventType,
+  type ActorType,
+  type ApprovalRequest,
+  type Booking,
+  type BookingMachineState,
+  type Call,
+  type CallStage,
+  type ExecutionActionType,
+  type Order,
+  type OrderMachineState,
+} from "@abos/contracts";
 import { iso, last4, makeEvent, sandboxCheckoutUrl } from "../builders";
-import { idempotencyKey } from "../hash";
 import { MESSAGE_CHANNEL, OWNER_USER_ID, type MockState } from "../types";
+
+/** Last four digits for an event, or undefined when there is no recipient (the customer declined messages). */
+function lastFourOf(phone: string | undefined): string | undefined {
+  return phone === undefined ? undefined : last4(phone);
+}
 
 export class History {
   constructor(
@@ -28,15 +37,15 @@ export class History {
   emit<T extends ActivityEventType>(
     type: T,
     correlationId: string,
-    actorType: ActivityEvent["actorType"],
+    actorType: ActorType,
     at: number,
-    payload: ActivityPayloads[T],
+    payload: ActivityEventPayloads[T],
   ): void {
     this.state.activity.push(makeEvent(this.businessId, type, correlationId, actorType, at, payload));
   }
 
   /** A call with its stage changes. Returns the time after the last stage. */
-  call(call: Call, stages: string[], subject: "order" | "booking", at: number): number {
+  call(call: Call, stages: CallStage[], subject: "order" | "booking", at: number): number {
     this.state.calls.push(call);
     this.emit("call.started", call.id, "provider", at, {
       callId: call.id,
@@ -46,11 +55,14 @@ export class History {
       callerLast4: call.callerLast4,
     });
     let t = at;
-    let from: string | undefined;
+    let from: CallStage | undefined;
     for (const to of stages) {
       t += 20_000;
-      if (subject === "order") this.emit("order.status_changed", call.id, "deployed_agent", t, { callId: call.id, from, to });
-      else this.emit("booking.status_changed", call.id, "deployed_agent", t, { callId: call.id, from, to });
+      if (subject === "order") {
+        this.emit("order.status_changed", call.id, "deployed_agent", t, { callId: call.id, from: from as OrderMachineState | undefined, to: to as OrderMachineState });
+      } else {
+        this.emit("booking.status_changed", call.id, "deployed_agent", t, { callId: call.id, from: from as BookingMachineState | undefined, to: to as BookingMachineState });
+      }
       from = to;
     }
     return t;
@@ -83,7 +95,7 @@ export class History {
       actionBundle: approval.actionBundle,
       expiresAt: approval.expiresAt,
       totalMinor: isOrder ? subject.totalMinor : undefined,
-      recipientLast4: last4(isOrder ? subject.contact.messageRecipient : subject.customer.messageRecipient),
+      recipientLast4: lastFourOf(isOrder ? subject.contact.messageRecipient : subject.customer.messageRecipient),
     });
     if (isOrder) {
       this.emit("order.status_changed", call.id, "system", at, {
@@ -116,27 +128,31 @@ export class History {
 
   expire(approval: ApprovalRequest, correlationId: string): void {
     approval.state = "EXPIRED";
+    // DATA-MODEL 2.14: decidedAt is set on every state but PENDING; an expiry has no decidedBy.
+    approval.decidedAt = approval.expiresAt;
     this.emit("approval.expired", correlationId, "system", Date.parse(approval.expiresAt), {
       approvalId: approval.id,
       subjectId: approval.subjectId,
     });
   }
 
-  execution(
+  async execution(
     approval: ApprovalRequest,
-    actionType: ActionType,
+    actionType: ExecutionActionType,
     status: ActionExecution["status"],
     at: number,
     extra: Partial<ActionExecution> = {},
-  ): ActionExecution {
+  ): Promise<ActionExecution> {
+    const stepIndex = (approval.actionBundle as readonly string[]).indexOf(actionType);
+    const capabilityId = ACTION_TYPE_CAPABILITY[actionType];
     const exe: ActionExecution = {
-      id: `exe_${approval.id.replace(/^apv_/, "")}_${approval.actionBundle.indexOf(actionType)}`,
+      id: `exe_${approval.id.replace(/^apv_/, "")}_${stepIndex}`,
       businessId: approval.businessId,
       approvalId: approval.id,
       actionType,
-      stepIndex: approval.actionBundle.indexOf(actionType),
-      capabilityId: ACTION_CAPABILITY[actionType],
-      idempotencyKey: idempotencyKey(approval.businessId, approval.subjectId, actionType, approval.id),
+      stepIndex,
+      ...(capabilityId ? { capabilityId } : {}),
+      idempotencyKey: await idempotencyKey({ businessId: approval.businessId, subjectId: approval.subjectId, actionType, approvalId: approval.id }),
       status,
       attempts: 1,
       createdAt: iso(at),
@@ -147,13 +163,13 @@ export class History {
     return exe;
   }
 
-  orderStatus(order: Order, from: string, to: Order["status"], at: number): void {
+  orderStatus(order: Order, from: OrderMachineState, to: Order["status"], at: number): void {
     order.status = to;
     order.updatedAt = iso(at);
     this.emit("order.status_changed", order.callId, "system", at, { orderId: order.id, callId: order.callId, from, to });
   }
 
-  bookingStatus(booking: Booking, from: string, to: Booking["status"], at: number): void {
+  bookingStatus(booking: Booking, from: BookingMachineState, to: Booking["status"], at: number): void {
     booking.status = to;
     booking.updatedAt = iso(at);
     this.emit("booking.status_changed", booking.callId ?? booking.id, "system", at, {
@@ -169,7 +185,7 @@ export class History {
    * message: what the message step did. payment: what the customer did.
    * sync: the Sheets job after PAID_VERIFIED.
    */
-  approvedOrder(
+  async approvedOrder(
     order: Order,
     approval: ApprovalRequest,
     at: number,
@@ -179,14 +195,14 @@ export class History {
       sync?: "DONE" | "RETRYING";
       ready?: boolean;
     },
-  ): void {
+  ): Promise<void> {
     const c = order.callId;
     let t = at;
     this.decide(approval, "APPROVED", c, t);
     this.orderStatus(order, "AWAITING_OWNER_APPROVAL", "APPROVED", t);
 
     t += 1500;
-    const checkout = this.execution(approval, "square.checkout.create", "SUCCEEDED", t);
+    const checkout = await this.execution(approval, "square.checkout.create", "SUCCEEDED", t);
     this.emit("execution.started", c, "system", t, {
       executionId: checkout.id,
       approvalId: approval.id,
@@ -216,7 +232,7 @@ export class History {
     this.orderStatus(order, "CREATING_CHECKOUT", "PAYMENT_LINK_READY", t);
 
     t += 1500;
-    const msgExe = this.execution(approval, "message.checkout.send", opts.message === "SENT" ? "SUCCEEDED" : "FAILED", t, {
+    const msgExe = await this.execution(approval, "message.checkout.send", opts.message === "SENT" ? "SUCCEEDED" : "FAILED", t, {
       attempts: opts.message === "SENT" ? 1 : 3,
       errorCode: opts.message === "SENT" ? undefined : "INTEGRATION_UNAVAILABLE",
       lastError: opts.message === "SENT" ? undefined : "carrier_rejected",
@@ -235,7 +251,7 @@ export class History {
       executionId: msgExe.id,
       subjectId: order.id,
       channel: MESSAGE_CHANNEL,
-      recipient: order.contact.messageRecipient,
+      recipient: order.contact.messageRecipient!,
       template: "checkout_link",
       status: opts.message,
       providerMessageId: opts.message === "SENT" ? `surge_${order.id.slice(4)}` : undefined,
@@ -252,7 +268,7 @@ export class History {
         subjectId: order.id,
         channel: MESSAGE_CHANNEL,
         template: "checkout_link",
-        recipientLast4: last4(order.contact.messageRecipient),
+        recipientLast4: last4(order.contact.messageRecipient!),
       });
       this.emit("execution.succeeded", c, "system", t, { executionId: msgExe.id, actionType: "message.checkout.send" });
       this.orderStatus(order, "PAYMENT_LINK_READY", "MESSAGE_SENT", t);
@@ -274,7 +290,7 @@ export class History {
     }
 
     t += 1500;
-    const record = this.execution(approval, "local.order.record", "SUCCEEDED", t);
+    const record = await this.execution(approval, "local.order.record", "SUCCEEDED", t);
     this.emit("execution.started", c, "system", t, {
       executionId: record.id,
       approvalId: approval.id,
@@ -350,13 +366,13 @@ export class History {
     }
   }
 
-  approvedBooking(booking: Booking, approval: ApprovalRequest, at: number, outcome: "booked" | "slot_conflict"): void {
+  async approvedBooking(booking: Booking, approval: ApprovalRequest, at: number, outcome: "booked" | "slot_conflict"): Promise<void> {
     const c = booking.callId ?? booking.id;
     let t = at;
     this.decide(approval, "APPROVED", c, t);
     if (outcome === "slot_conflict") {
       t += 1500;
-      const exe = this.execution(approval, "calendar.event.create", "FAILED", t, { errorCode: "SLOT_CONFLICT" });
+      const exe = await this.execution(approval, "calendar.event.create", "FAILED", t, { errorCode: "SLOT_CONFLICT" });
       this.emit("execution.started", c, "system", t, {
         executionId: exe.id,
         approvalId: approval.id,
@@ -386,7 +402,7 @@ export class History {
     }
     this.bookingStatus(booking, "AWAITING_OWNER_APPROVAL", "RECHECKING_SLOT", t);
     t += 1500;
-    const cal = this.execution(approval, "calendar.event.create", "SUCCEEDED", t);
+    const cal = await this.execution(approval, "calendar.event.create", "SUCCEEDED", t);
     booking.googleEventId = `gcal${booking.id.slice(4)}`;
     cal.externalRef = booking.googleEventId;
     this.emit("execution.started", c, "system", t, {
@@ -403,7 +419,7 @@ export class History {
       externalRef: booking.googleEventId,
     });
     t += 1500;
-    const msg = this.execution(approval, "message.booking.confirm", "SUCCEEDED", t);
+    const msg = await this.execution(approval, "message.booking.confirm", "SUCCEEDED", t);
     const dispatchId = `msg_${booking.id.slice(4)}`;
     this.state.dispatches.push({
       id: dispatchId,
@@ -411,7 +427,7 @@ export class History {
       executionId: msg.id,
       subjectId: booking.id,
       channel: MESSAGE_CHANNEL,
-      recipient: booking.customer.messageRecipient,
+      recipient: booking.customer.messageRecipient!,
       template: "booking_confirmed",
       status: "SENT",
       providerMessageId: `surge_${booking.id.slice(4)}`,
@@ -432,11 +448,11 @@ export class History {
       subjectId: booking.id,
       channel: MESSAGE_CHANNEL,
       template: "booking_confirmed",
-      recipientLast4: last4(booking.customer.messageRecipient),
+      recipientLast4: last4(booking.customer.messageRecipient!),
     });
     this.emit("execution.succeeded", c, "system", t, { executionId: msg.id, actionType: "message.booking.confirm" });
     t += 1500;
-    const rec = this.execution(approval, "local.booking.record", "SUCCEEDED", t);
+    const rec = await this.execution(approval, "local.booking.record", "SUCCEEDED", t);
     this.emit("execution.started", c, "system", t, {
       executionId: rec.id,
       approvalId: approval.id,

@@ -44,7 +44,7 @@ export const PIZZA_MENU_OUTPUT: ExtractionOutput = {
     menuItem('Pepperoni', 'Medium', 1800, 'page 1'),
     menuItem('Pepperoni', 'Large', 2200, 'page 1'),
     f('policy', 'pickup_window', { minutes: 20 }, 0.85, 'page 1'),
-    f('hours', 'sun', { open: '12:00', close: '21:00' }, 0.8, 'page 1'),
+    f('hours', 'sun', { open: '12:00', close: '20:00' }, 0.8, 'page 1'),
   ],
 };
 
@@ -54,21 +54,22 @@ export const BARBER_PRICES_OUTPUT: ExtractionOutput = {
     f('service', 'haircut', { itemName: 'Haircut', priceMinor: 3000, durationMinutes: 30 }, 0.9, 'row 2'),
     f('service', 'beard_trim', { itemName: 'Beard trim', priceMinor: 1500, durationMinutes: 15 }, 0.9, 'row 3'),
     f('service', 'haircut_and_beard', { itemName: 'Haircut and beard', priceMinor: 4000, durationMinutes: 45 }, 0.9, 'row 4'),
-    f('policy', 'minimum_notice', { minutes: 120 }, 0.75, 'row 6'),
+    f('policy', 'min_notice', { minutes: 120 }, 0.75, 'row 6'),
   ],
 };
 
 // The sample hours sheet. Friday closes at 23:00 here and 22:00 in the
-// pizza shop's verified hours, so it opens one conflict that is not required.
+// pizza shop's verified hours (the shared fixtures), so it opens one conflict
+// that is not required. Every other day agrees with the fixtures.
 export const HOURS_SHEET_OUTPUT: ExtractionOutput = {
   facts: [
-    f('hours', 'mon', { open: '11:00', close: '22:00' }, 0.95, 'row 2'),
-    f('hours', 'tue', { open: '11:00', close: '22:00' }, 0.95, 'row 3'),
-    f('hours', 'wed', { open: '11:00', close: '22:00' }, 0.95, 'row 4'),
-    f('hours', 'thu', { open: '11:00', close: '22:00' }, 0.95, 'row 5'),
+    f('hours', 'mon', { open: '11:00', close: '21:00' }, 0.95, 'row 2'),
+    f('hours', 'tue', { open: '11:00', close: '21:00' }, 0.95, 'row 3'),
+    f('hours', 'wed', { open: '11:00', close: '21:00' }, 0.95, 'row 4'),
+    f('hours', 'thu', { open: '11:00', close: '21:00' }, 0.95, 'row 5'),
     f('hours', 'fri', { open: '11:00', close: '23:00' }, 0.95, 'row 6'),
     f('hours', 'sat', { open: '11:00', close: '22:00' }, 0.95, 'row 7'),
-    f('hours', 'sun', { open: '12:00', close: '21:00' }, 0.95, 'row 8'),
+    f('hours', 'sun', { open: '12:00', close: '20:00' }, 0.95, 'row 8'),
   ],
 };
 
