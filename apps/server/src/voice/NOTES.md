@@ -44,3 +44,52 @@ Handing a live call to a person is not one of the four approval-gated writes: Sq
 - Owner text (FAQs, policies) and Square names now sit in the instruction channel. They are flattened to one line, cut to 200 characters, stripped of Markdown marks and placed under a line that calls them reference data. This lowers the risk; it does not remove it. Safety still rests on the tool allowlist and the approval engine (FLOWS 8).
 - The phone session adds "call this silently" to every tool description (`phoneToolDefinitions`). Checked in text mode against the real model with `scripts/live/phone-prompt-trial.ts`: seven runs, no announcement lines, at most "Got it." before a tool call. Not yet checked by ear on a phone call.
 - The opening line is still the greeting stored in the published agent version. It is owner text, so this change did not shorten it.
+
+## Interruptions and background noise (2026-11-14)
+
+The owner's first real call: any sound, background noise included, stopped the agent (a barge-in 0.8 seconds into the greeting, another 14.8 seconds into a long read-back); a real interruption cut the agent off mid-word; the next turn felt disjointed. Every vendor fact below was read from vendor docs on 2026-11-14 and is not yet tested on a real call (SPEC 4 has the quotes).
+
+**Settings** (`constants.ts` `DEFAULT_VOICE_TUNING`, each with an env override validated in `env.ts`; a change needs a restart, not a code deploy):
+
+| Setting | Env | Start value |
+|---|---|---|
+| server_vad `threshold` | `VOICE_VAD_THRESHOLD` | 0.6 (OpenAI default 0.5) |
+| `prefix_padding_ms` | `VOICE_VAD_PREFIX_PADDING_MS` | 300 (default) |
+| `silence_duration_ms` | `VOICE_VAD_SILENCE_MS` | 600 (default 500) |
+| `noise_reduction` | `VOICE_NOISE_REDUCTION` | `near_field` (or `far_field`, `off`) |
+| interruption minimum | `VOICE_BARGE_IN_MIN_MS` | 350 |
+| interruption minimum in the greeting | `VOICE_GREETING_BARGE_IN_MIN_MS` | 700 |
+| short reply grace | `VOICE_SHORT_REPLY_GRACE_MS` | 1000 |
+| extra talk-over before the clear | `VOICE_BARGE_IN_TAIL_MS` | 0 (at most 150) |
+
+`create_response` and `interrupt_response` are both off on the whole call. The docs say that with both off "the model will never respond automatically but VAD events will still be emitted", so the relay decides every interruption and asks for every reply with `response.create`. Keeping `create_response` on with `interrupt_response` off was rejected: the docs say it "may fail to create a response if the model is already responding", and every such failure is a model error (three end the call), and a noise heard after the agent finished generating would be answered. `semantic_vad` was rejected: it has no threshold, the docs do not say it reduces false starts, and its `eagerness` controls when a turn ends, not what starts one. `near_field` is the docs' type for close-talking microphones, the nearest fit for a handset; the docs name no format limit and say nothing about 8 kHz u-law. `idle_timeout_ms` is not used: the relay has its own idle deadline.
+
+**The gate** (`interruption.ts`, pure, unit tested with a fake clock). "Agent speaking" means Twilio has unplayed agent audio (unacknowledged marks) or a response is being generated.
+
+1. `speech_started` with the agent silent: an ordinary turn. On `input_audio_buffer.committed` the relay sends `response.create`. If a response is still being generated it waits for that `response.done`; if tool work is running, the tool chain's own `response.create` answers the turn.
+2. `speech_started` with the agent speaking: a candidate. The relay arms one timer: 350 ms, or 700 ms while the greeting has not finished playing.
+3. The timer fires before `speech_stopped`: a confirmed interruption. The relay sends `response.cancel` if a response is being generated (tagged `voice_gate_N`; a refusal is logged and never counted as a model error), then Twilio `clear` and `conversation.item.truncate` as before, with one `voice: barge-in` log line. The caller's turn is answered when committed (step 1).
+4. `speech_stopped` first: a short sound. The agent keeps talking. At commit: if the agent has finished, the turn is answered (a quick "yes" at the end of a question). If the agent is still speaking, the item is held.
+5. A held item is decided when the agent's audio has all played and nothing is being generated: answered if its speech ended within 1000 ms of that moment, otherwise removed with `conversation.item.delete` (tagged `voice_gate_N`). It is also removed when another short sound is held, when an interruption is confirmed, or when a new response starts first.
+6. Greeting: a confirmed interruption during the greeting adds a fixed system line (`greetingCutInstruction`). The model's copy of its greeting now holds only what was heard, and it is told to start with "You are speaking with an AI assistant." if that part was cut. A short "hello" over the greeting is held and then removed, so the disclosure plays in full.
+7. Softer stop: Twilio's `clear` empties the whole buffer, with no partial clear or fade, and the relay has no word timing, so a word-aligned stop is not possible with this mechanism. The gate's minimum is the talk-over the caller hears; `VOICE_BARGE_IN_TAIL_MS` can add up to 150 ms more before the clear, and is 0 by default.
+8. Consent window (SPEC 2.9): while the text question is open, `speech_started` is handled exactly as before the gate (offer replayed, answer turn bound, clear and truncate at once), no reply is asked for on commit, and the window's update sets `interrupt_response: true`, which was the provider default before. Its restore now returns to the call's normal settings, with `create_response` off; two lines of `relay-consent.test.ts` were changed to check that instead of `create_response: true`.
+
+**Prompt** (`STYLE_LINES`, shared by both templates and the generic one): answer what the caller said when they cut in, briefly and warmly; never mention the interruption or repeat the cut-off sentence unless asked; after only "okay" or "mm-hm", pick up where you stopped in one short sentence. One more line follows OpenAI's prompting guide ("Do not guess what the user meant from unclear audio"): do not guess at noise or unclear audio, ask once to repeat. The lines are short because `prompt.test.ts` caps the text-step prompt at 5000 characters.
+
+**Limits.** A short sound with no `item_id` cannot be deleted; it is never answered while the agent speaks. A short "yes" said more than about 0.4 seconds before the end of a sentence is removed, not answered (with the default silence and grace). A held sound is removed if a tool-call response starts before the agent's audio finishes. Asking for every reply adds one client round trip per turn. Window updates now also send `noise_reduction`, in case a partial `audio.input` update does not keep it; that is not documented either way.
+
+### Tune on a real call
+
+| Setting | Start | Listen for |
+|---|---|---|
+| `VOICE_VAD_THRESHOLD` | 0.6 | Background noise or a TV still starting a turn: raise by 0.05. A soft-spoken caller not heard: lower. |
+| `VOICE_NOISE_REDUCTION` | `near_field` | A speakerphone or car call still triggering: try `far_field`. Clipped first syllables: try `off` and compare. |
+| `VOICE_VAD_PREFIX_PADDING_MS` | 300 | The first word of a caller's turn missing from the agent's answer: raise. |
+| `VOICE_VAD_SILENCE_MS` | 600 | The agent answering while the caller pauses mid-sentence: raise. Replies feeling slow: lower toward 500. |
+| `VOICE_BARGE_IN_MIN_MS` | 350 | A real "wait" or "no" not stopping the agent: lower. Coughs or "uh-huh" stopping it: raise. |
+| `VOICE_GREETING_BARGE_IN_MIN_MS` | 700 | A caller's "hello" over the greeting still stopping it: raise. Check the disclosure is always heard in full or repeated. |
+| `VOICE_SHORT_REPLY_GRACE_MS` | 1000 | A quick "yes" at the end of a question going unanswered: raise. Noise near the end of a sentence being answered: lower. |
+| `VOICE_BARGE_IN_TAIL_MS` | 0 | Only if the stop still sounds abrupt: try 80 to 150 and compare. |
+
+Also check on that call: the `voice: short sound ignored` and `voice: barge-in` log lines and `ignoredSounds` in the call-end line; that `conversation.item.delete` and `response.cancel` cause no `voice: interruption step refused` warnings; that the agent never answers a sound the caller did not mean; and that the turn after an interruption answers the caller without restarting the cut sentence.

@@ -104,6 +104,15 @@ export function consentResultInstruction(template: AgentSpec['template'], channe
     : `${lead} Say: "No problem, the payment link will be shown at the counter." Then continue the order.`;
 }
 
+/**
+ * The caller's speech cut the greeting, whose first sentence is the AI disclosure. The model's copy of
+ * the greeting holds only the part that was heard (conversation.item.truncate), so it can tell whether
+ * the disclosure was heard. Added as a system item before the caller's turn; it asks for no response.
+ */
+export function greetingCutInstruction(): string {
+  return 'Server status: the caller spoke over your greeting. If the part of the greeting they heard did not yet say that they are speaking with an AI assistant, start your next reply with "You are speaking with an AI assistant." Then answer what they said.';
+}
+
 const CANNOT_TAKE_LINE =
   'If a tool says opening hours are not available, or that information is not available right now, tell the caller you cannot take this right now and do not propose anything.';
 
@@ -193,6 +202,11 @@ const STYLE_LINES = [
   'Never say you are checking, looking something up or pulling something up, and never ask the caller to hold or wait.',
   'Tool calls are silent. Never announce one, as in "I will get your total" or "sending this now". The most you may say before a tool call is "Got it." Say the answer only after the tool result arrives.',
   'Do not repeat back what the caller just said, do not praise their choice, and do not list the menu or services unless they ask.',
+  // Interruptions (NOTES.md "Interruptions and background noise").
+  'If the caller cuts in, answer what they said briefly and warmly. Never mention the interruption or repeat the cut-off sentence unless asked.',
+  'If they only said "okay" or "mm-hm", pick up where you stopped in one short sentence.',
+  // OpenAI's Realtime prompting guide, "Handle unclear audio" (read 2026-11-14).
+  'If audio is only noise or unclear, do not guess; ask once to repeat.',
 ];
 
 export function buildInstructions(spec: AgentSpec, facts: InstructionFacts): string {

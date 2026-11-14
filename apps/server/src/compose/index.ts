@@ -27,6 +27,7 @@ import { emitActivity } from '../policy/activity';
 import { createPolicyEngine, type PolicyEngine } from '../policy/engine';
 import { createRealToolset, type FactsSnapshot, type RealToolset, type RealToolsetPorts } from '../tools/real/index';
 import type { VoicePluginOptions } from '../voice/types';
+import { voiceTuningFromEnv } from '../voice/constants';
 import {
   calendarAvailabilityPort, dbCallsPort, dbVoiceEventsPort, dbCatalogPort, dbFactsPort, dbLiveAgentPort, dbOrderStatusPort, engineProposalPort, squareQuotePort,
   type CallsStore,
@@ -333,6 +334,8 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       twilioValidator: providers.twilioValidator,
       openaiSocketFactory: providers.openaiSocketFactory, messageChannel, fallback: fallback.relay, decisions,
       ...(env.OPENAI_REALTIME_MODEL ? { model: env.OPENAI_REALTIME_MODEL } : {}),
+      // Phone voice tuning from VOICE_* env overrides (NOTES.md "Tune on a real call").
+      tuning: voiceTuningFromEnv(env),
       redactSecrets: [env.OPENAI_API_KEY, env.TWILIO_AUTH_TOKEN].filter((s): s is string => typeof s === 'string'),
     } }
     : { ok: false, missing: voiceMissing };
