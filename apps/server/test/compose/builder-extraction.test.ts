@@ -205,8 +205,17 @@ describe('extraction stores on Postgres', () => {
       const store = dbConflictStore(h.db);
       await store.insert(conflict('cfl_t1', 'item:one', 'fact_up_1'));
       await store.insert(conflict('cfl_t2', 'item:two', 'fact_up_2', { required: false }));
-      // One open conflict per business, kind and key (the table's unique index).
-      await expect(store.insert(conflict('cfl_t1_again', 'item:one', 'fact_up_1'))).rejects.toThrow();
+      // One open conflict per business, kind and key (the table's unique index). A second open one for
+      // the same key, as two extractions racing past findOpen would send, writes nothing and does not fail.
+      await store.insert(conflict('cfl_t1_again', 'item:one', 'fact_up_2'));
+      expect(await rows("select id, candidates->0->>'factId' as draft from fact_conflicts where business_id = 'biz_a' and kind = 'menu_item' and key = 'item:one'")).toEqual([{ id: 'cfl_t1', draft: 'fact_up_1' }]);
+      expect(await store.get('biz_a', 'cfl_t1_again')).toBeUndefined();
+      // The same key in another business is another conflict.
+      await store.insert({ ...conflict('cfl_t1_b', 'item:one', 'fact_b1'), businessId: 'biz_b' });
+      expect((await store.findOpen('biz_b', 'menu_item', 'item:one'))?.id).toBe('cfl_t1_b');
+      await store.resolve('biz_b', 'cfl_t1_b', { resolvedBy: 'usr_b', resolvedAt: NOW() });
+      // A repeated ID is still an error.
+      await expect(store.insert(conflict('cfl_t1', 'item:other', 'fact_up_1'))).rejects.toThrow();
       // The table's own check: at least two candidates.
       await expect(store.insert({ ...conflict('cfl_t_short', 'item:short', 'fact_up_1'), candidates: [{ sourceType: 'upload', value: 1 }] })).rejects.toThrow();
 
