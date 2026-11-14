@@ -95,7 +95,8 @@ export function describeEvent(event: ActivityEvent, timeZone: string): EventLine
     }
     case 'payment.failed': {
       const e = p(event, 'payment.failed');
-      return {title: `Payment failed: ${paymentFailureReason(e.reason)}`, sandbox: true};
+      const reason = paymentFailureReason(e.reason);
+      return {title: reason ? `Payment failed: ${reason}` : 'Payment failed', sandbox: true};
     }
     case 'booking.verified': {
       const e = p(event, 'booking.verified');
