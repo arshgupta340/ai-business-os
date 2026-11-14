@@ -62,10 +62,13 @@ describe('every started call ends with call.ended', () => {
     expect(res.body).not.toContain('<Stream');
     const row = await callRow('CA_e2e_paused');
     expect(row).toMatchObject({ status: 'COMPLETED', end_reason: 'completed', ended: true, agent_id: AGENT, agent_version_id: version, channel: 'phone' });
+    // Both events are written in the same instant here, so their order by time is not fixed.
     const events = await eventsOf(row!.id);
-    expect(events.map((e) => e.type)).toEqual(['call.started', 'call.ended']);
-    expect(events[0]!.payload).toMatchObject({ callId: row!.id, agentId: AGENT, agentVersionId: version, channel: 'phone', callerLast4: '0142' });
-    expect(events[1]!.payload).toMatchObject({ callId: row!.id, status: 'COMPLETED', reason: 'completed' });
+    expect(events.map((e) => e.type).sort()).toEqual(['call.ended', 'call.started']);
+    const started = events.find((e) => e.type === 'call.started');
+    const ended = events.find((e) => e.type === 'call.ended');
+    expect(started!.payload).toMatchObject({ callId: row!.id, agentId: AGENT, agentVersionId: version, channel: 'phone', callerLast4: '0142' });
+    expect(ended!.payload).toMatchObject({ callId: row!.id, status: 'COMPLETED', reason: 'completed' });
     // The calls list shows it as ended, and nothing was proposed or sent.
     const list = await w.app.inject({ url: `/api/calls/${row!.id}?businessId=${PIZZA}`, headers: OWNER });
     expect(list.json()).toMatchObject({ id: row!.id, status: 'COMPLETED' });
