@@ -26,6 +26,8 @@ export function loadEnvFile(): void {
 const EnvSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
   PUBLIC_SERVER_URL: z.url().optional(),
+  // The one browser origin allowed by CORS. Defaults to the local web app.
+  WEB_ORIGIN: z.url().optional(),
   // AC-19: this build is sandbox only. Any other value stops the server.
   SQUARE_ENVIRONMENT: z
     .literal('sandbox', {
