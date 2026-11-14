@@ -125,6 +125,26 @@ describe('a calendar step whose insert outcome is unknown: the owner retries aft
     expect(w.calendar.events.has(b.step.idempotency_key)).toBe(true);
   });
 
+  it('cancelled: an event under the step ID that someone cancelled is unknown, never a new insert', async () => {
+    const b = await stuckBooking();
+    const events = w.calendar.client.events;
+    const get = events.get;
+    events.get = async ({ eventId }) => ({ data: { id: eventId, status: 'cancelled' } });
+    const writes = w.calendarWrites.length;
+    try {
+      for (const action of ['retry', 'abandon'] as const) {
+        const res = await resolve(w, b.step.id, action, OWNER, BARBER);
+        expect(res.json()).toMatchObject({ code: 'INVALID_STATE', message: RECOVERY_MESSAGES.outcomeUnknown });
+      }
+      w.app.composed.executor.kick(BARBER);
+      await w.settle();
+    } finally { events.get = get; }
+    expect((await steps(w, b.approvalId))[0]).toMatchObject({ status: 'NEEDS_REVIEW', attempts: 1 });
+    expect(await statusOf(w, 'bookings', b.bookingId)).toBe('RETRY_REQUIRED');
+    expect(w.calendarWrites.length).toBe(writes);
+    expect(await count(w, 'recovery_decisions where execution_id = $1', [b.step.id])).toBe(0);
+  });
+
   it('error: a calendar read that fails is unknown, so retry and abandon are refused and nothing changes', async () => {
     const b = await stuckBooking();
     const events = w.calendar.client.events;

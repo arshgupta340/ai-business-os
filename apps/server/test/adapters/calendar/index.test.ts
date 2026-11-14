@@ -282,6 +282,14 @@ describe('calendar adapter: findEventForRecovery (issue #54, owner recovery)', (
     s.get.mockImplementationOnce(() => new Promise(() => {}));
     expect(await s.adapter.findEventForRecovery!(q)).toEqual({ outcome: 'unknown' });
   });
+  it('is unknown, not absent, for a cancelled or deleted event under the step ID, so nothing recreates it', async () => {
+    const s = setup(); await put(s, { status: 'cancelled' });
+    expect(await s.adapter.findEventForRecovery!(q)).toEqual({ outcome: 'unknown' });
+    const gone = setup();
+    gone.get.mockRejectedValueOnce(Object.assign(new Error('Gone'), { response: { status: 410 } }));
+    expect(await gone.adapter.findEventForRecovery!(q)).toEqual({ outcome: 'unknown' });
+    expect(s.insert).not.toHaveBeenCalled(); expect(gone.insert).not.toHaveBeenCalled();
+  });
   it('is unknown for malformed input without calling Google', async () => {
     const s = setup();
     expect(await s.adapter.findEventForRecovery!({ ...q, eventId: 'not-a-key' })).toEqual({ outcome: 'unknown' });

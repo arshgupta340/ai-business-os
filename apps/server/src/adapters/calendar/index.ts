@@ -228,9 +228,18 @@ export function createCalendarAdapter(deps: CalendarDependencies): CalendarAdapt
         || !IsoDateTimeSchema.safeParse(input.startUtc).success || !IsoDateTimeSchema.safeParse(input.endUtc).success) return unknown;
       try {
         // The same two reads createEvent uses before it inserts: the booking's private property, then the
-        // deterministic event ID (404 or 410 means none). Both must answer for "absent".
+        // deterministic event ID. Both must answer for "absent". Unlike createEvent, a cancelled or deleted
+        // event under the step's ID (status cancelled, or 410 Gone) is not absence: someone cancelled that
+        // booking, and the original approval must not recreate it. Only a 404 on the ID counts as none.
         const byProperty = await findByProperty(input.bookingId, input.calendarId);
-        const byId = await findById(input.calendarId, input.eventId);
+        let byId: GoogleEvent | undefined;
+        try {
+          const response = await withTimeout(ms, () => client.events.get({ calendarId: input.calendarId, eventId: input.eventId }));
+          if (response.data.status === 'cancelled') return unknown;
+          byId = response.data;
+        } catch (error) {
+          if (providerStatus(error) !== 404) return unknown;
+        }
         const live = [...byProperty, ...(byId ? [byId] : [])];
         const ids = new Set(live.map((e) => e.id));
         if (live.length === 0) return { outcome: 'absent' };
