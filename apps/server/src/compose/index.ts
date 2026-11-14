@@ -231,8 +231,12 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       return r.ownerUserId && r.businessId === businessId ? { ownerUserId: r.ownerUserId } : null;
     } },
     catalog: { async findVariation(businessId, variationId) {
-      const row = (await db.query('select id, square_item_id, square_variation_id from public.catalog_items where business_id = $1 and square_variation_id = $2', [businessId, variationId])).rows[0] as Record<string, unknown> | undefined;
-      return row ? { businessId, subjectId: String(row.id), squareItemId: String(row.square_item_id), variationId: String(row.square_variation_id) } : null;
+      const row = (await db.query('select id, square_item_id, square_variation_id, item_name, variation_name from public.catalog_items where business_id = $1 and square_variation_id = $2', [businessId, variationId])).rows[0] as Record<string, unknown> | undefined;
+      const name = (v: unknown) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined);
+      const itemName = name(row?.item_name);
+      const variationName = name(row?.variation_name);
+      return row ? { businessId, subjectId: String(row.id), squareItemId: String(row.square_item_id), variationId: String(row.square_variation_id),
+        ...(itemName ? { itemName } : {}), ...(variationName ? { variationName } : {}) } : null;
     } },
     square: { readVariationPrice(variationId) {
       if (!providers.prices) throw new AppError('INTEGRATION_UNAVAILABLE', 'Square is not configured.');

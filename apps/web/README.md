@@ -13,8 +13,11 @@ npm run dev:mock      # NEXT_PUBLIC_MOCK=1, no backend, no Supabase
 npm run dev           # real mode, needs apps/web/.env.local (copy .env.example)
 npm run typecheck
 npm test
+npm run e2e           # Playwright tests in mock mode (playwright.config.ts starts its own dev server)
 npm run build
 ```
+
+Real mode calls the server at `NEXT_PUBLIC_API_URL` from the browser. The server's CORS allows one origin, `WEB_ORIGIN`, and falls back to `http://localhost:3000` when it is not set (`apps/server/src/app.ts`). Keep the web app on port 3000 unless `WEB_ORIGIN` on the server names another address. `docs/DEMO-LAPTOP.md` has the full steps.
 
 Mock mode: the sign-in page shows a "Mock mode" notice. Any email and password, or the "Continue as demo owner" button, sign in the demo owner. The session is kept in localStorage (`abos.mockSession`). `getAccessToken()` returns `mock-token`.
 
@@ -24,17 +27,19 @@ Real mode without `NEXT_PUBLIC_SUPABASE_URL` or `NEXT_PUBLIC_SUPABASE_ANON_KEY`:
 
 | Path | What |
 |---|---|
-| `app/(dashboard)/<route>/page.tsx` | One screen per route. Each is a placeholder you replace. |
-| `app/(dashboard)/layout.tsx` | Wraps every screen in `DashboardShell` (sidebar, top bar, sandbox banner, sign-in guard). |
+| `app/(dashboard)/<route>/page.tsx` | One screen per route: `overview`, `build`, `agents`, `agents/[id]`, `agents/[id]/preview`, `agents/[id]/versions`, `approvals`, `activity`, `knowledge`, `knowledge/prices`, `integrations`, `settings`, `telemetry`. A screen's own parts sit next to its page in `_components/`, `_lib/` or `_hooks/`. |
+| `app/(dashboard)/layout.tsx` | Wraps every screen in `DashboardShell` (sidebar, top bar, sandbox banner, sign-in guard, and `BusinessListGate` around the screen). |
 | `app/icon.svg` | The app icon. Next.js serves it as the favicon. |
 | `app/sign-in/page.tsx` | Sign-in. Outside the dashboard group. |
 | `components/` | Shared building blocks (below). |
 | `components/shell/` | Shell parts. `useShellBadges()` sets the Approvals count. |
 | `components/providers/AppProviders.tsx` | Theme, links, auth, `ApiProvider` (React Query, plus the mock API in mock mode), `ApiBusinessProvider` and `SessionErrorHandler`. |
-| `lib/session/` | `useBusiness()`, `BusinessProvider`, `ApiBusinessProvider`, seeded businesses, the sign-in notice. |
+| `lib/session/` | `useBusiness()`, `BusinessProvider`, `ApiBusinessProvider`, `useBusinessList()`, `businessListStatus` (`business-list.ts`), `BusinessListGate`, the seeded businesses (mock mode only), the sign-in notice. |
 | `lib/session/auth/` | `useAuth()`, `getAccessToken()`. |
 | `lib/supabase/client.ts` | `getSupabaseBrowserClient()`, null when not configured. |
+| `lib/status.ts`, `lib/format.ts`, `lib/env.ts`, `lib/storage.ts` | Shared helpers (below). |
 | `lib/api/`, `mocks/` | Typed API client, React Query hooks and the MSW mock layer. The mock data is the shared demo world from `@abos/contracts/fixtures` (`mocks/seed.ts`); `apps/web` keeps no fixture copies. Read `lib/api/README.md`. |
+| `e2e/` | Playwright tests. They run in mock mode. |
 
 ## Shared components
 
@@ -47,7 +52,13 @@ Import from `@/components` (or the single file).
 - `StatusBadge` `{label, tone}`, tone `neutral | info | warning | danger | success`. `success` (green) is only for states the server or provider confirmed. Never green before the provider confirms.
 - `SandboxBadge`. Put it next to any payment data: totals, payment links, payment status.
 - `SessionNotice`. Shows once why the owner landed on /sign-in (for example "Your session ended"). The sign-in page renders it.
-- `RefreshFailedNotice` `{businessId}`. One line under the page header when a background refetch failed and the screen still shows the old data: "Could not refresh. Showing the last data we have." with "Try again". Overview and My Agents use it; their blocks show an error only when there is no data at all.
+- `RefreshFailedNotice` `{businessId}`. One line under the page header when a background refetch failed and the screen still shows the old data: "Could not refresh. Showing the last data we have." with "Try again". Overview and My Agents use it; their blocks show an error only when there is no data at all. The same file exports the text (`REFRESH_FAILED_TEXT`) and the test it uses on a query (`isStaleAfterFailedRefetch`).
+- `ProviderHealthNotice` `{businessId, providers, showLink?}`. One banner for each listed provider that integrations health reports as `degraded` or `disconnected`, with what that means for the action on screen and an "Open Integrations" button. It renders nothing while every listed provider is connected or health has not loaded. The call detail on Live operations and the approval decision use it. `providersForSteps(steps)` turns an approval's action steps into the providers they write to, and `providerProblems(health, providers)` is the pure function behind the banner.
+
+From `@/lib/session`, used by the shell and not by screens:
+
+- `BusinessListGate`. Renders its children only when the business list is ready and the stored selection has been read. Otherwise it shows `BusinessListNotice`: a loading state, an error state with a retry, or an empty state with "Check again". `DashboardShell` mounts it around every screen.
+- `businessSelectorPlaceholder(status)`. The text the selector shows for each list state.
 
 ## Shell on narrow screens
 
@@ -62,12 +73,30 @@ Import from `@/components` (or the single file).
 
 Hooks still return their errors, so a screen can show its own error state as before. Do not add a second redirect in a screen.
 
+## The business list
+
+`ApiBusinessProvider` feeds `useBusiness()` from `GET /api/businesses`. `useBusinessList()` returns `{status, error, retry}`, and `businessListStatus` (`lib/session/business-list.ts`) decides the status:
+
+| Status | Meaning in real mode |
+|---|---|
+| `signed_out` | No owner is signed in, so the list is not asked for. |
+| `loading` | The first answer has not arrived. |
+| `error` | The call failed and there is no list to show. |
+| `empty` | The server answered with no business for this account. |
+| `no_access` | The server listed businesses, and answered `FORBIDDEN_BUSINESS` for every one of them. |
+| `ready` | The list has at least one business. |
+
+In real mode the selector never shows a business the server did not return: the list is empty and `businessId` is null until the server answers, and `BusinessListGate` shows the state in place of the screen. In mock mode (`NEXT_PUBLIC_MOCK=1`) the seeded list (`SEEDED_BUSINESSES`) stands in while the list loads or after it fails, so the status is `ready` unless the API list is empty or every business was refused.
+
 ## Shared helpers
 
 - `statusView(machine, state)` and `conflictView(status, required)` from `@/lib/status`. They map every server state to `{label, tone}`. Use them with `StatusBadge` so a state looks the same on every screen. Do not write your own state to color mapping.
   - Machines: `order`, `booking`, `approval`, `execution`, `syncJob` (the Sheets report), `messageDispatch`, `call`, `callStage`, `agent`, `fact`, `fileExtraction`, `integration`, plus `feed` (the `useActivityFeed` status, never green), `catalogSync` (a Square catalog sync job, same states as `syncJob`) and `builderSession` (`active`, `completed`, `abandoned`).
   - `factView(kind, status)` is `statusView('fact', status)` except a `menu_item` draft, which shows `MENU_ITEM_DRAFT_VIEW` ("Menu draft, for comparison only").
 - `formatMoney(amountMinor, currency)`, `formatDateTime(iso, timeZone)`, `formatTime`, `formatDate`, `formatRelative`, `secondsUntil`, `formatCountdown`, `lastFour` from `@/lib/format`. Money is in minor units on the wire. Show times in `business.timezone`.
+- `actorName(userId)` from `@/lib/format`. "the owner" for a `usr_` ID, otherwise "the system". Use it so a raw user ID is never shown.
+- `isMockMode()` and `getPublicSupabaseConfig()` from `@/lib/env`. Screens do not read `NEXT_PUBLIC_*` values themselves.
+- `getBrowserStorage()`, `readItem`, `writeItem`, `removeItem` from `@/lib/storage`. Safe on the server and where storage is blocked: reads return null and writes do nothing.
 
 ## Hooks
 
@@ -75,9 +104,30 @@ Hooks still return their errors, so a screen can show its own error state as bef
 const {businesses, business, businessId, isReady, setBusinessId} = useBusiness(); // from '@/lib/session'
 const {status, owner, signIn, signOut, isMock, configError} = useAuth(); // from '@/lib/session/auth'
 const {setPendingApprovalsCount} = useShellBadges(); // from '@/components/shell'
+const {status: listStatus, error: listError, retry} = useBusinessList(); // from '@/lib/session'
 ```
 
 `businesses` comes from `GET /api/businesses` once the owner is signed in. In mock mode the seeded list stands in while it loads, when it fails, or when signed out; in real mode the list is empty until the server answers, and `DashboardShell` shows a loading, error or empty state (`BusinessListGate`) instead of the screen. `businessId` is null until localStorage has been read after mount (`isReady` turns true then), so no business-scoped call goes out with the default before the stored business is known. After that it is the stored business, else `biz_pizza_01`, else the first in the list. `business` has `id`, `name`, `category`, `timezone` and an optional `contact: { phone?, email?, address? }` (the location is `contact.address`). Pass it to every business-scoped API call. `status` is `loading | signed_in | signed_out`. Screens under `(dashboard)` only render when `signed_in`, so they can assume an owner.
+
+## Mock mode
+
+`npm run dev:mock` runs the whole app on MSW with no backend and no Supabase. The mock data is the shared demo world: `mocks/seed.ts` calls `materializeFixtures(now)` from `@abos/contracts/fixtures` and adds only derived activity history and one call per booking. `apps/web` keeps no fixture copies (`mocks/fixtures/` is gone), so tests import IDs from `@abos/contracts/fixtures`.
+
+`useMockControls()` (from `@/lib/api`) returns the mock controls, or `null` outside mock mode. In the browser the same object is on `window.__abosMock` once the mock is ready, for Playwright scripts and the console:
+
+| Control | Use |
+|---|---|
+| `startPizzaCall()`, `startBookingCall({slotConflict?})` | Start a scripted call that ends in a pending approval. |
+| `simulatePaymentFailed()`, `simulateSyncRetry()`, `simulateCallLost()`, `simulateRejectedWebhook()` | Failure paths of the two flows. |
+| `simulatePayloadChanged(approvalId)` | The next decision on that approval gets `PAYLOAD_HASH_MISMATCH`. |
+| `simulateNoLiveAgent()` | Nothing answers the phone number. |
+| `simulateExtractionFailed()`, `simulateCatalogSyncFailed()`, `simulateQrOnlyChannel()` | The next upload, catalog sync or pizza call takes the other path. |
+| `simulateSheetsDisconnected()` | Google Sheets reports `disconnected` until `reset()`. |
+| `simulateEmptyBusiness(businessId)` | That business has nothing yet. Use it for every empty state. |
+| `simulateRequestFailure({path, method?, mode?, code?, message?, times?})`, `clearRequestFailures()` | Matching requests fail with an error envelope or with a body that does not match the contract. Use it for every error state. |
+| `reset()` | Puts the shared world back. |
+
+The seven from `simulateExtractionFailed` to `clearRequestFailures` are optional members of `MockControls`, so code calls them as `controls.simulateEmptyBusiness?.(id)`. A reload seeds the mock again, so navigate with in-app links after you use a control. `lib/api/README.md` has the full behavior of each control, the rules the mock enforces and what the seed adds.
 
 ## Domain names to reuse
 
