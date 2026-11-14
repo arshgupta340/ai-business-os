@@ -102,7 +102,7 @@ export async function runtimeExpireApprovals(db: QueryExecutor, businessId: stri
 export interface OrderRow {
   id: string; business_id: string; call_id: string; status: string; total_minor: number; currency: string;
   approval_id: string | null; square_order_id: string | null; square_payment_link_id: string | null;
-  checkout_url: string | null; square_payment_id: string | null;
+  checkout_url: string | null; square_payment_id: string | null; link_ready_at: string | Date | null;
   [column: string]: unknown;
 }
 export interface MarkOrderPaidResult { order: JsonRow<OrderRow>; syncJob: JsonRow<SyncJobRow> }
@@ -111,27 +111,29 @@ export interface MarkOrderPaidResult { order: JsonRow<OrderRow>; syncJob: JsonRo
  * Square verified a COMPLETED payment. Checks amount and currency against the signed approval and the
  * order, records the payment ID, moves PAYMENT_PENDING or PAYMENT_FAILED to PAID_VERIFIED and enqueues
  * the Sheets job, with order.status_changed, payment.verified and sync.queued events. A repeat with the
- * same payment ID changes nothing and returns the same result; a different payment ID is refused.
+ * same payment ID changes nothing and returns the current snapshots; a different payment ID is refused.
  * It does not move the order to FULFILLMENT_READY.
  */
 export async function markOrderPaid(db: QueryExecutor, args: {
   businessId: string; orderId: string; paymentId: string; amountMinor: number; currency: string;
+  squareOrderId: string; locationId: string; paymentStatus: string; environment: string;
 }): Promise<MarkOrderPaidResult> {
   const result = await row<{ result: MarkOrderPaidResult }>(db,
-    'select private.mark_order_paid($1,$2,$3,$4,$5) as result',
-    [args.businessId,args.orderId,args.paymentId,args.amountMinor,args.currency]);
+    'select private.mark_order_paid($1,$2,$3,$4,$5,$6,$7,$8,$9) as result',
+    [args.businessId,args.orderId,args.paymentId,args.amountMinor,args.currency,args.squareOrderId,args.locationId,args.paymentStatus,args.environment]);
   return result.result;
 }
-/** Square reported a final failed payment. PAYMENT_PENDING to PAYMENT_FAILED; a repeat is a no-op; paid orders are refused. */
+/** Square reported a final failed payment. PAYMENT_PENDING to PAYMENT_FAILED; a repeat is a no-op; obsolete observations on paid orders return the current order. */
 export function markOrderPaymentFailed(db: QueryExecutor, args: {
-  businessId: string; orderId: string; paymentId: string; reason: string;
+  businessId: string; orderId: string; paymentId: string; reason: string; amountMinor: number; currency: string;
+  squareOrderId: string; locationId: string; paymentStatus: string; environment: string;
 }): Promise<OrderRow> {
-  return row(db, 'select * from private.mark_order_payment_failed($1,$2,$3,$4)',
-    [args.businessId,args.orderId,args.paymentId,args.reason]);
+  return row(db, 'select * from private.mark_order_payment_failed($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+    [args.businessId,args.orderId,args.paymentId,args.reason,args.amountMinor,args.currency,args.squareOrderId,args.locationId,args.paymentStatus,args.environment]);
 }
 /**
- * Moves every RUNNING step in the business whose lease is older than staleAfterMs (database clock,
- * at least 60000) to NEEDS_REVIEW, moving the subject as a failed step would. Returns the moved steps.
+ * Moves every RUNNING step in the business past its renewable deadline (database clock).
+ * staleAfterMs (at least 60000) supplies the fallback age for legacy rows without a deadline to NEEDS_REVIEW, moving the subject as a failed step would. Returns the moved steps.
  */
 export async function recoverStaleExecutions(db: QueryExecutor, args: {
   businessId: string; staleAfterMs: number;
@@ -170,4 +172,58 @@ export async function enableRuntimeLogin(adminClient: QueryExecutor, password: s
     // Some drivers echo the statement in errors. Do not propagate credential-bearing errors.
     throw new Error('Could not enable runtime login');
   }
+}
+
+export interface BookingRow {
+  id: string; business_id: string; call_id: string | null; status: string; google_event_id: string | null;
+  [column: string]: unknown;
+}
+export interface FactRow {
+  id: string; business_id: string; status: string; version: number; value: unknown;
+  [column: string]: unknown;
+}
+export interface WorkerLease {
+  businessId: string; executionId: string; workerId: string; attempt: number;
+}
+export interface CheckoutReferences { squareOrderId: string; paymentLinkId: string; url: string }
+
+/** Stores the provider checkout response and its state event under the current lease. */
+export function saveCheckout(db: QueryExecutor, args: WorkerLease & CheckoutReferences): Promise<OrderRow> {
+  return row(db, 'select * from private.save_checkout($1,$2,$3,$4,$5,$6,$7)',
+    [args.businessId,args.executionId,args.workerId,args.attempt,args.squareOrderId,args.paymentLinkId,args.url]);
+}
+export function fulfillOrder(db: QueryExecutor, args: { businessId: string; orderId: string }): Promise<OrderRow> {
+  return row(db, 'select * from private.fulfill_order($1,$2)', [args.businessId,args.orderId]);
+}
+/** Applies the event, completes the calendar execution and enqueues reporting atomically. */
+export function verifyBooking(db: QueryExecutor, args: WorkerLease & { googleEventId: string }): Promise<BookingRow> {
+  return row(db, 'select * from private.verify_booking($1,$2,$3,$4,$5)',
+    [args.businessId,args.executionId,args.workerId,args.attempt,args.googleEventId]);
+}
+export function renewExecutionLease(db: QueryExecutor, args: WorkerLease & { durationMs: number }): Promise<ExecutionRow> {
+  if (!Number.isFinite(args.durationMs)) throw new RangeError('durationMs must be finite');
+  return row(db, "select * from private.renew_execution_lease($1,$2,$3,$4,$5::double precision * interval '1 millisecond')",
+    [args.businessId,args.executionId,args.workerId,args.attempt,args.durationMs]);
+}
+/** Provider lookup evidence is a server assertion. A safe retry explicitly proves no write occurred. */
+export function resolveExecution(db: QueryExecutor, args: {
+  businessId: string; executionId: string; status: 'SUCCEEDED' | 'QUEUED' | 'FAILED';
+  externalRef?: string | null; nothingWritten: boolean; checkout?: CheckoutReferences;
+}): Promise<ExecutionRow> {
+  return row(db, 'select * from private.resolve_execution($1,$2,$3,$4,$5,$6)',
+    [args.businessId,args.executionId,args.status,args.externalRef ?? null,args.nothingWritten,args.checkout ? JSON.stringify(args.checkout) : null]);
+}
+export function renewSyncLease(db: QueryExecutor, args: {
+  businessId: string; syncJobId: string; workerId: string; attempt: number; durationMs: number;
+}): Promise<SyncJobRow> {
+  if (!Number.isFinite(args.durationMs)) throw new RangeError('durationMs must be finite');
+  return row(db, "select * from private.renew_sync_lease($1,$2,$3,$4,$5::double precision * interval '1 millisecond')",
+    [args.businessId,args.syncJobId,args.workerId,args.attempt,args.durationMs]);
+}
+export async function recoverStaleSyncJobs(db: QueryExecutor, args: { businessId: string }): Promise<SyncJobRow[]> {
+  return (await db.query('select * from private.recover_stale_sync_jobs($1)', [args.businessId])).rows as SyncJobRow[];
+}
+export function applyFactUpdate(db: QueryExecutor, args: WorkerLease): Promise<FactRow> {
+  return row(db, 'select * from private.apply_fact_update($1,$2,$3,$4)',
+    [args.businessId,args.executionId,args.workerId,args.attempt]);
 }
