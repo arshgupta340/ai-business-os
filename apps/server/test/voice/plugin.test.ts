@@ -20,7 +20,7 @@ afterEach(async () => {
   app = undefined;
 });
 
-async function build(opts: { resolution?: LiveAgentResolution; facts?: () => Promise<FactsSnapshot>; menu?: () => Promise<CatalogItem[]>; menuTimeoutMs?: number; validator?: VoicePluginOptions['twilioValidator']; rootWebsocket?: boolean } = {}) {
+async function build(opts: { resolution?: LiveAgentResolution; facts?: () => Promise<FactsSnapshot>; menu?: () => Promise<CatalogItem[]>; menuTimeoutMs?: number; validator?: VoicePluginOptions['twilioValidator']; rootWebsocket?: boolean; tokenTtlMs?: number } = {}) {
   const calls = fakeCalls();
   let resolution = opts.resolution ?? live;
   const liveAgent = { resolve: vi.fn(async () => resolution) };
@@ -41,7 +41,7 @@ async function build(opts: { resolution?: LiveAgentResolution; facts?: () => Pro
   app = Fastify();
   // The app may register the WebSocket plugin at the root; the voice plugin then reuses it.
   if (opts.rootWebsocket !== false) await app.register(websocket);
-  await app.register(voicePlugin, { publicServerUrl: `${PUBLIC_URL}/`, liveAgent, facts, ...(menu ? { menu } : {}), ...(opts.menuTimeoutMs !== undefined ? { menuTimeoutMs: opts.menuTimeoutMs } : {}), calls, events, toolsetFactory, twilioValidator, openaiSocketFactory, messageChannel: 'surge', logger, twilioBusinessId: 'biz_pizza_01' });
+  await app.register(voicePlugin, { publicServerUrl: `${PUBLIC_URL}/`, liveAgent, facts, ...(menu ? { menu } : {}), ...(opts.menuTimeoutMs !== undefined ? { menuTimeoutMs: opts.menuTimeoutMs } : {}), calls, events, toolsetFactory, twilioValidator, openaiSocketFactory, messageChannel: 'surge', logger, twilioBusinessId: 'biz_pizza_01', ...(opts.tokenTtlMs ? { tokenTtlMs: opts.tokenTtlMs } : {}) });
   await app.ready();
   const a = app;
   const post = (signature = 'good', form = FORM) =>
@@ -97,11 +97,53 @@ describe('voice plugin: POST /webhooks/twilio/voice', () => {
   it('a paused agent gets the spoken refusal', async () => {
     for (const r of [{ state: 'paused' } as const, { ...live, spec: specWith(pizzaSpecV2, { status: 'paused' }) }]) {
       const t = await build({ resolution: r });
-      expect((await t.post()).body).toContain('<Say>');
-      expect(t.calls.startCall).not.toHaveBeenCalled();
+      const res = await t.post();
+      expect(res.body).toContain('<Say>');
+      expect(res.body).not.toContain('<Stream');
+      expect(t.openaiSocketFactory).not.toHaveBeenCalled();
       await t.app.close();
       app = undefined;
     }
+  });
+
+  // Issue #95 item 6 and API.md section 4: the paused path records the call as started and ended.
+  it('a paused agent: the call is recorded as started and then ended completed, with no stream credential', async () => {
+    const ids = { businessId: 'biz_pizza_01', agentId: 'agt_pizza_01', agentVersionId: 'agv_pizza_01_v2' };
+    for (const r of [{ state: 'paused', ...ids } as const, { ...live, spec: specWith(pizzaSpecV2, { status: 'paused' }) }]) {
+      const t = await build({ resolution: r });
+      const res = await t.post();
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toContain('<Say>Sorry, this line is not taking calls right now.');
+      expect(tokenOf(res.body)).toBeUndefined();
+      expect(t.calls.startCall).toHaveBeenCalledTimes(1);
+      expect(t.calls.startCall).toHaveBeenCalledWith({ ...ids, providerCallId: 'CA123', callerLast4: '0123' });
+      expect(t.calls.endCall).toHaveBeenCalledTimes(1);
+      expect(t.calls.endCall).toHaveBeenCalledWith('call_test_01', 'completed');
+      // No fact snapshot, toolset or model session exists for a call that only hears the closed message.
+      expect(t.facts.snapshot).not.toHaveBeenCalled();
+      expect(t.toolsetFactory).not.toHaveBeenCalled();
+      await t.app.close();
+      app = undefined;
+    }
+  });
+
+  it('a paused agent whose identity is unknown, and a number with no agent, record no call: there is nothing to end', async () => {
+    for (const r of [{ state: 'paused' } as const, { state: 'none' } as const]) {
+      const t = await build({ resolution: r });
+      expect((await t.post()).body).toContain('<Say>');
+      expect(t.calls.startCall).not.toHaveBeenCalled();
+      expect(t.calls.endCall).not.toHaveBeenCalled();
+      await t.app.close();
+      app = undefined;
+    }
+  });
+
+  it('a paused call still answers the caller when the call cannot be recorded', async () => {
+    const t = await build({ resolution: { state: 'paused', businessId: 'biz_pizza_01', agentId: 'agt_pizza_01', agentVersionId: 'agv_pizza_01_v2' } });
+    t.calls.startCall.mockRejectedValueOnce(new Error('db down'));
+    const res = await t.post();
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('<Say>Sorry, this line is not taking calls right now.');
   });
 
   it('a live spec with a write capability outside its bundle is refused before the call starts', async () => {
@@ -193,6 +235,83 @@ describe('voice plugin: fact snapshot (S9, S10)', () => {
     const t = await build({ facts: async () => noHours });
     expect((await t.post()).body).toContain('cannot take orders or bookings by phone right now');
     expect(t.calls.startCall).not.toHaveBeenCalled();
+  });
+});
+
+// Issue #95 item 6: a call row was left IN_PROGRESS for ever when its stream credential was rejected
+// or never used. Every started call now ends with call.ended.
+describe('voice plugin: every started call ends (issue #95 item 6)', () => {
+  it('a credential that is never used: the call ends dropped when the credential expires', async () => {
+    const t = await build({ tokenTtlMs: 40 });
+    expect(tokenOf((await t.post()).body)).toBeDefined();
+    expect(t.calls.endCall).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(t.calls.endCall).toHaveBeenCalledWith('call_test_01', 'dropped'), { timeout: 2000 });
+    expect(t.calls.endCall).toHaveBeenCalledTimes(1);
+    expect(t.openaiSocketFactory).not.toHaveBeenCalled();
+  });
+
+  it('a socket that never sends start: the call ends dropped when the credential expires', async () => {
+    const t = await build({ tokenTtlMs: 40 });
+    await t.post();
+    const ws = await t.app.injectWS('/ws/phone');
+    await vi.waitFor(() => expect(t.calls.endCall).toHaveBeenCalledWith('call_test_01', 'dropped'), { timeout: 2000 });
+    ws.terminate();
+  });
+
+  it('the right token with the wrong CallSid: the stream is refused and the call ends failed', async () => {
+    const t = await build();
+    const token = tokenOf((await t.post()).body);
+    const ws = await t.app.injectWS('/ws/phone');
+    const closed = new Promise<void>((r) => ws.on('close', () => r()));
+    ws.send(JSON.stringify({ event: 'start', start: { callSid: 'CA999', streamSid: 'MZ1', customParameters: { streamToken: token } } }));
+    await closed;
+    await vi.waitFor(() => expect(t.calls.endCall).toHaveBeenCalledWith('call_test_01', 'failed'));
+    expect(t.calls.endCall).toHaveBeenCalledTimes(1);
+    expect(t.openaiSocketFactory).not.toHaveBeenCalled();
+  });
+
+  it('the right token with no stream ID: the stream is refused and the call ends failed', async () => {
+    const t = await build();
+    const token = tokenOf((await t.post()).body);
+    const ws = await t.app.injectWS('/ws/phone');
+    const closed = new Promise<void>((r) => ws.on('close', () => r()));
+    ws.send(JSON.stringify({ event: 'start', start: { callSid: 'CA123', customParameters: { streamToken: token } } }));
+    await closed;
+    await vi.waitFor(() => expect(t.calls.endCall).toHaveBeenCalledWith('call_test_01', 'failed'));
+  });
+
+  it('a token nobody minted, or a CallSid alone, ends no call: only the holder of a call\'s token can end it', async () => {
+    const t = await build();
+    const token = tokenOf((await t.post()).body);
+    for (const streamToken of ['not-a-token', undefined]) {
+      const ws = await t.app.injectWS('/ws/phone');
+      const closed = new Promise<void>((r) => ws.on('close', () => r()));
+      ws.send(JSON.stringify({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ1', customParameters: { streamToken } } }));
+      await closed;
+    }
+    expect(t.calls.endCall).not.toHaveBeenCalled();
+    // The real stream still connects afterwards.
+    const ws = await t.app.injectWS('/ws/phone');
+    ws.send(JSON.stringify({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ1', customParameters: { streamToken: token } } }));
+    await vi.waitFor(() => expect(t.openaiSocketFactory).toHaveBeenCalledTimes(1));
+    ws.send(JSON.stringify({ event: 'stop' }));
+    await vi.waitFor(() => expect(t.calls.endCall).toHaveBeenCalledWith('call_test_01', 'completed'));
+    expect(t.calls.endCall).toHaveBeenCalledTimes(1);
+    ws.terminate();
+  });
+
+  it('a call whose stream connected in time is not ended by the expiry of its credential', async () => {
+    // A life long enough for the stream to connect on a slow machine, then a wait past its end.
+    const t = await build({ tokenTtlMs: 500 });
+    const token = tokenOf((await t.post()).body);
+    const ws = await t.app.injectWS('/ws/phone');
+    ws.send(JSON.stringify({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ1', customParameters: { streamToken: token } } }));
+    await vi.waitFor(() => expect(t.openaiSocketFactory).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 700));
+    expect(t.calls.endCall).not.toHaveBeenCalled();
+    ws.send(JSON.stringify({ event: 'stop' }));
+    await vi.waitFor(() => expect(t.calls.endCall).toHaveBeenCalledWith('call_test_01', 'completed'));
+    ws.terminate();
   });
 });
 

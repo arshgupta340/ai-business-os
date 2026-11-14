@@ -147,6 +147,16 @@ type FactConflict = {
   state: "open" | "resolved";
   resolvedFactId?: string; resolvedBy?: string; resolvedAt?: string; createdAt: string;
 };
+// Menu item drafts: the shapes the extraction writes (apps/server/src/builder/extraction/sanitize.ts and conflicts.ts).
+//   BusinessFact, kind "menu_item":
+//     value: { itemName: string; variationName?: string; priceMinor: number; currency: "USD" }
+//     key:   the item name and the variation name, each in lower case with every run of other characters
+//            turned into "_", joined by ":" ("margherita:large"); the item name alone when the menu gives no variation
+//   FactConflict, kind "menu_item": the key of its draft, and two candidates
+//     the upload: { factId, sourceType: "upload", sourceRef, value: the draft's value }
+//     Square:     { sourceType: "square", sourceRef: the cat_ id, value: { itemName, variationName, priceMinor, currency } }
+//   No candidate value names a Square variation ID. Match a conflict to a catalog variation by the two names
+//   or by sourceRef. The fixture conflict cfl_pizza_01 also carries value.variationId, an extra field only it has.
 type FileRecord = {
   id: string; businessId: string; name: string; // the original file name
   mime: "application/pdf" | "image/png" | "image/jpeg" | "image/webp" | "text/csv"
@@ -569,6 +579,18 @@ Task S-03 creates these in `packages/contracts/fixtures/`. Every file validates 
 | `timeline.booking.jsonl` | One `ActivityEvent` per line, `proposal.created` to `booking.verified` |
 
 `materializeFixtures(now)` from `@abos/contracts/fixtures` returns a deep copy. Approvals and expiry, quotes, calls and event occurrence times keep their distance from `FIXTURE_NOW`. Pickups, booking slots, availability alternatives and busy blocks keep their authored weekday and local time in the business timezone, including across daylight saving changes. Each authored local day moves to the nearest matching weekday, with pending pickups in the future and pending bookings beyond minimum notice. Related slots and busy blocks share that date. Every approval hash is recomputed; cart hashes and idempotency keys stay unchanged. `materializeBusyBlocks(now)` supplies the same shifted calendar to the mock toolset. `shiftTimeline(timeline, startAt)` and `materializeTimeline(timeline, startAt)` retain their elapsed-time replay behavior. Short worked examples follow; the fixture files carry every line. Tax is illustrative; Square computes the real value.
+
+Rules the fixture world keeps (issue #103; `fixtures/issue103.test.ts` checks each on the stored fixtures and after `materializeFixtures` at several clocks):
+
+- One call per order and per booking. No `callId` is shared.
+- `Booking.startUtc`, `Booking.endUtc` and `Order.fulfillment.pickupAt` are written in `toISOString()` form, the form of the approval payload (section 4) and of the rows the server returns. A screen can compare them with the payload as text. Other fixture timestamps drop `.000`.
+- An execution in `FAILED` or `NEEDS_REVIEW` has an `errorCode`, because `execution.failed` requires one. The two fixture rows in `NEEDS_REVIEW` carry `INTEGRATION_UNAVAILABLE`, the code the executor writes when a message outcome is unknown.
+- `allActivityEvents` is the stored history: nothing in it is later than `FIXTURE_NOW`. `factConflictResolvedEvent` is the event of a resolve response and is exported on its own, because `cfl_pizza_01` is open in the stored world.
+- A `FileRecord` lists every draft and every conflict that came from it, and its `extraction.completed` event has the same counts.
+- A Sheets sync job is created at or after the verified payment of its order.
+- Additive only: every ID and every stored hash of `hashes.generated.ts` stays as it is (`fixtures/baseline-103.ts`). The lists the database seed reads (`pizzaVerifiedFacts`, `barberFacts`, the two seeded agents and their versions) hold only verified, seedable records.
+- `messageChannel: "qr_only"` together with a `messageRecipient` is valid (`ord_demo_02`): the caller gave consent, the business sends no messages, the message step is `SKIPPED`. `qr_only` without a recipient is a caller who declined (`ord_demo_qr`). A screen reads `messageChannel` before it says where a link goes.
+- After `materializeFixtures(now)` the five pending approvals have 4 to 9 minutes left, because each expires 10 minutes after it was created. A demo that runs longer calls `materializeFixtures` again.
 
 ```jsonl
 {"id":"evt_p01","businessId":"biz_pizza_01","type":"call.started","correlationId":"call_p01","actorType":"provider","occurredAt":"2026-11-14T19:00:00Z","payload":{"callId":"call_p01","agentId":"agt_pizza_01","agentVersionId":"agv_pizza_01_v1","channel":"phone","callerLast4":"0123"}}

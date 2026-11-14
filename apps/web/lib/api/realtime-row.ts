@@ -10,8 +10,9 @@
  * so only those go into the feed's `events` list.
  *
  * A row can have a known type and still fail to parse: status events written
- * by the database are stored as { subjectId, from, to }, and only the REST
- * activity route fills in orderId, bookingId and callId.
+ * before migration 0005 are stored as { subjectId, from, to }, and only the
+ * REST activity route fills in orderId, bookingId and callId for them. Rows
+ * the current server writes all parse (test/real-server/flows.test.ts).
  */
 import type { QueryClient } from "@tanstack/react-query";
 import { activityEventFromRow, ActivityEventTypeSchema, type ActivityEvent } from "@abos/contracts";

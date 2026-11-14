@@ -75,6 +75,20 @@ export function pendingGoodbyeInstruction(template: AgentSpec['template'], chann
   return `Server status: still pending. Say: "No problem. The shop will review your order, and if they approve it, the payment link will come by ${channelWord(channel)} to the number ending in {last4}. Nothing is charged unless you pay on that link. Thanks for calling ${sentence(businessName)} Goodbye." Then stop.`;
 }
 
+/**
+ * Issue #95 item 8: the call reached its cap on tool calls. The goodbye, after which the server ends the
+ * call. It claims a request went to the shop only when one was stored on this call.
+ */
+export function toolLimitGoodbyeInstruction(businessName: string, sentToShop: boolean): string {
+  return `Server status: this call has reached its limit and cannot continue. Do not call any tool. Say: "I am sorry, I cannot continue with this call.${sentToShop ? ' The shop will review the request I already sent.' : ''} Please call back, or ask the shop directly. Thanks for calling ${sentence(businessName)} Goodbye." Then stop.`;
+}
+
+/** Issue #95 item 8: the call reached its cap on proposals. The call goes on; no further request can be sent. */
+export function proposalLimitInstruction(template: AgentSpec['template'], sentToShop: boolean): string {
+  const tool = template === 'appointment_booker' ? 'propose_booking' : 'propose_order';
+  return `Server status: no more requests can be sent to the shop on this call. Do not call ${tool} again. Say: "I am sorry, I cannot send another request on this call.${sentToShop ? ' The shop will review what I already sent.' : ''} If you need a change, please call back or ask the shop directly."`;
+}
+
 /** The order wait script (FLOWS 3.1), with and without message consent. */
 export function orderWaitScript(channel: MessageChannelSetting): { consented: string; declined: string } {
   // The total was just read back, so it is not repeated here.

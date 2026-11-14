@@ -2,30 +2,48 @@
 // agent's pinned version in text with the REAL read and propose tools. It creates a `calls` row
 // with channel `test_console`, so `agentVersionId` always comes from the call (SPEC 2.9).
 //
+// What it shares with the phone path (issue #95 item 10), so a simulated call test proves it:
+// - the session capability check (voice/relay.ts checkSessionCapabilities): a pinned spec the phone
+//   would refuse starts no simulated call;
+// - the phone prompt (voice/prompt.ts buildInstructions), built from the pinned spec. Two text-only
+//   lines follow it: the plain-speech rule, and, once the call has a proposal, the note below;
+// - the real toolset, the approval engine and the cap on proposals per call.
+// What it does NOT cover: the Twilio webhook and stream credential, audio and barge-in, the Realtime
+// voice model (this runs the builder's text model), the lines the relay injects (owner decision, wait,
+// goodbye), the phone's cap of tool calls per call (here the cap is per turn), and the fact snapshot
+// taken at the webhook. It also has one check the phone does not: the caller's text is matched against
+// a fixed list before the model runs (checkCallerMessage). The phone worker reads no transcript.
+//
 // Why a small runner here: the builder's MockTextRunner refuses any toolset that is not the mock
 // one (AC-03), which is right for preview and test, so it cannot be reused for the real toolset.
-// This runner reuses the builder's exported pieces instead (the AgentModel interface and its two
-// implementations, agentInstructions, checkCallerMessage and refusalReply), without editing them.
+// This runner reuses the builder's exported pieces (the AgentModel interface and its two
+// implementations, checkCallerMessage and refusalReply), without editing them.
 //
 // It can never skip approval: the model reaches only the seven read and propose tools, a propose
 // tool only stores a proposal and opens a PENDING approval, and nothing here can decide one.
 import {
-  ENDPOINTS, ToolNameSchema, toolsForCapabilities, AgentSpecSchema,
-  type AgentSpec, type AgentRunResponse, type CallStage, type CapabilityId, type ToolContext, type ToolName,
+  ENDPOINTS, ToolNameSchema, AgentSpecSchema,
+  type AgentSpec, type AgentRunResponse, type CallStage, type CapabilityId, type MessageChannelSetting, type ToolContext, type ToolName,
 } from '@abos/contracts';
 import type { FastifyInstance } from 'fastify';
 import type { AgentModel } from '../../builder/runner/agent-model';
 import { checkCallerMessage, refusalReply } from '../../builder/runner/guardrails';
-import { agentInstructions } from '../../builder/runner/text-runner';
 import type { Db } from '../../db/index';
 import { AppError } from '../../errors';
 import { emitActivity } from '../../policy/activity';
 import type { RealToolset } from '../../tools/real/types';
-import { nextStage } from '../../voice/relay';
+import { buildInstructions } from '../../voice/prompt';
+import { DEFAULT_LIMITS, checkSessionCapabilities, nextStage } from '../../voice/relay';
 import { PLAIN_SPEECH_RULE, plainSpeech } from './plain';
 import type { CallsStore } from '../../compose/ports';
 
 const MAX_TOOL_CALLS_PER_TURN = 8;
+/**
+ * Issue #95 item 8: the phone path's cap on proposals per call, here too. A turn is bounded by the cap
+ * above, but a call has any number of turns. The count is read from the proposals the database holds
+ * for the call, so it survives a restart, which the in-memory session does not.
+ */
+const MAX_PROPOSALS_PER_CALL = DEFAULT_LIMITS.maxProposals;
 
 /**
  * Live run 2026-11-14: turns carry only spoken text, so after propose_order the model no longer saw its
@@ -41,6 +59,16 @@ export function proposalSentNote(template: AgentSpec['template'], stage: CallSta
 }
 const MAX_SESSIONS = 200;
 
+/**
+ * The instructions for one simulated turn: the phone prompt for the pinned spec, unchanged, then the
+ * text-only lines (issue #95 item 10). A simulated call test therefore exercises the prompt a phone
+ * call gets, on a text model.
+ */
+export function simCallInstructions(spec: AgentSpec, facts: { businessName: string; messageChannel: MessageChannelSetting }, stage: CallStage): string {
+  const sentNote = proposalSentNote(spec.template, stage);
+  return `${buildInstructions(spec, facts)}\n${PLAIN_SPEECH_RULE}${sentNote ? `\n${sentNote}` : ''}`;
+}
+
 export interface SimCallDeps {
   db: Db;
   calls: CallsStore;
@@ -48,6 +76,8 @@ export interface SimCallDeps {
   toolsetFor(ctx: { businessId: string; agentVersionId: string; callId: string; capabilities: readonly CapabilityId[] }): RealToolset;
   /** The model behind an interface, so tests inject a scripted one. */
   model: AgentModel;
+  /** The server's MESSAGE_CHANNEL setting, which the phone prompt takes. */
+  messageChannel: MessageChannelSetting;
   now(): Date;
   newId(prefix: string): string;
   /** Structured logger. A refused tool is logged by name length only, never its name or arguments. */
@@ -78,6 +108,15 @@ export function registerSimCall(app: FastifyInstance, deps: SimCallDeps): void {
     let callId: string;
     let agentVersionId: string;
     let spec: AgentSpec;
+    let tools: ToolName[];
+    // The phone path's check (voice/plugin.ts at the webhook, voice/relay.ts on the socket): a pinned spec
+    // with a capability an agent may not hold is refused, not run with that capability filtered out.
+    const allowedTools = (pinnedSpec: AgentSpec, versionId: string): ToolName[] | undefined => {
+      const check = checkSessionCapabilities(pinnedSpec);
+      if (check.ok) return check.tools;
+      deps.log?.warn({ agentVersionId: versionId, unknown: check.unknown.length, notAllowed: check.notAllowed.length }, 'sim-call: agent spec has a capability that is not allowed; call refused');
+      return undefined;
+    };
     if (input.callId === undefined) {
       if (agent.state !== 'live' || typeof agent.active_version_id !== 'string') {
         throw new AppError('INVALID_STATE', 'Only a published live agent can take a simulated call.', undefined, undefined, { state: String(agent.state) });
@@ -86,6 +125,10 @@ export function registerSimCall(app: FastifyInstance, deps: SimCallDeps): void {
       if (!parsed.success) throw new AppError('INVALID_STATE', 'The published version has no valid spec.');
       spec = parsed.data;
       agentVersionId = agent.active_version_id;
+      const allowed = allowedTools(spec, agentVersionId);
+      // Refused before the call starts, as on the phone: no call row and no model turn.
+      if (!allowed) throw new AppError('INVALID_STATE', 'The published version cannot take calls: it lists a capability an agent may not hold.', undefined, false);
+      tools = allowed;
       ({ callId } = await deps.calls.startSimulatedCall({ businessId, agentId, agentVersionId }));
     } else {
       const call = (await deps.db.query(`select c.status, c.agent_version_id, c.channel, c.stage, v.spec from public.calls c
@@ -99,6 +142,14 @@ export function registerSimCall(app: FastifyInstance, deps: SimCallDeps): void {
       spec = parsed.data;
       agentVersionId = String(call.agent_version_id);
       callId = input.callId;
+      const allowed = allowedTools(spec, agentVersionId);
+      if (!allowed) {
+        // A version is immutable, so this means the call started before the check existed. The call fails, as on the socket.
+        await deps.calls.endCall(callId, 'failed');
+        sessions.delete(callId);
+        throw new AppError('INVALID_STATE', 'The pinned version cannot take calls: it lists a capability an agent may not hold.', undefined, false);
+      }
+      tools = allowed;
       if (!sessions.has(callId)) {
         sessions.set(callId, { toolset: deps.toolsetFor({ businessId, agentVersionId, callId, capabilities: spec.capabilities }), history: [], stage: call.stage as CallStage });
       }
@@ -110,7 +161,6 @@ export function registerSimCall(app: FastifyInstance, deps: SimCallDeps): void {
       sessions.set(callId, session);
     }
 
-    const tools = toolsForCapabilities(spec.capabilities);
     const ctx: ToolContext = { businessId, agentVersionId, callId, correlationId: callId };
     let response: AgentRunResponse;
 
@@ -139,16 +189,25 @@ export function registerSimCall(app: FastifyInstance, deps: SimCallDeps): void {
           return { ok: false, reason: 'CAPABILITY_NOT_ALLOWED', message: 'This agent does not have that tool.' };
         }
         const tool: ToolName = named.data;
+        if (tool === 'propose_order' || tool === 'propose_booking') {
+          const stored = (await deps.db.query(`select (select count(*) from public.orders where call_id = $1 and business_id = $2)
+            + (select count(*) from public.bookings where call_id = $1 and business_id = $2) as n`, [callId, businessId])).rows[0] as { n: string | number } | undefined;
+          if (Number(stored?.n ?? 0) >= MAX_PROPOSALS_PER_CALL) {
+            deps.log?.warn({ callId, tool, maxProposals: MAX_PROPOSALS_PER_CALL }, 'sim-call: proposal limit reached; proposal refused');
+            await emitActivity(deps.db, { id: deps.newId('evt_'), businessId, correlationId: callId, type: 'guardrail.refused', actorType: 'deployed_agent',
+              occurredAt: deps.now().toISOString(), payload: { callId, rule: 'unsupported_request', reasonCode: 'proposal_limit', toolName: tool } });
+            return { ok: false, reason: 'VALIDATION_FAILED', message: 'The limit for this call is reached. No more requests can be sent to the shop on this call.' };
+          }
+        }
         const result = await s.toolset.handler.call(tool, (rawInput ?? {}) as never, ctx);
         const stage = nextStage(spec.template, s.stage, tool, result);
         if (stage !== s.stage) { s.stage = stage; await deps.calls.updateStage(callId, stage); }
         return result;
       };
       let reply: string;
-      const sentNote = proposalSentNote(spec.template, s.stage);
       try {
         ({ reply } = await deps.model.respond({
-          instructions: `${agentInstructions(spec as Parameters<typeof agentInstructions>[0], String(agent.business_name))}\n${PLAIN_SPEECH_RULE}${sentNote ? `\n${sentNote}` : ''}`,
+          instructions: simCallInstructions(spec, { businessName: String(agent.business_name), messageChannel: deps.messageChannel }, s.stage),
           history: s.history, message: input.message, tools, now: deps.now(), executeTool,
         }));
       } catch {

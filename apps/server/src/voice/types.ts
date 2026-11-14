@@ -8,7 +8,8 @@ export type { FactsSnapshot };
 /** Which published agent version answers a phone number (SPEC 2.9 `live_agent`, P-06). */
 export type LiveAgentResolution =
   | { state: 'none' }
-  | { state: 'paused' }
+  /** The agent the number points at is not live. Its identity, when known, lets the refused call be recorded (API.md 4). */
+  | { state: 'paused'; businessId?: string | undefined; agentId?: string | undefined; agentVersionId?: string | undefined }
   | { state: 'live'; businessId: string; businessName: string; agentId: string; agentVersionId: string; spec: AgentSpec };
 
 export interface LiveAgentPort {
@@ -146,6 +147,10 @@ export type RelayLimits = {
   toolTimeoutMs?: number | undefined;
   /** Model responses waiting for tool work. More are answered as unavailable. */
   maxPendingResponses: number;
+  /** Issue #95 item 8: function calls the model may make on one call, whatever their name. More are refused and recorded. */
+  maxToolCalls: number;
+  /** Proposals one call may store: distinct approvals, plus proposals whose result is unknown. More are refused and recorded. */
+  maxProposals: number;
   /** Unacknowledged marks before the call fails for back-pressure. */
   maxPendingMarks: number;
   /** Bytes queued on the Twilio socket before the call fails for back-pressure. */

@@ -1,11 +1,15 @@
 import {readItem, removeItem, writeItem, type KeyValueStorage} from '@/lib/storage';
-import type {Owner} from './owner';
+import {DEMO_OWNER, type Owner} from './owner';
 
 export const MOCK_SESSION_STORAGE_KEY = 'abos.mockSession';
 
 type StoredMockSession = {owner: Owner};
 
-/** Reads the mock session. Returns null if absent or malformed. */
+/**
+ * Reads the mock session. Returns null if absent or malformed. A session
+ * stored before owners had an id gets the demo owner's id, since mock mode
+ * has only that owner.
+ */
 export function readMockSession(storage: KeyValueStorage | null): Owner | null {
   const raw = readItem(storage, MOCK_SESSION_STORAGE_KEY);
   if (!raw) return null;
@@ -13,7 +17,8 @@ export function readMockSession(storage: KeyValueStorage | null): Owner | null {
     const parsed = JSON.parse(raw) as Partial<StoredMockSession> | null;
     const owner = parsed?.owner;
     if (owner && typeof owner.email === 'string' && typeof owner.displayName === 'string') {
-      return {email: owner.email, displayName: owner.displayName};
+      const id = typeof owner.id === 'string' && owner.id ? owner.id : DEMO_OWNER.id;
+      return {id, email: owner.email, displayName: owner.displayName};
     }
     return null;
   } catch {
