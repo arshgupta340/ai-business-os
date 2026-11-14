@@ -57,7 +57,7 @@ export type DbWebhooks = {
   recoverNow(): Promise<number>;
 };
 
-export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync): DbWebhooks {
+export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, hooks: { afterJob?(): void } = {}): DbWebhooks {
   const { env, db, providers, interim, log } = deps;
   const base = env.PUBLIC_SERVER_URL?.replace(/\/+$/, '');
   const missing = [
@@ -96,6 +96,8 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync): 
       }
       done.add(webhookId);
       await interim.markWebhookProcessed({ webhookId }).catch(() => false);
+      // A payment that just verified has a Sheets job waiting: let the executor pick it up now.
+      hooks.afterJob?.();
     } finally {
       pending.delete(webhookId);
     }

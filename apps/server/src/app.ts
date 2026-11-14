@@ -1,7 +1,7 @@
 // The one place every route group is registered. Dependencies come from the composition root
 // (compose/index.ts); tests pass overrides through the same options.
 import { randomUUID } from 'node:crypto';
-import { ERROR_CODE_INFO, type ErrorCode } from '@abos/contracts';
+import { ERROR_CODE_INFO, WEBHOOK_ENDPOINTS, type ErrorCode } from '@abos/contracts';
 import cors from '@fastify/cors';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { healthRoutes } from './api/health';
@@ -13,6 +13,7 @@ import { composeServer, type ComposeOptions, type ComposedServer } from './compo
 import type { Env } from './env';
 import { AppError, type ErrorEnvelope } from './errors';
 import { voicePlugin } from './voice/plugin';
+import { telemetryPlugin } from './telemetry/index';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -98,8 +99,21 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
   await app.register(builderPlugin, composed.builder);
 
   // Phone calls (B-15). Off, with a log line naming the missing settings, when a key is absent.
+  // When it is off, the voice webhook answers 503 (Twilio retries later) and /ws/phone does not exist.
   if (composed.voice.ok) await app.register(voicePlugin, composed.voice.options);
-  else app.log.warn({ missing: composed.voice.missing }, 'phone voice is off: missing settings');
+  else {
+    app.log.warn({ missing: composed.voice.missing }, 'phone voice is off: missing settings');
+    await app.register(async (off) => {
+      // Own parser scope: the body is never read, whatever its content type.
+      off.removeAllContentTypeParsers();
+      off.addContentTypeParser('*', (_request, _payload, done) => done(null, undefined));
+      off.post(WEBHOOK_ENDPOINTS.twilioVoice.path, async (request, reply) => reply.code(503).send({
+        code: 'INTEGRATION_UNAVAILABLE', message: 'Phone voice is not configured on this server.', correlationId: request.correlationId, retryable: true }));
+    });
+  }
+
+  // GET /api/telemetry (B-30). The global guard has already authenticated the owner.
+  await app.register(telemetryPlugin, composed.telemetry);
 
   // Provider webhooks (B-13 seam). The default refuses them without reading the body.
   await app.register(composed.webhooksPlugin);

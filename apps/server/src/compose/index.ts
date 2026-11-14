@@ -10,7 +10,7 @@
 //   executor and webhooks seams  -> fail-closed defaults until B-11 and B-13 land (seams.ts)
 // Tests pass overrides for the database, the token verifier, the providers and the model.
 import { randomUUID } from 'node:crypto';
-import type { MessageChannelSetting } from '@abos/contracts';
+import { ActivityEventSchema, type MessageChannelSetting } from '@abos/contracts';
 import type { FastifyPluginAsync } from 'fastify';
 // The in-memory engine in api/ports.ts is a test fake and is never wired here.
 import type { CatalogPort as RouteCatalogPort, EnginePorts } from '../api/ports';
@@ -34,6 +34,8 @@ import { buildProviders, type Providers } from './providers';
 import { createDbExecutor } from './executor';
 import { createInterimDb } from './interim-db';
 import { createDbWebhooks, type DbWebhooks } from './webhooks';
+import { createTelemetry, type TelemetryPluginOptions } from '../telemetry/index';
+import { mapRow } from '../api/rows';
 import { createProposeFactFromChat, dbAgentDraftStore, dbBuilderSessionStore, dbBusinessKnowledge, dbDraftFactStore, dbLiveAgentReader, type ProposeFactFromChat } from './builder';
 import { notWiredExecutor, notWiredWebhooks, type Executor, type ExecutorFactory, type SeamDeps, type WebhooksFactory } from './seams';
 
@@ -84,6 +86,8 @@ export interface ComposedServer {
   /** The database webhooks wiring, when it is the one in use (jobs, recovery, reconciliation). */
   webhooks: DbWebhooks | undefined;
   interim: InterimDb;
+  /** GET /api/telemetry (B-30) and the recorder modules may record into. */
+  telemetry: TelemetryPluginOptions;
   /** Background jobs: the approval expiry sweep (API 3.7) and the executor loop. */
   startJobs(): void;
   stopJobs(): Promise<void>;
@@ -128,7 +132,7 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
   const executor = (options.executor ?? defaultExecutor)(seamDeps);
   // Provider webhooks and payment reconciliation (B-13). Without a database or the signature settings
   // the routes keep the 503 default, which reads and stores nothing.
-  const webhooks = !options.webhooks && hasDb ? createDbWebhooks(seamDeps, notWiredWebhooks(seamDeps)) : undefined;
+  const webhooks = !options.webhooks && hasDb ? createDbWebhooks(seamDeps, notWiredWebhooks(seamDeps), { afterJob: () => executor.kick('') }) : undefined;
   const webhooksPlugin = options.webhooks ? options.webhooks(seamDeps) : webhooks?.plugin ?? notWiredWebhooks(seamDeps);
 
   // Routes' engine port. After an approval the executor is told to look for work.
@@ -187,10 +191,31 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       redactSecrets: [env.OPENAI_API_KEY, env.TWILIO_AUTH_TOKEN].filter((s): s is string => typeof s === 'string'),
     } }
     : { ok: false, missing: voiceMissing };
+  // Health reports the phone path as off, with the settings that keep it off (names only, never values).
+  if (!voice.ok) providers.status.twilio = { configured: false, detail: `phone voice off: missing ${voiceMissing.join(', ')}` };
+
+  // Telemetry (B-30): one in-memory recorder; approval_time is derived from activity events.
+  const telemetry = createTelemetry({ now: () => now().getTime() });
+  const telemetryOptions: TelemetryPluginOptions = {
+    recorder: telemetry,
+    async guard(request, businessId) {
+      const owner = (request as { ownerUserId?: string }).ownerUserId;
+      if (!owner) return { ok: false, code: 'UNAUTHENTICATED' };
+      const owned = await db.query('select 1 from public.businesses where id = $1 and owner_id = $2', [businessId, owner]);
+      return owned.rows.length ? { ok: true } : { ok: false, code: 'FORBIDDEN_BUSINESS' };
+    },
+    eventSource: hasDb ? {
+      async listEvents({ businessId, since, types }) {
+        const found = await db.query(`select * from public.activity_events where business_id = $1 and type = any($2::text[])
+          and ($3::timestamptz is null or occurred_at >= $3) order by occurred_at limit 5000`, [businessId, [...types], since ?? null]);
+        return found.rows.flatMap((r) => { const p = ActivityEventSchema.safeParse(mapRow(r)); return p.success ? [p.data] : []; });
+      },
+    } : undefined,
+  };
 
   let sweep: ReturnType<typeof setInterval> | undefined;
   return {
-    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, interim, now, newId,
+    env, db, verifier, engine, enginePorts, catalogSync, providers, calls, toolsetPorts, toolsetFor, agentModel, builder, proposeFactFromChat, voice, executor, webhooksPlugin, webhooks, interim, telemetry: telemetryOptions, now, newId,
     async close() { if (pool) await pool.end(); },
     startJobs() {
       if (!hasDb || sweep) return;
