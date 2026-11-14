@@ -69,7 +69,10 @@ export function CatalogSection({businessId, timezone, events}: Props) {
                 : 'Prices here are for display. Quotes always come from Square.'}
             </Text>
           </VStack>
-          <Button label="Sync from Square" isLoading={syncing} onClick={startSync} />
+          <HStack gap={2} wrap="wrap">
+            <Button label="Change a price" variant="secondary" href="/knowledge/prices" />
+            <Button label="Sync from Square" isLoading={syncing} onClick={startSync} />
+          </HStack>
         </HStack>
 
         {syncView ? (
