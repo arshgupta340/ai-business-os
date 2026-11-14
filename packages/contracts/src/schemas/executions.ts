@@ -48,15 +48,16 @@ export const MessageDispatchBaseSchema = z.object({
 });
 
 // DATA-MODEL 2.18 check: nothing is SENT or DELIVERED without the provider's message id (AGENTS rule 5).
-// Only `whatsapp_sandbox` can reach `DELIVERED`. `SENT` is the last state for every other channel.
+// Only `whatsapp_sandbox` and `agentphone` (D-12, a polled delivery status) can reach `DELIVERED`.
+// `SENT` is the last state for every other channel.
 // deliveredAt goes with DELIVERED only.
 export const MessageDispatchSchema = MessageDispatchBaseSchema.refine(
   (m) => !(m.status === 'SENT' || m.status === 'DELIVERED') || m.providerMessageId !== undefined,
   { path: ['providerMessageId'], message: 'SENT and DELIVERED need providerMessageId' },
 )
-  .refine((m) => m.status !== 'DELIVERED' || m.channel === 'whatsapp_sandbox', {
+  .refine((m) => m.status !== 'DELIVERED' || m.channel === 'whatsapp_sandbox' || m.channel === 'agentphone', {
     path: ['status'],
-    message: 'Only whatsapp_sandbox can reach DELIVERED; SENT is the last state for every other channel',
+    message: 'Only whatsapp_sandbox and agentphone can reach DELIVERED; SENT is the last state for every other channel',
   })
   .refine((m) => (m.deliveredAt !== undefined) === (m.status === 'DELIVERED'), {
     path: ['deliveredAt'],

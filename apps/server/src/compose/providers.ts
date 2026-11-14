@@ -166,6 +166,9 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
         ? [['ANDROID_GATEWAY_URL', env.ANDROID_GATEWAY_URL], ['ANDROID_GATEWAY_USERNAME', env.ANDROID_GATEWAY_USERNAME], ['ANDROID_GATEWAY_PASSWORD', env.ANDROID_GATEWAY_PASSWORD]] as [string, string | undefined][]
         : [['ANDROID_GATEWAY_API_KEY', env.ANDROID_GATEWAY_API_KEY]] as [string, string | undefined][])],
     whatsapp_sandbox: [['TWILIO_ACCOUNT_SID', env.TWILIO_ACCOUNT_SID], ['TWILIO_AUTH_TOKEN', env.TWILIO_AUTH_TOKEN]],
+    // The contract knows the agentphone channel (D-12); its provider lands with the telephony
+    // pull request. Until then the key is always reported missing, so nothing is built or sent.
+    agentphone: [['AGENTPHONE_API_KEY', undefined]],
   };
   const absent = channelKeys[messageChannel].filter(([, v]) => !v).map(([k]) => k);
   if (!env.MESSAGE_CHANNEL) status.message_channel = missing('MESSAGE_CHANNEL');
