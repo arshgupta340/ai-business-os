@@ -12,8 +12,15 @@ describe('startup runtime role check', () => {
   beforeAll(async () => { t = await createTestDb(); }, 120_000);
   afterAll(async () => { await t?.close(); });
 
-  it('passes as abos_app on the migrated test database', async () => {
-    await expect(composeServer(env, { db: t.db }).assertRuntimeRole()).resolves.toBeUndefined();
+  it('passes when the session is authenticated as abos_app', async () => {
+    // PGlite always logs in as its superuser; SET SESSION AUTHORIZATION stands in for logging in as abos_app.
+    await t.pg.exec('set session authorization abos_app');
+    try { await expect(composeServer(env, { db: t.db }).assertRuntimeRole()).resolves.toBeUndefined(); }
+    finally { await t.pg.exec('set session authorization postgres; set role abos_app'); }
+  });
+
+  it('refuses an owner session that only switched to abos_app with SET ROLE', async () => {
+    await expect(composeServer(env, { db: t.db }).assertRuntimeRole()).rejects.toThrow(/Runtime role check failed/);
   });
 
   it('refuses the migration owner (a role that can write protected tables)', async () => {
@@ -21,7 +28,7 @@ describe('startup runtime role check', () => {
       query: (text, params) => t.admin((q) => q.query(text, params)),
       transaction: (fn) => t.admin((q) => fn(q)),
     };
-    await expect(composeServer(env, { db: owner }).assertRuntimeRole()).rejects.toThrow(/not the restricted abos_app role/);
+    await expect(composeServer(env, { db: owner }).assertRuntimeRole()).rejects.toThrow(/Runtime role check failed/);
   });
 
   it('refuses when the check itself cannot run', async () => {

@@ -6,7 +6,7 @@
 // "on conflict do nothing". Only a newly inserted row is processed, after the response. Processing
 // reads the payment from Square afresh; the webhook body is never trusted for status or amount.
 import { PAYMENT_POLL_INTERVAL_MS, PAYMENT_POLL_DURATION_MS, WEBHOOK_ENDPOINTS, type ActivityEvent, type Call, type MessageChannel } from '@abos/contracts';
-import { fulfillOrder, markOrderPaid, markOrderPaymentFailed, markWebhookProcessed, updateDispatchStatus } from '@abos/db';
+import { fulfillOrder, markOrderPaid, markOrderPaymentFailed, isRetryableReceiptError, markWebhookProcessed, updateDispatchStatus } from '@abos/db';
 import type { FastifyPluginAsync } from 'fastify';
 import { verifyWebhookSignature } from '../adapters/square/index';
 import { unavailableDb, type QueryDb } from '../db/index';
@@ -240,8 +240,15 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
         if (status !== 'DELIVERED' && status !== 'FAILED') return false;
         const before = await one(db, 'select business_id, status from public.message_dispatches where id = $1', [id]);
         if (!before || before.status !== 'SENT') return false;
-        const after = await updateDispatchStatus(db, { businessId: String(before.business_id), dispatchId: id, status });
-        return after.status === status;
+        try {
+          const after = await updateDispatchStatus(db, { businessId: String(before.business_id), dispatchId: id, status });
+          return after.status === status;
+        } catch (error) {
+          // The send step is still QUEUED or RUNNING: the receipt is deferred. Throwing leaves the webhook
+          // row unprocessed, so stored-row recovery applies it later, also after a restart.
+          if (isRetryableReceiptError(error)) log.info({ job: 'webhook', dispatchId: id }, 'delivery receipt deferred until the send step finishes');
+          throw error;
+        }
       },
     },
     activity: { write: (event) => emitActivity(db, event) },
