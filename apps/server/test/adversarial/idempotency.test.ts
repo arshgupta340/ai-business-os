@@ -122,13 +122,21 @@ describe('a worker that dies between claim and finish', () => {
       expect(await count(w, 'message_dispatches where approval_id = $1', [ids.approvalId])).toBe(1);
       expect(await count(w, "message_dispatches where approval_id = $1 and status in ('SENT','DELIVERED')", [ids.approvalId])).toBe(0);
       expect(received).toHaveLength(1);
+      // The owner's checkout view fails closed: the stuck QUEUED dispatch is shown as UNKNOWN (defect 5).
+      const view = await w.app.inject({ url: `/api/orders/${ids.orderId}/checkout?businessId=${PIZZA}`, headers: OWNER });
+      expect(view.statusCode).toBe(200);
+      expect((view.json() as { message?: { status: string } }).message?.status).toBe('UNKNOWN');
       expect(await order(w, ids.orderId)).toMatchObject({ status: 'PAYMENT_PENDING', square_payment_id: null });
       expect((await order(w, ids.orderId)).checkout_url).toMatch(/^https:\/\/sandbox\.square\.link\//);
       // One Square link by worker A (the world's Square), and no send through the world's message channel.
       expect(delta(w, before)).toEqual({ square: 1, messages: 0, calendar: 0, sheets: 0 });
     });
-    // DEFECT (see the pull request): FLOWS section 4 says an unknown send leaves the dispatch UNKNOWN.
-    // After crash recovery the step is NEEDS_REVIEW but its dispatch row stays QUEUED for good.
+    // DEFECT 5, crash case, left open: FLOWS section 4 says an unknown send leaves the dispatch UNKNOWN.
+    // After crash recovery the step is NEEDS_REVIEW but its dispatch row stays QUEUED. No routine can
+    // correct it: private.update_dispatch needs the step's live lease (gone after recovery) and
+    // private.update_dispatch_status takes only SENT, DELIVERED or FAILED. It needs a migration
+    // (private.recover_stale_executions marking the step's QUEUED dispatch UNKNOWN); migrations are frozen.
+    // Meanwhile it fails closed: nothing resends a QUEUED dispatch, and the checkout view shows it UNKNOWN.
     it.fails('the dispatch of the recovered step is recorded as UNKNOWN, not left QUEUED', async () => {
       expect((await w.t.db.query('select status from message_dispatches where approval_id = $1', [ids.approvalId])).rows).toEqual([{ status: 'UNKNOWN' }]);
     });
@@ -366,6 +374,8 @@ describe('provider timeouts and ambiguous replies', () => {
     expect(received).toEqual([s[1]!.idempotency_key]);
     expect(await count(w, "message_dispatches where approval_id = $1 and status in ('SENT','DELIVERED')", [ids.approvalId])).toBe(0);
     expect(await count(w, 'message_dispatches where approval_id = $1', [ids.approvalId])).toBe(1);
+    // Defect 5, second case: the refused result left the dispatch QUEUED. It is recorded UNKNOWN now (FLOWS 4).
+    expect((await w.t.db.query('select status from message_dispatches where approval_id = $1', [ids.approvalId])).rows).toEqual([{ status: 'UNKNOWN' }]);
     expect(await count(w, "activity_events where type = 'message.sent' and correlation_id = $1", [ids.approvalId])).toBe(0);
     expect((await order(w, ids.orderId)).status).toBe('PAYMENT_PENDING');
     expect(delta(w, before)).toEqual({ square: 1, messages: 1, calendar: 0, sheets: 0 });
