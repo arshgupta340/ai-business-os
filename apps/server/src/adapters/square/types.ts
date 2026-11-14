@@ -33,6 +33,10 @@ export interface SquareClient {
     paymentLinks: {
       /** CreatePaymentLink with an order object. It creates the Square order itself. */
       create(request: { order: Square.Order; idempotencyKey: string }): Promise<Square.CreatePaymentLinkResponse>;
+      /** RetrievePaymentLink, used only by resumeCheckout. */
+      get(request: { id: string }): Promise<Square.GetPaymentLinkResponse>;
+      /** ListPaymentLinks, used only by resumeCheckout when the link ID was never recorded. */
+      list(request: { limit?: number }): Promise<AsyncIterable<Square.PaymentLink>>;
     };
   };
   payments: {
@@ -43,8 +47,18 @@ export interface SquareClient {
   };
 }
 
+/** Type-only brand. Only `createSandboxSquareClient` produces a value of this type. */
+declare const SANDBOX_CLIENT: unique symbol;
+
+/**
+ * A real SDK client built by `createSandboxSquareClient`, so its destination is the Square sandbox host.
+ * The adapter also checks at runtime that the client came from that factory.
+ */
+export type SandboxSquareClient = SquareClient & { readonly [SANDBOX_CLIENT]: true };
+
 export interface SquareAdapterDeps {
-  client: SquareClient;
+  /** Only a client from `createSandboxSquareClient` is accepted. Tests use `createSquareAdapterForTest`. */
+  client: SandboxSquareClient;
   locationId: string;
   /** Must be exactly `sandbox` (AGENTS.md rule 4, AC-19). Anything else throws at construction. */
   environment: string;
@@ -66,19 +80,34 @@ export interface CatalogAdapter {
   quote(db: Database, businessId: string, cart: Cart): Promise<QuoteResult>;
 }
 
-export interface CheckoutInput {
-  /** The order built from the stored, approved cart (see `orderFromCart`). */
-  order: Square.Order;
-  /** The stable key from the approval (SPEC 2.9). Passed to Square unchanged. */
-  idempotencyKey: string;
-  approvedTotalMinor: Quote['totalMinor'];
-  currency: Currency;
-}
-
 export interface CheckoutResult {
   squareOrderId: string;
   paymentLinkId: string;
   url: string;
+}
+
+export interface CheckoutInput {
+  /** The order built from the stored, approved cart (see `orderFromCart`). */
+  order: Square.Order;
+  /** The stable key from the approval (SPEC 2.9). Passed to Square unchanged; never replaced. */
+  idempotencyKey: string;
+  approvedTotalMinor: Quote['totalMinor'];
+  currency: Currency;
+  /**
+   * Awaited right after CreatePaymentLink succeeds and before the total is read back (FLOWS B18), so the
+   * caller can persist the IDs first. The link must still be withheld until createCheckout resolves.
+   */
+  onLinkCreated?: (link: CheckoutResult) => Promise<void> | void;
+}
+
+export interface ResumeCheckoutInput {
+  squareOrderId: string;
+  /** When known. Without it the location's payment links are listed and matched by order ID. */
+  paymentLinkId?: string;
+  approvedTotalMinor: Quote['totalMinor'];
+  currency: Currency;
+  /** Echoed on errors only. Resume never calls a write endpoint. */
+  idempotencyKey?: string;
 }
 
 export interface VerifyPaymentInput {
@@ -91,7 +120,8 @@ export interface VerifyPaymentInput {
   };
 }
 
-export type PaymentMismatchField = 'paymentId' | 'status' | keyof VerifyPaymentInput['expected'];
+/** `refunded` is set for any refund, full or partial, so it is never confused with an amount mismatch. */
+export type PaymentMismatchField = 'paymentId' | 'status' | 'refunded' | keyof VerifyPaymentInput['expected'];
 
 export type PaymentVerification =
   | { verified: true; failedFields: [] }
@@ -108,7 +138,10 @@ export interface WebhookSignatureInput {
 }
 
 export interface CheckoutAdapter {
+  /** One CreatePaymentLink call, then a read-back of the order total. Throws SquareCheckoutError. */
   createCheckout(input: CheckoutInput): Promise<CheckoutResult>;
+  /** Reads only: finds the existing link, verifies the order total and returns the link. Throws SquareCheckoutError. */
+  resumeCheckout(input: ResumeCheckoutInput): Promise<CheckoutResult>;
   verifyPayment(input: VerifyPaymentInput): Promise<PaymentVerification>;
   /** Payment IDs from the order's tenders; lists the location's payments only when there are no tenders. */
   findPaymentForOrder(squareOrderId: string): Promise<string[]>;
@@ -126,7 +159,10 @@ export interface SquareAdapterErrorDetails {
   paymentLinkId?: string;
 }
 
-/** A typed adapter error. `code` is a contracts ErrorCode. */
+/**
+ * A typed adapter error. `code` is a contracts ErrorCode and `message` is a fixed, sanitized sentence.
+ * The provider's own error, response body, headers and token are never attached.
+ */
 export class SquareAdapterError extends Error {
   readonly code: ErrorCode;
   readonly orderState: RecoveryState | undefined;
@@ -140,5 +176,33 @@ export class SquareAdapterError extends Error {
     this.orderState = details.orderState;
     this.squareOrderId = details.squareOrderId;
     this.paymentLinkId = details.paymentLinkId;
+  }
+}
+
+/**
+ * What the caller may do after a failed checkout:
+ * - `not_created`: Square definitely did not create the link. Retrying with the same key is safe.
+ * - `unknown`: the create may have happened. Go to review (execution NEEDS_REVIEW); never retry blindly.
+ * - `created_unverified`: the link exists but its total was not verified. Withhold the link; use resumeCheckout.
+ * - `total_mismatch`: Square's total differs from the approved total. Move the order to RECOVERY_REQUIRED.
+ */
+export type CheckoutOutcome = 'not_created' | 'unknown' | 'created_unverified' | 'total_mismatch';
+
+export interface SquareCheckoutErrorDetails extends SquareAdapterErrorDetails {
+  outcome: CheckoutOutcome;
+  /** The caller's key, unchanged. Undefined only for a resume that was not given one. */
+  idempotencyKey: string | undefined;
+}
+
+/** A checkout failure that carries the key and every Square ID known so far. It never carries the link URL. */
+export class SquareCheckoutError extends SquareAdapterError {
+  readonly outcome: CheckoutOutcome;
+  readonly idempotencyKey: string | undefined;
+
+  constructor(code: ErrorCode, message: string, details: SquareCheckoutErrorDetails) {
+    super(code, message, details);
+    this.name = 'SquareCheckoutError';
+    this.outcome = details.outcome;
+    this.idempotencyKey = details.idempotencyKey;
   }
 }
