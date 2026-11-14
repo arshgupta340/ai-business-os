@@ -16,12 +16,12 @@ import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {StatusBadge} from '@/components/StatusBadge';
 import type {AgentSpec, PreviewResponse} from '@/lib/api';
+import {agentTemplateLabel} from '@/lib/labels';
 import {
   CHANNEL_LABELS,
   ESCALATION_LABELS,
   groupCapabilities,
-  SCOPE_LABELS,
-  TEMPLATE_LABELS,
+  scopeLabel,
   WRITE_POLICY_LABELS,
 } from '../../../../build/_lib/spec';
 
@@ -39,14 +39,14 @@ function Detail({label, children}: {label: string; children: ReactNode}) {
 }
 
 export function AgentDetails({spec, phoneLine}: {spec: Partial<AgentSpec>; phoneLine: string}) {
-  const scopes = (spec.knowledgeScopes ?? []).map((s) => SCOPE_LABELS[s] ?? s);
+  const scopes = (spec.knowledgeScopes ?? []).map(scopeLabel);
   return (
     <Card>
       <VStack gap={3}>
         <Heading level={2}>The agent</Heading>
         <Detail label="Name">{spec.name || NOT_SET}</Detail>
         <Detail label="Goal">{spec.goal || NOT_SET}</Detail>
-        <Detail label="Template">{spec.template ? TEMPLATE_LABELS[spec.template] : NOT_SET}</Detail>
+        <Detail label="Template">{spec.template ? agentTemplateLabel(spec.template) : NOT_SET}</Detail>
         <Detail label="Channel">{spec.channel ? `${CHANNEL_LABELS[spec.channel]}. ${phoneLine}` : NOT_SET}</Detail>
         {spec.greeting ? <Detail label="Greeting">{spec.greeting}</Detail> : null}
         <Detail label="Knowledge it can use">{scopes.length ? scopes.join(', ') : NOT_SET}</Detail>

@@ -1,4 +1,5 @@
 import {describe, expect, it} from 'vitest';
+import {ERROR_TEXT} from '@/lib/error-text';
 import {ApiError, type Agent, type AgentSpec, type LiveAgent} from '@/lib/api';
 import {
   answersNumber,
@@ -115,7 +116,7 @@ describe('errorView', () => {
     expect(errorView(err('UNAUTHENTICATED'), 'load').needsSignIn).toBe(true);
     expect(errorView(err('FORBIDDEN_BUSINESS'), 'load')).toMatchObject({forbidden: true, message: 'You do not have access to this business.'});
     expect(errorView(err('NOT_FOUND'), 'load')).toMatchObject({notFound: true, message: 'Not found in this business.'});
-    expect(errorView(err('INTEGRATION_UNAVAILABLE', {provider: 'openai'}, true), 'change')).toMatchObject({message: 'openai is not responding.', canRetry: true});
-    expect(errorView(err('INTERNAL', undefined, true), 'load')).toMatchObject({message: 'Server text.', canRetry: true, correlationId: 'c1'});
+    expect(errorView(err('INTEGRATION_UNAVAILABLE', {provider: 'openai'}, true), 'change')).toMatchObject({message: 'OpenAI is not responding.', canRetry: true});
+    expect(errorView(err('INTERNAL', undefined, true), 'load')).toMatchObject({message: ERROR_TEXT.INTERNAL, canRetry: true, correlationId: 'c1'});
   });
 });

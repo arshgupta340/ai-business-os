@@ -3,41 +3,35 @@
 import {HStack} from '@astryxdesign/core/HStack';
 import {Link} from '@astryxdesign/core/Link';
 import {isMockMode} from '@/lib/env';
-import type {WebhookProvider} from '@abos/contracts';
 import {useIntegrationsHealth, type IntegrationHealth, type IntegrationProvider} from '@/lib/api';
 import {useBusiness} from '@/lib/session';
-import {readableLabel, statusView} from '@/lib/status';
+import {PROVIDER_LABELS, providerLabel} from '@/lib/labels';
+import {statusView} from '@/lib/status';
 import {StatusBadge, type StatusTone} from '@/components/StatusBadge';
 
 export type ConnectionHealthStatus = {label: string; tone: StatusTone};
 
-/** Owner-facing provider names, in the order the health record lists them. */
-export const PROVIDER_LABELS: Record<IntegrationProvider, string> = {
-  square: 'Square',
-  twilio: 'Twilio',
-  openai: 'OpenAI',
-  google_calendar: 'Google Calendar',
-  google_sheets: 'Google Sheets',
-  message_channel: 'Message channel',
+/**
+ * Every provider with a health card, in the order the health record lists
+ * them. Typed on the contract, so a provider added to the contract and not
+ * listed here fails the typecheck. Names come from PROVIDER_LABELS in
+ * '@/lib/labels', the one provider map of the app.
+ */
+const HEALTH_PROVIDER_ORDER: Record<IntegrationProvider, number> = {
+  square: 0,
+  twilio: 1,
+  openai: 2,
+  google_calendar: 3,
+  google_sheets: 4,
+  message_channel: 5,
 };
 
-/**
- * Providers that send webhooks and have no health card, so they are not in
- * PROVIDER_LABELS. PROVIDER_LABELS stays the list of health cards.
- */
-const WEBHOOK_ONLY_PROVIDER_LABELS: Record<Exclude<WebhookProvider, IntegrationProvider>, string> = {
-  agentphone: 'AgentPhone',
-};
+export const HEALTH_PROVIDERS: readonly IntegrationProvider[] = (Object.keys(HEALTH_PROVIDER_ORDER) as IntegrationProvider[]).sort(
+  (a, b) => HEALTH_PROVIDER_ORDER[a] - HEALTH_PROVIDER_ORDER[b],
+);
 
-/**
- * The owner-facing name of a provider key from the health record or from a
- * webhook. A key this app does not know, as a later contract version may add,
- * shows in a readable form and never as the raw key.
- */
-export function providerLabel(provider: string): string {
-  const labels: Record<string, string> = {...WEBHOOK_ONLY_PROVIDER_LABELS, ...PROVIDER_LABELS};
-  return typeof provider === 'string' && Object.hasOwn(labels, provider) ? labels[provider] : readableLabel(provider, 'Unknown provider');
-}
+// Kept as exports of this file for the screens that import them from here.
+export {PROVIDER_LABELS, providerLabel};
 
 export type HealthSummary = {
   /** The worst state among the providers whose state this app knows. */
@@ -62,7 +56,7 @@ export type HealthSummary = {
 export function summarizeHealth(health: IntegrationHealth): HealthSummary {
   const record: Record<string, {state?: unknown} | undefined> = health;
   // Every provider this app knows, then any other key the server sent.
-  const keys = [...new Set([...Object.keys(PROVIDER_LABELS), ...Object.keys(record)])];
+  const keys = [...new Set([...HEALTH_PROVIDERS, ...Object.keys(record)])];
   const entries = keys.map((key) => ({name: providerLabel(key), state: record[key]?.state}));
   const degraded = entries.filter((e) => e.state === 'degraded').map((e) => e.name);
   const disconnected = entries.filter((e) => e.state === 'disconnected').map((e) => e.name);

@@ -12,7 +12,8 @@ import {VStack} from '@astryxdesign/core/VStack';
 import {StatusBadge} from '@/components/StatusBadge';
 import type {ApprovalRequest, BusinessFact} from '@/lib/api';
 import {statusView} from '@/lib/status';
-import {formatHours, sourceTypeLabel} from '../../knowledge/_components/knowledge-model';
+import {factSourceLabel} from '@/lib/labels';
+import {formatHours} from '../../knowledge/_components/knowledge-model';
 import {checkHoursInput, hoursRows, initialHoursInput, type HoursInput, type HoursRowModel} from '../_lib/settings-model';
 import {EditNotice} from './EditNotice';
 import {RequestError} from './RequestError';
@@ -78,7 +79,7 @@ function HoursDayRow({
           <Text weight="medium">{row.label}</Text>
           <Text>{verified ? formatHours(verified.value) : 'Not set'}</Text>
           {verified ? (
-            <Text type="supporting">{`${sourceTypeLabel(verified.sourceType)}, version ${verified.version}`}</Text>
+            <Text type="supporting">{`${factSourceLabel(verified.sourceType)}, version ${verified.version}`}</Text>
           ) : null}
         </VStack>
         <HStack gap={2} vAlign="center">

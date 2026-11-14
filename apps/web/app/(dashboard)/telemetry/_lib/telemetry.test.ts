@@ -75,9 +75,9 @@ describe('metricView', () => {
     expect(enough.countText).toBe(`Based on ${LOW_SAMPLE_THRESHOLD} samples.`);
   });
 
-  it('shows an unknown metric by its raw name with no goal', () => {
+  it('shows an unknown metric in a readable form with no goal', () => {
     const v = metricView({name: 'model_cost', p50Ms: 10, p95Ms: 20, count: 30});
-    expect(v.label).toBe('model_cost');
+    expect(v.label).toBe('Model cost');
     expect(v.isKnown).toBe(false);
     expect(v.description).toBeUndefined();
     expect(v.goal).toBeUndefined();

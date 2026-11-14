@@ -6,6 +6,7 @@ import type {ReactNode} from 'react';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import * as api from '@/lib/api/client';
 import {BusinessProvider} from '@/lib/session';
+import {ERROR_TEXT} from '@/lib/error-text';
 import {
   approvalBookingPending,
   approvalFactEditPending,
@@ -204,12 +205,13 @@ describe('states around the decision', () => {
     expect(await screen.findByText('Pepperoni, Large')).toBeTruthy();
   });
 
-  it('shows the server reason when a decision fails, with a retry for a retryable failure', async () => {
+  it('shows the sentence for the error code when a decision fails, never the server message, with a retry for a retryable failure', async () => {
     mockControls.simulateRequestFailure?.({path: '/api/approvals', method: 'POST', code: 'INTEGRATION_UNAVAILABLE', message: 'Square is not answering.'});
     renderDecision(PENDING);
     fireEvent.click(await screen.findByRole('button', {name: 'Approve'}));
     expect(await screen.findByText('The decision did not go through')).toBeTruthy();
-    expect(screen.getByText('Square is not answering.')).toBeTruthy();
+    expect(screen.getByText(ERROR_TEXT.INTEGRATION_UNAVAILABLE)).toBeTruthy();
+    expect(screen.queryByText('Square is not answering.')).toBeNull();
     expect(screen.getByRole('button', {name: 'Try again'})).toBeTruthy();
     expect(screen.queryByText('The actions are now running.')).toBeNull();
   });

@@ -1,10 +1,11 @@
 import {describe, expect, it} from 'vitest';
+import {ERROR_TEXT} from '@/lib/error-text';
+import {guardrailLabel} from '@/lib/labels';
 import {ApiError, type FactConflict} from '@/lib/api';
 import {
   approvalHref,
   blockingConflicts,
   draftProblems,
-  guardrailLabel,
   publishErrorView,
   scenarioLabel,
   simCallGate,
@@ -224,7 +225,8 @@ describe('publishErrorView with the real builder answers', () => {
     );
     expect(view.issues).toEqual(['greeting: Required']);
     expect(view.fixes).toEqual([]);
-    expect(view.message).toBe('The agent spec is not complete.');
+    // The main text is the sentence for the code. The server message is not shown.
+    expect(view.message).toBe(ERROR_TEXT.VALIDATION_FAILED);
   });
 
   it('names every provider that is not connected, with the Integrations labels', () => {
