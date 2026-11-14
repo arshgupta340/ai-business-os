@@ -330,6 +330,36 @@ A background job sets past-due approvals to `EXPIRED` and emits `approval.expire
 
 `state` is `connected`, `degraded` or `disconnected` (CONTRACTS.md). `square.environment` is always `"sandbox"`; the server will not start otherwise (AC-19).
 
+### 3.12 Added at the contract freeze (issue #56)
+
+The UI lead's review of every screen found these missing. All are in `packages/contracts` (task S-02).
+
+| Endpoint | Owner | Tier | Returns | Screens |
+|---|---|---|---|---|
+| `GET /api/businesses/:id/catalog` | Arsh | MUST | `{ items: CatalogItem[], syncedAt }`. Items are grouped, each with its `variations` array. | Knowledge review, price edit |
+| `GET /api/calls?businessId=&agentId=&since=&limit=&cursor=` | Arsh | MUST | `Page<Call>` | Overview, Agent details, Live operations |
+| `GET /api/calls/:id?businessId=` | Arsh | MUST | `Call` | Live operations |
+| `POST /api/conflicts/:id/resolve?businessId=` | Saina | MUST | `{ conflict: FactConflict }` | Knowledge review |
+| `GET /api/telemetry?businessId=&since=` | Arsh | SHOULD | `{ metrics: [{ name, p50Ms, p95Ms, count }] }` | Telemetry panel |
+| `POST /api/orders/:id/cancel?businessId=` | Arsh | SHOULD | `{ order: Order }` | Live operations |
+| `POST /api/executions/:id/resolve?businessId=` | Arsh | SHOULD | `{ execution: ActionExecution }` | Live operations |
+
+Details:
+- `POST /api/conflicts/:id/resolve` takes `{ "resolution": "keep_authoritative" }`. It marks the conflict `resolved` and the draft fact `superseded`. It writes nothing external, so it needs no approval. Choosing the uploaded value over a Square price is not a fact edit: it is a price change and goes through `POST /api/businesses/:id/catalog/prices/propose` (SHOULD). Until that exists, the screen tells the owner to change the price in Square and sync.
+- `POST /api/executions/:id/resolve` takes `{ "action": "retry" | "abandon" }`. It covers a step in `NEEDS_REVIEW`, a booking in `RETRY_REQUIRED` and a message in `UNKNOWN`. A retry reuses the original idempotency key. This and the cancel route are proposal P-19 in `docs/SPEC.md`. Until they exist, leave these buttons out.
+- There is no "mark ready" route. The server sets `FULFILLMENT_READY` itself.
+- Telemetry metric names: `call_answer_latency`, `first_audio`, `tool_latency`, `approval_time`, `webhook_delay`.
+
+Two fields are added to the response of `POST /api/builder/sessions/:id/messages`:
+- `unsupportedRequests: string[]`, always present and possibly empty. Each entry is one thing the owner asked for that no registered capability covers.
+- `proposedChange?: { approvalId, bundleType }`, present when the turn created a `fact_edit` or `price_edit` approval. The UI opens the confirm dialog for that approval.
+
+`Business` carries `contact: { phone?, email?, address? }`. The business location is `contact.address`.
+
+Response shapes have named schemas in `packages/contracts`, so the UI never redefines one: `Business`, `Agent`, `AgentVersion`, `PreviewResponse`, `PublishResponse`, `BuilderTurnResponse`, `FactsListResponse`, `OrderCheckout`, and the `Page<T>` envelope `{ items, nextCursor? }`.
+
+`GET /api/live-agent` returns `phoneNumber` and `businessId` always. `agentId` and `agentVersionId` are absent when no agent answers the number.
+
 ## 4. Webhooks (owner: Arsh)
 
 Webhooks are called by providers, never by the browser, and carry no Supabase JWT. Each one verifies the signature on the raw body, deduplicates, persists, enqueues a job and responds fast. Slow work (Square API reads, state transitions, events) runs in the job. Fastify keeps the raw body for `/webhooks/*` with a content-type parser that stores the buffer before parsing. Only signature-verified events are stored in `webhook_events`, so a forged request can never claim a real event ID. A request that fails verification gets `401 SIGNATURE_INVALID` and writes one `webhook.rejected` activity event and nothing else (SPEC 2.9).

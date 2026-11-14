@@ -204,6 +204,8 @@ The PRD's endpoint list stands, with these changes. `docs/API.md` is the full li
 | Added | `POST /api/agents/:id/rollback` (SHOULD) |
 | Added | `POST /api/businesses/:id/catalog/prices/propose` (SHOULD; creates a `price_edit` approval) |
 | Added | Single-resource reads: `GET /api/businesses`, `/api/files/:id`, `/api/builder/sessions/:id`, `/api/agents/:id`, `/api/approvals/:id`, `/api/orders/:id`, `/api/bookings/:id` |
+| Added at the contract freeze | `GET /api/businesses/:id/catalog`, `GET /api/calls`, `GET /api/calls/:id`, `POST /api/conflicts/:id/resolve` |
+| Added at the contract freeze, SHOULD | `GET /api/telemetry`, `POST /api/orders/:id/cancel`, `POST /api/executions/:id/resolve` (P-19) |
 | Removed | `GET /api/activity/stream` (P-16) |
 | Narrowed | `PATCH /api/businesses/:id` changes name, contact and settings only. Facts change through `POST /api/businesses/:id/facts/propose`. |
 | Narrowed | `/webhooks/twilio/status` handles call status, and message status only when the channel is `whatsapp_sandbox`. |
@@ -252,6 +254,12 @@ These settle names and numbers that more than one doc uses.
 | Catalog sync events | A catalog sync writes `sync.*` events with `target: "catalog"`. It is not a `sync_jobs` row. Only Sheets uses `sync_jobs`. |
 | Live agent route | `GET` and `PUT /api/live-agent` are Arsh's, because the phone worker reads that table. Publish (Saina's) can make an agent live by calling the function that route exports. |
 | Fields that are also columns | Where a JSON field is stored in a column, the column's name decides the field's name. Enum values and object shapes follow `docs/CONTRACTS.md`. |
+| Business location | `Business.contact` is `{ phone?, email?, address? }`. The location is `contact.address`. |
+| Resolving a conflict | Keeping the authoritative value (for a price, Square's) marks the conflict `resolved` and the draft fact `superseded`, with no approval, because nothing external is written. Preferring the uploaded price is a price change (`price_edit`, SHOULD). |
+| Builder turn response | It always carries `unsupportedRequests: string[]`, and carries `proposedChange: { approvalId, bundleType }` when the turn created an approval. |
+| Live agent, empty case | When no agent answers the number, `LiveAgent` has `phoneNumber` and `businessId` only. |
+| Square key length | Square's reference caps the idempotency key at 45 characters for `CreatePayment` and 192 for `CreatePaymentLink`. Use the full key for the payment link and its first 45 characters for `CreatePayment` (the fallback path only). |
+| Message wording | A customer message ends with the link on its own, with no punctuation after it, so a phone cannot fold a full stop into the link. |
 | Tie-breakers | For a field name no ruling covers, `docs/CONTRACTS.md` wins. For a path or an error code, `docs/API.md` wins. For a table or column name, `docs/DATA-MODEL.md` wins. |
 
 ## 3. Architecture
