@@ -123,7 +123,8 @@ describe('Build an Agent', () => {
     expect(nav.get()).toMatch(/^session=bld_/);
     expect(screen.getByRole('button', {name: 'Book haircut appointments for my barbershop'})).toBeTruthy();
     expect(screen.getByRole('button', {name: 'Continue'}).getAttribute('aria-disabled')).toBe('true');
-    expect(screen.getByRole('button', {name: 'Voice input is not available yet'}).getAttribute('aria-disabled')).toBe('true');
+    // The test browser has no WebRTC, so the voice control shows its unsupported state and stays off.
+    expect(screen.getByRole('button', {name: /does not support voice/}).getAttribute('aria-disabled')).toBe('true');
   });
 
   it('resumes the session from the URL without creating a new one', async () => {
