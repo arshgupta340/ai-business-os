@@ -3,7 +3,7 @@ import type { AgentSpec } from '@abos/contracts';
 import { InMemoryAgentDraftStore, type AgentRecord } from '../session/stores';
 import { createPublishStores } from './index';
 import { KeyedLock } from './lock';
-import { InMemoryAgentVersionStore, InMemoryLiveAgentStore, type AgentVersionRecord } from './stores';
+import { InMemoryAgentVersionStore, InMemoryLiveAgentStore, toVersionView, type AgentVersionRecord } from './stores';
 
 const SPEC = {
   id: 'agt_t1',
@@ -52,6 +52,15 @@ describe('InMemoryAgentVersionStore', () => {
     expect(await store.maxVersion('biz_pizza_01', 'agt_t1')).toBe(1);
     expect(await store.maxVersion('biz_pizza_01', 'agt_other')).toBe(0);
     expect('update' in store || 'delete' in store).toBe(false);
+  });
+});
+
+describe('toVersionView', () => {
+  it('sends the author name only when the store loaded one', () => {
+    expect(toVersionView(version()).createdByName).toBeUndefined();
+    expect('createdByName' in toVersionView(version())).toBe(false);
+    expect(toVersionView(version({ createdByName: 'Demo Owner' })).createdByName).toBe('Demo Owner');
+    expect('createdByName' in toVersionView(version({ createdByName: '' }))).toBe(false);
   });
 });
 
