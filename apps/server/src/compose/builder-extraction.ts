@@ -61,6 +61,11 @@ function fileFromRow(r: Row, failureReason: string | undefined): StoredFile {
  * transaction, moving the old row's draft facts to the new file. Any other call that would need bytes
  * this process no longer holds answers INVALID_STATE (`setState` back to PENDING) or lets the builder
  * mark the file FAILED (`readBytes` returns undefined).
+ *
+ * Two uploads of the same new content at once both miss the `for update` lookup (it cannot lock a row
+ * that does not exist yet), so the second insert hits the unique index (business_id, sha256). That
+ * unique violation answers the same INVALID_STATE with the winner's fileId, and the loser's bytes are
+ * not held.
  */
 export function dbFileStore(db: Db, options: { abandonedAfterMs?: number } = {}): FileStore {
   const abandonedAfterSeconds = Math.ceil((options.abandonedAfterMs ?? ABANDONED_EXTRACTION_MS) / 1000);
@@ -76,11 +81,20 @@ export function dbFileStore(db: Db, options: { abandonedAfterMs?: number } = {})
   const cannotRunAgain = (r: Row) => !holds(String(r.business_id), String(r.id))
     && (r.extraction_state === 'FAILED' || ((r.extraction_state === 'PENDING' || r.extraction_state === 'EXTRACTING') && r.old === true));
 
+  /** A unique violation (23505, as policy/engine.ts maps it) on the sha index means another upload of this content won: answer INVALID_STATE with its fileId. */
+  const duplicateUpload = async (error: unknown, businessId: string, sha256: string): Promise<unknown> => {
+    const code = error && typeof error === 'object' && 'code' in error ? String((error as { code: unknown }).code) : '';
+    if (code !== '23505') return error;
+    const winner = await bySha(db, businessId, sha256);
+    return winner ? new AppError('INVALID_STATE', 'This file is already uploaded.', undefined, false, { fileId: String(winner.id) }) : error;
+  };
+
   return {
     async put(file, bytes) {
       const f = file.record;
       // Bytes of an extraction that never reported an end (its state write failed) are not kept forever.
       for (const [id, h] of held) if (Date.now() - h.at > abandonedAfterSeconds * 1000) release(id);
+      try {
       await db.transaction(async (tx) => {
         const prior = await bySha(tx, f.businessId, f.sha256, 'for update');
         let moved: string[] = [];
@@ -95,6 +109,9 @@ export function dbFileStore(db: Db, options: { abandonedAfterMs?: number } = {})
         [f.id, f.businessId, file.storagePath, f.name, f.mime, f.sha256, f.sizeBytes, f.extractionState, file.uploadedBy, f.createdAt]);
         if (moved.length > 0) await tx.query('update public.business_facts set file_id = $3 where business_id = $1 and id = any($2::text[])', [f.businessId, moved, f.id]);
       });
+      } catch (error) {
+        throw await duplicateUpload(error, f.businessId, f.sha256);
+      }
       held.set(f.id, { businessId: f.businessId, bytes: Buffer.from(bytes), at: Date.now() });
       if (file.failureReason !== undefined) reasons.set(f.id, file.failureReason);
     },

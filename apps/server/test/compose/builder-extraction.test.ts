@@ -5,6 +5,7 @@ import type { BusinessFact, FactConflict } from '@abos/contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { StoredFile } from '../../src/builder/extraction/stores';
 import { dbCatalogReader, dbConflictStore, dbExtractionEventSink, dbExtractionOptions, dbFileStore, dbUploadFactStore } from '../../src/compose/builder-extraction';
+import type { Db } from '../../src/db/index';
 import { AppError } from '../../src/errors';
 import { currentRole } from '../support/db';
 import { createHarness } from '../api/harness';
@@ -109,6 +110,37 @@ describe('extraction stores on Postgres', () => {
       await store.setState('biz_a', 'file_t4', 'EXTRACTED');
       expect(await store.put(file('file_t4c', bytes), bytes).catch((e: unknown) => e)).toMatchObject({ code: 'INVALID_STATE' });
       expect(await rows('select id from files where business_id = $1 and sha256 = $2', ['biz_a', sha(bytes)])).toEqual([{ id: 'file_t4' }]);
+    });
+
+    it('a duplicate upload that loses the race to the unique index answers INVALID_STATE with the winner', async () => {
+      // PGlite has one session, so the race is simulated: the loser's locked lookup by hash misses, as it
+      // does when the winner's row is not committed yet, and its insert then meets the winner's row.
+      const racing: Db = {
+        query: (text, params) => h.db.query(text, params),
+        transaction: (fn) => h.db.transaction((tx) => fn({
+          query: (text, params) => (/for update/.test(text) ? Promise.resolve({ rows: [] }) : tx.query(text, params)) as ReturnType<typeof tx.query>,
+        })),
+      };
+      const bytes = Buffer.from('%PDF-1.4 the same new file uploaded twice at once');
+      await dbFileStore(h.db).put(file('file_t6', bytes), bytes);
+      const loser = dbFileStore(racing);
+      const lost = await loser.put(file('file_t6b', bytes), bytes).catch((e: unknown) => e);
+      expect(lost).toBeInstanceOf(AppError);
+      expect(lost).toMatchObject({ code: 'INVALID_STATE', retryable: false, details: { fileId: 'file_t6' } });
+      expect(await rows('select id from files where business_id = $1 and sha256 = $2', ['biz_a', sha(bytes)])).toEqual([{ id: 'file_t6' }]);
+      expect(await rows('select id from files where id = $1', ['file_t6b'])).toEqual([]);
+      // The losing upload's bytes are not held.
+      expect(await loser.readBytes('biz_a', 'file_t6b')).toBeUndefined();
+      // The same content in another business is not a duplicate.
+      await loser.put(file('file_t6c', bytes, 'biz_b'), bytes);
+      expect(await rows('select id from files where business_id = $1 and sha256 = $2', ['biz_b', sha(bytes)])).toEqual([{ id: 'file_t6c' }]);
+    });
+
+    it('a unique violation that is not a duplicate upload is passed through unchanged', async () => {
+      const bytes = Buffer.from('%PDF-1.4 a new file whose id is already taken');
+      const taken = await dbFileStore(h.db).put(file('file_t1', bytes), bytes).catch((e: unknown) => e);
+      expect(taken).not.toBeInstanceOf(AppError);
+      expect(taken).toMatchObject({ code: '23505' });
     });
 
     it('a file left in flight by a process that is gone is replaced only once it is old', async () => {
