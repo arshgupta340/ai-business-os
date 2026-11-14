@@ -33,6 +33,7 @@ This is the master spec. It amends the PRD (`docs/PRD.md`). Where this file and 
 | D-09 | Scope is the full PRD P0 list and all twenty acceptance criteria. Build time is not the constraint: both leads run parallel worker agents (Claude, Codex, OpenCode). Everything that ships must work. |
 
 | D-10 | The server connects to Postgres as a restricted login, `abos_app`, not as the table owner. It can read and write the application tables but cannot disable guards, truncate, or delete approvals, executions, audit events or published versions. Migrations and the operator reset use the owner connection, `DATABASE_ADMIN_URL`. The server uses `DATABASE_URL`. |
+| D-11 | The Twilio account is upgraded (pay as you go), so callers hear no trial announcement. Done by Arsh on 2026-11-13. The number is a local 10DLC number; Twilio SMS from it fails with error 30034, as expected, so D-08 stands. |
 
 Everything the PRD lists under "Confirmed by the founding team" still holds unless a row here changes it.
 
@@ -56,7 +57,6 @@ These are written into the spec so work can start. Each stays a proposal until A
 | P-14 | One owner login and two seeded businesses with a simple selector. | PRD leaves tenancy open. |
 | P-15 | Google access uses one service account, with the demo calendar and sheet shared to it. | PRD says "preconnected test credentials". |
 | P-16 | The dashboard gets live updates through Supabase Realtime on `activity_events`, which tells the UI to refetch. There is no custom SSE endpoint. | PRD `/api/activity/stream`. |
-| P-17 | Upgrade the Twilio account (about 20 US dollars) so callers do not hear the trial announcement. This is Arsh's spending decision. | Not in PRD. |
 | P-19 | Owner recovery actions are a SHOULD item (task B-32): `POST /api/orders/:id/cancel`, and `POST /api/executions/:id/resolve` with `retry` or `abandon` for a step in `NEEDS_REVIEW`, a booking in `RETRY_REQUIRED` or a message in `UNKNOWN`. Until they exist, a stuck record is cleared with the reset script. | The PRD defines the stuck states but no way out of them. |
 | P-18 | Two text ways to run an agent. `POST /api/agents/:id/test` uses mock tools only and can never cause a write (AC-03). `POST /api/agents/:id/sim-call` runs a published agent in text with the real read and propose tools, creates a `calls` row with channel `test_console`, and is labelled "simulated call" in the UI. Writes still need owner approval. Automated end-to-end tests use it, and it is the fallback if the phone path fails. | PRD has only the mock preview. |
 
