@@ -21,6 +21,8 @@ The SQL in this document was the starting point for task B-06. An independent re
 | `activity_events.agent_id` | `ON DELETE RESTRICT`. An agent with audit events cannot be deleted. | `ON DELETE SET NULL` |
 | Helper functions | Every function pins an empty `search_path`. `owns_business` lives in a `private` schema and only `authenticated` may run it. | `public.owns_business` with `search_path = public` |
 | Message dispatches | A dispatch is tied to the approval of the execution it belongs to. | No such tie |
+| Seed facts (section 6.1) | The seed takes its data from the fixtures in `@abos/contracts/fixtures`. The policy keys are `message_consent`, `min_notice` and `no_refunds_by_phone`. Some seeded facts carry the fixture source types `owner_chat` or `owner_ui`. Both agents are seeded with their fixture versions. | Different policy keys, every fact with source type `seed`, version 1 for both agents |
+| Server database role | The server connects as `abos_app` and changes approvals, steps, dispatches and sync jobs only through the checked routines in the `private` schema (migration 0004). | The server writing those tables directly |
 
 ## 1. Conventions
 
