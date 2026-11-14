@@ -2,7 +2,7 @@
  * Demo Pizza Co. (biz_pizza_01). Every time is relative to `now` so pending
  * approvals have a live countdown whenever the mock starts.
  */
-import type { AgentSpec, BusinessFact, Call, CatalogItem, Cart } from "@/lib/api/pending-contracts";
+import type { AgentSpec, BusinessFact, Call, CatalogItem, Cart, JsonValue } from "@abos/contracts";
 import { buildOrder, factEditApproval, iso, MINUTE, orderApproval } from "../builders";
 import { TIMEZONE, type MockState } from "../types";
 import { History } from "./history";
@@ -116,7 +116,7 @@ function fact(
   id: string,
   kind: BusinessFact["kind"],
   key: string,
-  value: unknown,
+  value: JsonValue,
   at: number,
   extra: Partial<BusinessFact> = {},
 ): BusinessFact {
@@ -137,7 +137,7 @@ function fact(
   };
 }
 
-export function seedPizza(state: MockState, now: number): void {
+export async function seedPizza(state: MockState, now: number): Promise<void> {
   const h = new History(state, PIZZA);
   const seedAt = now - 26 * 60 * MINUTE;
   const catalog = pizzaCatalog(now);
@@ -182,7 +182,7 @@ export function seedPizza(state: MockState, now: number): void {
     name: "menu.pdf",
     mime: "application/pdf",
     sizeBytes: 182044,
-    sha256: "4be0c1d29a7f4f0e8b3f0d6a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e",
+    sha256: "sha256:4be0c1d29a7f4f0e8b3f0d6a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e",
     extractionState: "EXTRACTED",
     draftFactIds: ["fact_pizza_menu_marg_lg", "fact_pizza_menu_pep_lg", "fact_pizza_draft_pickup"],
     conflictIds: ["cfl_pizza_01", "cfl_pizza_02"],
@@ -324,7 +324,7 @@ export function seedPizza(state: MockState, now: number): void {
 
   // ---- fact edits: APPROVED (fri), PENDING (sun), REJECTED (sat), EXPIRED (mon)
   const friAt = now - 5 * 60 * MINUTE - 2 * MINUTE;
-  const friApproval = factEditApproval({
+  const friApproval = await factEditApproval({
     id: "apv_pizza_fact_fri",
     businessId: PIZZA,
     subjectId: friV2.id,
@@ -344,7 +344,7 @@ export function seedPizza(state: MockState, now: number): void {
     expiresAt: friApproval.expiresAt,
   });
   h.decide(friApproval, "APPROVED", friApproval.id, friAt + 30_000);
-  const friExe = h.execution(friApproval, "local.fact.update", "SUCCEEDED", friAt + 31_000);
+  const friExe = await h.execution(friApproval, "local.fact.update", "SUCCEEDED", friAt + 31_000);
   h.emit("execution.started", friApproval.id, "system", friAt + 31_000, {
     executionId: friExe.id,
     approvalId: friApproval.id,
@@ -362,15 +362,17 @@ export function seedPizza(state: MockState, now: number): void {
   });
   h.emit("execution.succeeded", friApproval.id, "system", friAt + 32_000, { executionId: friExe.id, actionType: "local.fact.update" });
 
-  const factEdit = (id: string, day: string, after: unknown, at: number, end: "PENDING" | "REJECTED" | "EXPIRED") => {
+  const factEdit = async (id: string, day: string, after: JsonValue, at: number, end: "PENDING" | "REJECTED" | "EXPIRED") => {
     const current = state.facts.find((f) => f.kind === "hours" && f.key === day && f.status === "verified")!;
     const draftFact = fact(`fact_pizza_hours_${day}_d${id.slice(-2)}`, "hours", day, after, at, {
       sourceType: "owner_chat",
       status: end === "PENDING" ? "draft" : "superseded",
+      // A proposed edit is the next version of the fact (packages/contracts fixtures do the same).
+      version: current.version + 1,
       verifiedAt: undefined,
     });
     state.facts.push(draftFact);
-    const apv = factEditApproval({
+    const apv = await factEditApproval({
       id,
       businessId: PIZZA,
       subjectId: draftFact.id,
@@ -392,9 +394,9 @@ export function seedPizza(state: MockState, now: number): void {
     if (end === "REJECTED") h.decide(apv, "REJECTED", id, at + 40_000);
     if (end === "EXPIRED") h.expire(apv, id);
   };
-  factEdit("apv_pizza_fact_sat", "sat", { open: "11:00", close: "23:00" }, now - 7 * 60 * MINUTE, "REJECTED");
-  factEdit("apv_pizza_fact_mon", "mon", { closed: true }, now - 9 * 60 * MINUTE, "EXPIRED");
-  factEdit("apv_pizza_fact_sun", "sun", { open: "12:00", close: "22:00" }, now - 1 * MINUTE, "PENDING");
+  await factEdit("apv_pizza_fact_sat", "sat", { open: "11:00", close: "23:00" }, now - 7 * 60 * MINUTE, "REJECTED");
+  await factEdit("apv_pizza_fact_mon", "mon", { closed: true }, now - 9 * 60 * MINUTE, "EXPIRED");
+  await factEdit("apv_pizza_fact_sun", "sun", { open: "12:00", close: "22:00" }, now - 1 * MINUTE, "PENDING");
 
   // ---- calls and orders
   const contact = (name: string, phone: string) => ({ name, messageRecipient: phone, messageConsent: true });
@@ -412,7 +414,7 @@ export function seedPizza(state: MockState, now: number): void {
     startedAt: iso(at),
     endedAt: status === "IN_PROGRESS" ? undefined : iso(at + 4 * MINUTE),
   });
-  const orderCall = (
+  const orderCall = async (
     callId: string,
     orderId: string,
     approvalId: string,
@@ -423,7 +425,7 @@ export function seedPizza(state: MockState, now: number): void {
   ) => {
     const c = call(callId, startAt, "COMPLETED", who[1].slice(-4), channel);
     const proposedAt = h.call(c, ["CALL_STARTED", "COLLECTING", "VALIDATING", "CUSTOMER_CONFIRMED"], "order", startAt);
-    const order = buildOrder({
+    const order = await buildOrder({
       id: orderId,
       businessId: PIZZA,
       callId,
@@ -433,7 +435,7 @@ export function seedPizza(state: MockState, now: number): void {
       pickupAt: startAt + 45 * MINUTE,
       at: proposedAt,
     });
-    const approval = orderApproval(order, PIZZA_AGENT_V2, approvalId, proposedAt);
+    const approval = await orderApproval(order, PIZZA_AGENT_V2, approvalId, proposedAt);
     order.approvalId = approval.id;
     state.orders.push(order);
     state.approvals.push(approval);
@@ -444,30 +446,30 @@ export function seedPizza(state: MockState, now: number): void {
 
   // FULFILLMENT_READY, Sheets DONE
   {
-    const { order, approval, at } = orderCall("call_pizza_ready", "ord_pizza_ready", "apv_pizza_ready", CART_ONE_MARG, ["Lee", "+15555550131"], now - 180 * MINUTE);
-    h.approvedOrder(order, approval, at + MINUTE, { message: "SENT", payment: "verified", sync: "DONE", ready: true });
+    const { order, approval, at } = await orderCall("call_pizza_ready", "ord_pizza_ready", "apv_pizza_ready", CART_ONE_MARG, ["Lee", "+15555550131"], now - 180 * MINUTE);
+    await h.approvedOrder(order, approval, at + MINUTE, { message: "SENT", payment: "verified", sync: "DONE", ready: true });
   }
   // REJECTED
   {
-    const { order, approval, at } = orderCall("call_pizza_rej", "ord_pizza_rejected", "apv_pizza_rejected", CART_TWO_PEP, ["Kim", "+15555550132"], now - 150 * MINUTE);
+    const { order, approval, at } = await orderCall("call_pizza_rej", "ord_pizza_rejected", "apv_pizza_rejected", CART_TWO_PEP, ["Kim", "+15555550132"], now - 150 * MINUTE);
     h.decide(approval, "REJECTED", order.callId, at + 2 * MINUTE);
     h.orderStatus(order, "AWAITING_OWNER_APPROVAL", "REJECTED", at + 2 * MINUTE);
   }
   // APPROVAL_EXPIRED
   {
-    const { order, approval } = orderCall("call_pizza_exp", "ord_pizza_expired", "apv_pizza_expired", CART_ONE_MARG, ["Jo", "+15555550133"], now - 130 * MINUTE);
+    const { order, approval } = await orderCall("call_pizza_exp", "ord_pizza_expired", "apv_pizza_expired", CART_ONE_MARG, ["Jo", "+15555550133"], now - 130 * MINUTE);
     h.expire(approval, order.callId);
     h.orderStatus(order, "AWAITING_OWNER_APPROVAL", "APPROVAL_EXPIRED", Date.parse(approval.expiresAt));
   }
   // PAYMENT_FAILED (simulated call, declined sandbox card)
   {
-    const { order, approval, at } = orderCall("call_pizza_sim", "ord_pizza_payfail", "apv_pizza_payfail", CART_ONE_MARG, ["Ari", "+15555550134"], now - 100 * MINUTE, "test_console");
-    h.approvedOrder(order, approval, at + MINUTE, { message: "SENT", payment: "failed" });
+    const { order, approval, at } = await orderCall("call_pizza_sim", "ord_pizza_payfail", "apv_pizza_payfail", CART_ONE_MARG, ["Ari", "+15555550134"], now - 100 * MINUTE, "test_console");
+    await h.approvedOrder(order, approval, at + MINUTE, { message: "SENT", payment: "failed" });
   }
   // PAID_VERIFIED, Sheets RETRYING
   {
-    const { order, approval, at } = orderCall("call_pizza_paid", "ord_pizza_paid", "apv_pizza_paid", CART_TWO_PEP, ["Sam", "+15555550123"], now - 70 * MINUTE);
-    h.approvedOrder(order, approval, at + MINUTE, { message: "SENT", payment: "verified", sync: "RETRYING" });
+    const { order, approval, at } = await orderCall("call_pizza_paid", "ord_pizza_paid", "apv_pizza_paid", CART_TWO_PEP, ["Sam", "+15555550123"], now - 70 * MINUTE);
+    await h.approvedOrder(order, approval, at + MINUTE, { message: "SENT", payment: "verified", sync: "RETRYING" });
   }
   // A call lost before the order was confirmed (AC-18): no order, no approval
   {
@@ -478,19 +480,19 @@ export function seedPizza(state: MockState, now: number): void {
   }
   // PAYMENT_PENDING, message FAILED so the QR code is the way to pay
   {
-    const { order, approval, at } = orderCall("call_pizza_link", "ord_pizza_link", "apv_pizza_link", TIMELINE_CART, ["Max", "+15555550135"], now - 25 * MINUTE);
-    h.approvedOrder(order, approval, at + MINUTE, { message: "FAILED", payment: "pending" });
+    const { order, approval, at } = await orderCall("call_pizza_link", "ord_pizza_link", "apv_pizza_link", TIMELINE_CART, ["Max", "+15555550135"], now - 25 * MINUTE);
+    await h.approvedOrder(order, approval, at + MINUTE, { message: "FAILED", payment: "pending" });
   }
   // A guardrail refusal on a call with no order
   {
     const c = call("call_pizza_guard", now - 15 * MINUTE, "COMPLETED", "0188");
     c.stage = "COLLECTING";
     const t = h.call(c, ["CALL_STARTED", "COLLECTING"], "order", now - 15 * MINUTE);
-    h.emit("guardrail.refused", c.id, "deployed_agent", t + 10_000, { callId: c.id, rule: "no_fact_changes" });
+    h.emit("guardrail.refused", c.id, "deployed_agent", t + 10_000, { callId: c.id, rule: "no_fact_changes", reasonCode: "fact_change_forbidden" });
     h.endCall(c, t + 60_000);
   }
   // AWAITING_OWNER_APPROVAL, still pending (about 7 minutes left at start)
-  orderCall("call_pizza_pending", "ord_pizza_pending", "apv_pizza_pending", TIMELINE_CART, ["Rae", "+15555550136"], now - 5 * MINUTE);
+  await orderCall("call_pizza_pending", "ord_pizza_pending", "apv_pizza_pending", TIMELINE_CART, ["Rae", "+15555550136"], now - 5 * MINUTE);
 
   // A rejected webhook against the Square integration
   h.emit("webhook.rejected", "whk_rejected_01", "provider", now - 12 * MINUTE, { provider: "square", reason: "signature_invalid" });

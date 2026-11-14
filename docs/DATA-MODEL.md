@@ -172,7 +172,7 @@ create unique index business_facts_version
   on public.business_facts (business_id, kind, key, version) where status <> 'draft';
 ```
 
-`source_type` is the SPEC 2.9 list. Every uploaded file uses `upload`, with `file_id` set; the file type is `files.mime`. `business_facts_one_verified` enforces at most one `verified` row per business, kind and key (SPEC 2.9). An earlier verified row becomes `superseded` and stays, which is the versioned change log (AC-16). Uploads and chat only insert drafts. An approved `local.fact.update` then, in one transaction, sets the current verified row to `superseded` and turns the draft into the new verified row with the next `version` and `supersedes_id` pointing at the old row. The order of those two updates matters: supersede first, then verify, or the partial index rejects the second row.
+`source_type` is the SPEC 2.9 list. Every uploaded file uses `upload`, with `file_id` set; the file type is `files.mime`. `business_facts_one_verified` enforces at most one `verified` row per business, kind and key (SPEC 2.9). An earlier verified row becomes `superseded` and stays, which is the versioned change log (AC-16). Uploads insert drafts. A `fact_edit` either targets an existing verified row, matching its version and value to `fromVersion` and `before`, or confirms a draft subject for a new key. The new-key case requires `fromVersion` `0`, `before` `null`, a draft whose value equals `after`, and no verified row for that key. Confirmation makes the draft verified at version `1`. Migration 0005 adds support for the new-key case; until then the server returns `INVALID_STATE`. For an existing value, an approved `local.fact.update` sets that row to `superseded` and inserts the approved value as a new verified row with the next `version` and `supersedes_id` pointing at the old row. The order of those operations matters: supersede first, then insert, or the partial index rejects the second row.
 
 Keys: hours are one fact per weekday, keys `mon` to `sun`, value `{ open, close }` in local time or `{ closed: true }` (SPEC 2.7). Services are `kind = 'service'` with the `svc_` ID as key and a `ServiceOffering` as value. Draft menu items from an upload are `kind = 'menu_item'`; they come only from an upload, stay `draft`, exist only to be compared with `catalog_items` (section 5) and are never a price source (SPEC 2.9). `faq` facts serve the FAQ-only custom agent (P-13).
 
@@ -377,7 +377,7 @@ create unique index approval_requests_one_pending_per_subject
   on public.approval_requests (subject_id) where state = 'PENDING';
 ```
 
-`bundle_type` is the kind of bundle; the single step is `action_executions.action_type` (SPEC 2.3). `subject_id` is the `ord_`, `bkg_`, draft `fact_` or `cat_` ID; it has no foreign key because it points at four tables. `actor_id` is the `agv_` ID for a deployed agent and the `usr_` ID for an owner (P-09). The bundle check pins each bundle type to the exact SPEC 2.3 list. Expiry is 10 minutes (P-07, SPEC 2.9). `payload` is never updated after insert (application rule; the guarded update below does not touch it).
+`bundle_type` is the kind of bundle; the single step is `action_executions.action_type` (SPEC 2.3). `subject_id` is the `ord_`, `bkg_`, `fact_` or `cat_` ID. A `fact_edit` subject is either an existing verified fact or a draft fact for a new key. It has no foreign key because it points at four tables. `actor_id` is the `agv_` ID for a deployed agent and the `usr_` ID for an owner (P-09). The bundle check pins each bundle type to the exact SPEC 2.3 list. Expiry is 10 minutes (P-07, SPEC 2.9). `payload` is never updated after insert (application rule; the guarded update below does not touch it).
 
 The one-use rule is this guarded update. Zero rows returned means the request was already decided, has expired, or the hash the owner saw no longer matches. The server then reads the row to return the right error.
 
@@ -594,6 +594,8 @@ A row is created only when the order reaches `PAID_VERIFIED` or the booking reac
 
 ### 2.21 `activity_events`
 
+Until migration 0005, `decide_and_enqueue` and `expire_approvals` write `order.status_changed` and `booking.status_changed` with `{ subjectId, from, to }` only. An `order.status_changed` row received over Realtime does not parse with `activityEventFromRow`, because `callId` is required, so the client treats every Realtime insert as a signal to refetch. From migration 0005, the routines write the full contract payload: `orderId` or `bookingId`, `callId` when the subject has one, `from`, and `to`; call journeys use the call ID as `correlationId`. The activity list route continues filling these fields for older rows.
+
 ```sql
 create table public.activity_events (
   id             text primary key default gen_id('evt_'),
@@ -617,7 +619,7 @@ create trigger activity_events_append_only before update or delete on public.act
   for each row execute function public.activity_events_append_only();
 ```
 
-`type` has a check constraint with the full SPEC 2.5 list, so a misspelled event fails at insert. Adding a type is one `ALTER TABLE`. Append only is enforced twice: RLS gives no update or delete policy, and the trigger blocks the service role too. `TRUNCATE` fires no row triggers, so the reset script still works. The server redacts `payload` before insert: phone numbers as last four digits only, first names only, no checkout URLs, no secrets. `correlation_id` is the `call_` ID for phone journeys, the `bld_` ID for builder journeys and the `apv_` ID for fact edits (CONTRACTS.md).
+`type` has a check constraint with the full SPEC 2.5 list, so a misspelled event fails at insert. Adding a type is one `ALTER TABLE`. Append only is enforced twice: RLS gives no update or delete policy, and the trigger blocks the service role too. `TRUNCATE` fires no row triggers, so the reset script still works. The server redacts `payload` before insert: phone numbers as last four digits only, first names only, no checkout URLs, no secrets. Except for the pre-migration status events described above, `correlation_id` is the `call_` ID for phone journeys, the `bld_` ID for builder journeys and the `apv_` ID for fact edits (CONTRACTS.md).
 
 ## 3. Indexes for dashboard queries
 
@@ -701,7 +703,7 @@ PRD section 10 sets which source wins. The tables implement it like this:
 | Items, variations, prices, modifiers | Square catalog | `catalog.read` reads only `catalog_items`, which only the Square sync writes. Quotes always come from Square `CalculateOrder` (P-02), never from `catalog_items.price_minor`. |
 | Opening hours, policies, services, FAQ | Owner-verified facts | `business.facts.read` reads only rows with `status = 'verified'`, through the call's `fact_snapshot_ref`. |
 | Appointment availability | Google Calendar | `calendar.availability.read` calls free/busy live. `bookings` holds proposals and verified results, not availability. |
-| Uploads and owner chat | Proposals only | They insert `business_facts` drafts with `confidence` and `source_type`. A draft becomes verified only through an approved `fact_edit`. |
+| Uploads and owner chat | Proposals only | Uploads and new chat facts insert `business_facts` drafts with `confidence` and `source_type`. An edit to an existing verified fact stores the proposed value in a `fact_edit` approval payload, with no new draft row. |
 
 When extraction saves a draft that disagrees with an authority, it writes a `fact_conflicts` row in the same transaction. A draft `menu_item` fact is compared with `catalog_items` on normalized item and variation names, and a price difference opens a required conflict (AC-02). A draft hours, policy or service fact is compared with the current verified fact for the same kind and key. The deployed agent never reads `menu_item` facts, so it always uses the Square price. Publishing is blocked while a required conflict is `open`.
 

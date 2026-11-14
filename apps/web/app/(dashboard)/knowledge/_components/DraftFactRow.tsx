@@ -10,7 +10,7 @@ import {TextInput} from '@astryxdesign/core/TextInput';
 import {VStack} from '@astryxdesign/core/VStack';
 import {SandboxBadge} from '@/components/SandboxBadge';
 import {StatusBadge} from '@/components/StatusBadge';
-import {isApiError, useProposeFact, type ApprovalRequest, type BusinessFact, type FactConflict} from '@/lib/api';
+import {isApiError, useProposeFact, type ApprovalRequest, type BusinessFact, type FactConflict, type JsonValue} from '@/lib/api';
 import {statusView} from '@/lib/status';
 import {ApiErrorBanner} from './ApiErrorBanner';
 import {ProposalNotice} from './ProposalNotice';
@@ -56,7 +56,9 @@ export function DraftFactRow({businessId, fact, fileName, conflict, onRefetch}: 
   const send = (value: unknown, reason: string) => {
     // A draft in an open conflict is confirmed by choosing it for that conflict,
     // so the conflict closes when the owner approves the edit.
-    const body = conflict && !priceConflict ? {resolvesConflictId: conflict.id, value, reason} : {kind: fact.kind, key: fact.key, value, reason};
+    // The edited value is plain JSON from the form (ProposeFactBody.value is a JsonValue).
+    const json = value as JsonValue;
+    const body = conflict && !priceConflict ? {resolvesConflictId: conflict.id, value: json, reason} : {kind: fact.kind, key: fact.key, value: json, reason};
     propose.mutate(body, {
       onSuccess: ({approval: created}) => {
         setApproval({id: created.id, state: created.state});

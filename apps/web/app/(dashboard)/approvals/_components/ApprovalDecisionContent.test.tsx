@@ -6,7 +6,7 @@ import type {ReactNode} from 'react';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import * as api from '@/lib/api/client';
 import {BusinessProvider} from '@/lib/session';
-import {getState, mockControls, server} from '@/mocks/server';
+import {advanceMockClock, getState, mockControls, server, setApprovalExpiry} from '@/mocks/server';
 import {requests, useMockServer} from '@/mocks/test-setup';
 import {ApprovalDecisionContent} from './ApprovalDecisionContent';
 
@@ -94,8 +94,8 @@ describe('requests that cannot be acted on', () => {
   });
 
   it('locks the buttons when the countdown reaches zero while it is open', async () => {
-    const apv = getState().approvals.find((a) => a.id === 'apv_pizza_pending')!;
-    apv.expiresAt = new Date(Date.now() + 1500).toISOString();
+    // createdAt, expiresAt and the hashed payload.expiresAt move together (contract cross-field rule).
+    await setApprovalExpiry('apv_pizza_pending', Date.now() + 1500);
     renderDecision('apv_pizza_pending');
     await screen.findByRole('button', {name: 'Approve'});
     await screen.findByText('This request expired. Nothing was sent.', undefined, {timeout: 4000});
@@ -109,7 +109,7 @@ describe('decision errors', () => {
     renderDecision('apv_pizza_pending');
     const approve = await screen.findByRole('button', {name: 'Approve'});
     const oldHash = getState().approvals.find((a) => a.id === 'apv_pizza_pending')!.payloadHash;
-    mockControls.simulatePayloadChanged('apv_pizza_pending');
+    await mockControls.simulatePayloadChanged('apv_pizza_pending');
     const newHash = getState().approvals.find((a) => a.id === 'apv_pizza_pending')!.payloadHash;
     fireEvent.click(approve);
     await screen.findByText('This request changed since you opened it');
@@ -136,7 +136,7 @@ describe('decision errors', () => {
   it('expired on the server: says nothing was sent', async () => {
     renderDecision('apv_pizza_pending');
     const approve = await screen.findByRole('button', {name: 'Approve'});
-    getState().approvals.find((a) => a.id === 'apv_pizza_pending')!.expiresAt = new Date(Date.now() - 1000).toISOString();
+    advanceMockClock(11 * 60_000);
     fireEvent.click(approve);
     await screen.findByText('Expired, nothing was sent');
   });

@@ -66,7 +66,7 @@ export function PhoneNumberCard({businessId, agent, timeZone}: {businessId: stri
             {agent.state === 'paused' ? (
               <Text type="body">This agent is paused, so callers hear a short closed message and the call ends.</Text>
             ) : null}
-            <Text type="supporting">{`Set ${formatRelative(live.updatedAt, timeZone)}`}</Text>
+            {live.updatedAt ? <Text type="supporting">{`Set ${formatRelative(live.updatedAt, timeZone)}`}</Text> : null}
           </VStack>
         ) : (
           <VStack gap={1}>

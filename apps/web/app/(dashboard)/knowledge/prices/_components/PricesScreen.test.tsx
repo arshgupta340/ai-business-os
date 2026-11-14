@@ -196,6 +196,7 @@ describe('PricesScreen', () => {
 
     const apv = getState().approvals.find((a) => a.bundleType === 'price_edit' && a.state === 'PENDING')!;
     apv.state = 'EXPIRED';
+    apv.decidedAt = new Date().toISOString(); // contract: decidedAt is present on every state but PENDING
     await refetch(qc, 'approvals');
     await within(await row(PEP_LG)).findByText('Expired, price unchanged');
     expect(within(await row(PEP_LG)).getByText('$22.00')).toBeTruthy();

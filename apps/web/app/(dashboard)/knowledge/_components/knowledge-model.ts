@@ -450,7 +450,8 @@ export type CatalogSyncState = 'PENDING' | 'RUNNING' | 'RETRYING' | 'DONE' | 'FA
 export function catalogSyncState(events: readonly ActivityEvent[], jobId: string): CatalogSyncState {
   // Events are newest first. The newest event for this job decides.
   for (const event of events) {
-    if (event.payload.target !== 'catalog' || event.payload.jobId !== jobId) continue;
+    const p = event.payload as {target?: unknown; jobId?: unknown};
+    if (p.target !== 'catalog' || p.jobId !== jobId) continue;
     if (event.type === 'sync.succeeded') return 'DONE';
     if (event.type === 'sync.failed') return event.payload.final === false ? 'RETRYING' : 'FAILED';
     if (event.type === 'sync.queued') return 'PENDING';

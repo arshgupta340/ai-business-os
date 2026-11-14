@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import * as api from "@/lib/api/client";
 import { subscribeMockActivity } from "@/lib/api/mock-bridge";
-import type { ActivityEvent } from "@/lib/api/pending-contracts";
-import { getState, mockControls, whenIdle } from "./server";
+import type { ActivityEvent } from "@abos/contracts";
+import { advanceMockClock, getState, mockControls, whenIdle } from "./server";
 import { useMockServer } from "./test-setup";
 
 useMockServer();
@@ -13,7 +13,8 @@ const BARBER = "biz_barber_01";
 function record(businessId: string) {
   const seen: { event: ActivityEvent; orderStatus?: string; paymentId?: string }[] = [];
   const stop = subscribeMockActivity(businessId, (event) => {
-    const orderId = (event.payload.orderId ?? event.payload.subjectId) as string | undefined;
+    const payload = event.payload as { orderId?: string; subjectId?: string };
+    const orderId = payload.orderId ?? payload.subjectId;
     const order = getState().orders.find((o) => o.id === orderId);
     seen.push({ event, orderStatus: order?.status, paymentId: order?.squarePaymentId });
   });
@@ -70,7 +71,7 @@ describe("pizza timeline", () => {
       "sync.queued",
       "sync.succeeded",
     ]);
-    const statuses = mine.filter((s) => s.event.type === "order.status_changed" && s.event.payload.orderId).map((s) => s.event.payload.to);
+    const statuses = mine.flatMap((s) => (s.event.type === "order.status_changed" && s.event.payload.orderId ? [s.event.payload.to] : []));
     expect(statuses).toEqual([
       "AWAITING_OWNER_APPROVAL",
       "APPROVED",
@@ -88,7 +89,7 @@ describe("pizza timeline", () => {
       expect(s.orderStatus).not.toBe("PAID_VERIFIED");
       expect(s.paymentId).toBeUndefined();
     }
-    expect(mine[verifiedAt].event.payload.sandbox).toBe(true);
+    expect((mine[verifiedAt].event.payload as { sandbox?: boolean }).sandbox).toBe(true);
   });
 
   it("ends at REJECTED with no checkout when the owner rejects", async () => {
@@ -106,7 +107,7 @@ describe("pizza timeline", () => {
 
   it("ends at APPROVAL_EXPIRED when nobody decides in time", async () => {
     const { orderId, approvalId } = await mockControls.startPizzaCall();
-    getState().approvals.find((a) => a.id === approvalId)!.expiresAt = new Date(Date.now() - 1).toISOString();
+    advanceMockClock(11 * 60_000);
     expect((await api.getOrder(PIZZA, orderId)).status).toBe("APPROVAL_EXPIRED");
     expect((await api.getApproval(PIZZA, approvalId)).state).toBe("EXPIRED");
   });
@@ -160,7 +161,7 @@ describe("booking timeline", () => {
     await whenIdle();
     expect((await api.getBooking(BARBER, bookingId)).status).toBe("SLOT_CONFLICT");
     const events = (await api.listActivity(BARBER, { correlationId: callId, types: ["booking.slot_conflict"] })).items;
-    expect((events[0].payload.alternatives as unknown[]).length).toBe(3);
+    expect(events[0].type === "booking.slot_conflict" && events[0].payload.alternatives.length).toBe(3);
   });
 });
 

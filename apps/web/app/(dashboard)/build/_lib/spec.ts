@@ -4,10 +4,10 @@
  * No React here, so every rule is unit tested on its own.
  */
 import {
-  CAPABILITY_REGISTRY,
+  CAPABILITIES,
   type AgentSpec,
   type BuilderTurnResponse,
-  type CapabilityEffect,
+  type Effect,
   type CapabilityId,
 } from '@/lib/api';
 import type {Tone} from '@/lib/status';
@@ -19,7 +19,7 @@ export type CapabilityGroupKey = 'reads' | 'proposes' | 'afterApproval';
 export type CapabilityRow = {
   id: CapabilityId;
   description: string;
-  effect: CapabilityEffect;
+  effect: Effect;
 };
 
 export type CapabilityGroup = {
@@ -32,7 +32,7 @@ export type CapabilityGroup = {
   items: CapabilityRow[];
 };
 
-const GROUP_ORDER: readonly {key: CapabilityGroupKey; effects: readonly CapabilityEffect[]; title: string; description: string; tone: Tone; badge: string}[] = [
+const GROUP_ORDER: readonly {key: CapabilityGroupKey; effects: readonly Effect[]; title: string; description: string; tone: Tone; badge: string}[] = [
   {
     key: 'reads',
     effects: ['read'],
@@ -60,7 +60,7 @@ const GROUP_ORDER: readonly {key: CapabilityGroupKey; effects: readonly Capabili
 ];
 
 export function isRegisteredCapability(id: string): id is CapabilityId {
-  return Object.prototype.hasOwnProperty.call(CAPABILITY_REGISTRY, id);
+  return Object.prototype.hasOwnProperty.call(CAPABILITIES, id);
 }
 
 /**
@@ -79,7 +79,7 @@ export function groupCapabilities(ids: readonly string[] | undefined): {groups: 
       unknownCount += 1;
       continue;
     }
-    const entry = CAPABILITY_REGISTRY[id];
+    const entry = CAPABILITIES[id];
     rows.push({id, description: entry.description, effect: entry.effect});
   }
   const groups = GROUP_ORDER.map(({effects, ...group}) => ({
