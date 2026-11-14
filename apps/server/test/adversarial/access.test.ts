@@ -232,9 +232,9 @@ describe('tenant isolation', () => {
     expect(await victimSnapshot()).toEqual(before);
   });
 
-  // DEFECT (see the pull request): a NUL byte in businessId reaches the ownership query, Postgres
-  // refuses the text, and the server answers 500 INTERNAL (retryable) instead of a 4xx. Nothing leaks.
-  it.fails('a NUL byte in the business scope is refused with a 4xx, not a 500', async () => {
+  // Was DEFECT 7 in the pull request (a NUL byte reached the ownership query and answered 500). Fixed
+  // after the merge: the auth guard validates the path ID and the business scope against the contract.
+  it('a NUL byte in the business scope is refused with a 4xx, not a 500', async () => {
     const statuses: number[] = [];
     for (const url of [`/api/approvals/${ids.approvalId}?businessId=${PIZZA}%00`, `/api/orders?businessId=${PIZZA}%00`, `/api/businesses/${PIZZA}%00/facts`]) {
       const res = await w.app.inject({ url, headers: OTHER });
@@ -242,6 +242,7 @@ describe('tenant isolation', () => {
       statuses.push(res.statusCode);
     }
     expect(statuses.filter((code) => code >= 500)).toEqual([]);
+    expect(statuses).toEqual([400, 400, 400]);
   });
   it('a NUL byte in the business scope leaks nothing and changes nothing', async () => {
     const before = await victimSnapshot();
