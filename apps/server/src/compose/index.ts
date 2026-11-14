@@ -28,9 +28,11 @@ import { createRealToolset, type FactsSnapshot, type RealToolset, type RealTools
 import type { VoicePluginOptions } from '../voice/types';
 import {
   calendarAvailabilityPort, dbCallsPort, dbVoiceEventsPort, dbCatalogPort, dbFactsPort, dbLiveAgentPort, dbOrderStatusPort, engineProposalPort, squareQuotePort,
-  type CallsStore,
+  type CallsStore, type InterimDb,
 } from './ports';
 import { buildProviders, type Providers } from './providers';
+import { createDbExecutor } from './executor';
+import { createInterimDb } from './interim-db';
 import { createProposeFactFromChat, dbAgentDraftStore, dbBuilderSessionStore, dbBusinessKnowledge, dbDraftFactStore, dbLiveAgentReader, type ProposeFactFromChat } from './builder';
 import { notWiredExecutor, notWiredWebhooks, type Executor, type ExecutorFactory, type SeamDeps, type WebhooksFactory } from './seams';
 
@@ -47,8 +49,10 @@ export interface ComposeOptions {
   agentModel?: AgentModel;
   now?: () => Date;
   newId?: (prefix: string) => string;
-  // PLUG-IN B-11: pass the executor factory here, or replace `notWiredExecutor` below.
+  /** Defaults to the database executor (executor.ts) when a database is present. */
   executor?: ExecutorFactory;
+  /** Writes waiting for migration 0005. Defaults to interim-db.ts. */
+  interim?: InterimDb;
   // PLUG-IN B-13: pass the webhooks plugin factory here, or replace `notWiredWebhooks` below.
   webhooks?: WebhooksFactory;
   log?: SeamDeps['log'];
@@ -114,8 +118,10 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     ...(ctx.facts ? { factsSnapshot: ctx.facts } : {}) });
   const calls = dbCallsPort(db, newId);
 
-  const seamDeps: SeamDeps = { env, db, engine, providers, now, newId, log };
-  const executor = (options.executor ?? notWiredExecutor)(seamDeps);
+  const interim = options.interim ?? createInterimDb(db, { newId, now });
+  const seamDeps: SeamDeps = { env, db, engine, providers, interim, now, newId, log };
+  const defaultExecutor: ExecutorFactory = hasDb ? (deps) => createDbExecutor(deps, { interim: deps.interim }) : notWiredExecutor;
+  const executor = (options.executor ?? defaultExecutor)(seamDeps);
   const webhooksPlugin = (options.webhooks ?? notWiredWebhooks)(seamDeps);
 
   // Routes' engine port. After an approval the executor is told to look for work.

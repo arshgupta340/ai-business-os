@@ -19,6 +19,10 @@ export type ProviderStatus = { configured: boolean; detail: string };
 
 export interface Providers {
   square?: SquareAdapter | undefined;
+  /** The Square location the checkout order is built for (the adapter refuses any other). */
+  squareLocationId?: string | undefined;
+  /** Reads a payment's Square status (FAILED, CANCELED, ...) for a payment that did not verify. Read only. */
+  squarePaymentStatus?: ((paymentId: string) => Promise<string | undefined>) | undefined;
   calendar?: CalendarAdapter | undefined;
   /** The one demo calendar shared with the service account (P-15). */
   calendarId?: string | undefined;
@@ -52,11 +56,11 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
 
   // Square: sandbox only (AGENTS rule 4). env.ts already refuses any other SQUARE_ENVIRONMENT.
   let square: SquareAdapter | undefined;
+  let squarePaymentStatus: Providers['squarePaymentStatus'];
   if (env.SQUARE_ACCESS_TOKEN && env.SQUARE_LOCATION_ID) {
-    square = createSquareAdapter({
-      client: createSandboxSquareClient({ accessToken: env.SQUARE_ACCESS_TOKEN }),
-      locationId: env.SQUARE_LOCATION_ID, environment: env.SQUARE_ENVIRONMENT, now,
-    });
+    const client = createSandboxSquareClient({ accessToken: env.SQUARE_ACCESS_TOKEN });
+    square = createSquareAdapter({ client, locationId: env.SQUARE_LOCATION_ID, environment: env.SQUARE_ENVIRONMENT, now });
+    squarePaymentStatus = async (paymentId) => (await client.payments.get({ paymentId })).payment?.status ?? undefined;
     status.square = ok('sandbox');
   } else status.square = missing('SQUARE_ACCESS_TOKEN', 'SQUARE_LOCATION_ID');
 
@@ -108,7 +112,7 @@ export function buildProviders(env: Env, now: () => Date, overrides: Partial<Pro
   status.openai = env.OPENAI_API_KEY ? ok() : missing('OPENAI_API_KEY');
 
   return {
-    square, calendar: calendarAdapter, calendarId: env.GOOGLE_CALENDAR_ID, sheets: sheetsAdapter, sheetId: env.GOOGLE_SHEET_ID,
+    square, squareLocationId: env.SQUARE_LOCATION_ID, squarePaymentStatus, calendar: calendarAdapter, calendarId: env.GOOGLE_CALENDAR_ID, sheets: sheetsAdapter, sheetId: env.GOOGLE_SHEET_ID,
     message, messageChannel, twilioValidator, openaiSocketFactory, status,
     ...overrides,
   };
