@@ -32,7 +32,7 @@ import { createExecutor, DEFAULT_STALE_AFTER_MS } from '../executor/index';
 import { runSyncJob } from '../executor/jobs';
 import type { ExecutorDeps, MessageResult, QueuePort, StepOutcome, SubjectsPort, SyncDeps, SyncJob } from '../executor/types';
 import { emitActivity } from '../policy/activity';
-import { approvalFromRow, executionFromRow } from '../policy/engine';
+import { approvalFromRow, executionFromRow, namedConflictId } from '../policy/engine';
 import { executeCatalogSyncStep, executePriceEditStep } from '../api/prices/index';
 import type { Executor, SeamDeps } from './seams';
 
@@ -142,6 +142,24 @@ export function dbSubjects(q: QueryDb, deps: Pick<SeamDeps, 'newId' | 'now'>, le
   };
 }
 
+/**
+ * Issue #96: an approved price change that named a conflict (prices route, `resolvesConflictId`) resolves
+ * that one conflict when its last step, local.catalog.sync, succeeds, in the step's transaction: the price
+ * is in Square and in the cache. The ID is read from the stored approval row, never from a request. The
+ * update names the conflict, this business, kind menu_item, the open state and the approval's catalog row
+ * as the Square candidate, so a conflict resolved meanwhile, or about another item, is left alone. A menu
+ * item has no business_facts row, so no fact.changed is written (as for "keep the current value").
+ */
+async function resolvePriceConflict(tx: QueryDb, businessId: string, approvalId: string): Promise<void> {
+  const approval = await one(tx, "select payload, subject_id, decided_by from public.approval_requests where id = $1 and business_id = $2 and bundle_type = 'price_edit' and state = 'APPROVED'",
+    [approvalId, businessId]);
+  const conflictId = namedConflictId(approval);
+  if (!approval || !conflictId || typeof approval.decided_by !== 'string') return;
+  await tx.query(`update public.fact_conflicts set state = 'resolved', resolved_by = $3, resolved_at = pg_catalog.clock_timestamp()
+    where id = $1 and business_id = $2 and kind = 'menu_item' and state = 'open' and candidates @> $4::jsonb`,
+  [conflictId, businessId, approval.decided_by, JSON.stringify([{ sourceType: 'square', sourceRef: String(approval.subject_id) }])]);
+}
+
 const bodyHash = (body: string) => `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}`;
 const last4 = (e164: string) => e164.slice(-4);
 
@@ -226,7 +244,7 @@ export function createDbExecutor(deps: SeamDeps, options: DbExecutorOptions = {}
     },
     async finish(executionId, worker, outcome: StepOutcome) {
       await db.transaction(async (tx) => {
-        const row = await one(tx, 'select business_id, attempts from public.action_executions where id = $1', [executionId]);
+        const row = await one(tx, 'select business_id, attempts, action_type, approval_id from public.action_executions where id = $1', [executionId]);
         if (!row) throw new Error('execution not found');
         const businessId = String(row.business_id);
         const lease: WorkerLease = { businessId, executionId, workerId: worker, attempt: Number(row.attempts) };
@@ -234,12 +252,13 @@ export function createDbExecutor(deps: SeamDeps, options: DbExecutorOptions = {}
         if (outcome.apply) await outcome.apply(dbSubjects(tx, deps, lease, state));
         // verify_booking finishes the calendar step itself, in this transaction.
         if (state.finished) return;
-        await finishExecution(tx, {
+        const finished = await finishExecution(tx, {
           businessId, executionId, workerId: worker, attempt: Number(row.attempts), status: outcome.status,
           externalRef: outcome.externalRef ?? null,
           error: outcome.errorCode ? `${outcome.errorCode}${outcome.reason ? `: ${outcome.reason}` : ''}` : (outcome.reason ?? null),
           retryAt: outcome.status === 'QUEUED' ? new Date(deps.now().getTime() + (outcome.delayMs ?? 1000)) : null,
         });
+        if (finished.status === 'SUCCEEDED' && row.action_type === 'local.catalog.sync') await resolvePriceConflict(tx, businessId, String(row.approval_id));
       });
     },
     async recoverStale({ olderThan }) {

@@ -10,7 +10,7 @@
 //   executor and webhooks seams  -> fail-closed defaults until B-11 and B-13 land (seams.ts)
 // Tests pass overrides for the database, the token verifier, the providers and the model.
 import { randomUUID } from 'node:crypto';
-import { ActivityEventSchema, type MessageChannelSetting } from '@abos/contracts';
+import { ActivityEventSchema, type ErrorCode, type MessageChannelSetting } from '@abos/contracts';
 import { assertRestrictedRuntimeRole } from '@abos/db';
 import type { FastifyPluginAsync } from 'fastify';
 // The in-memory engine in api/ports.ts is a test fake and is never wired here.
@@ -249,7 +249,10 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       return providers.prices.readVariationPrice(variationId);
     } },
     approvals: { createPendingPriceEditApproval: async (input) => {
-      const r = await engine.createPriceEditApproval({ ownerUserId: input.ownerUserId, payload: input.payload, payloadHash: input.payloadHash });
+      const r = await engine.createPriceEditApproval({ ownerUserId: input.ownerUserId, payload: input.payload, payloadHash: input.payloadHash,
+        ...(input.resolvesConflictId ? { resolvesConflictId: input.resolvesConflictId } : {}) })
+        // The prices route answers an AppError with its code; a refusal of the named conflict is one.
+        .catch((error: unknown) => { throw error instanceof Error && error.name === 'PolicyError' ? new AppError((error as Error & { code: ErrorCode }).code, error.message) : error; });
       return r.kind === 'conflict' ? r : { kind: r.kind, approval: r.approval as Extract<typeof r.approval, { bundleType: 'price_edit' }> };
     } },
     now,

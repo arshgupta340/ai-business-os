@@ -82,10 +82,10 @@ describe('the paths that cannot resolve a database conflict answer clear, non-re
     expect(res.json()).toMatchObject({ code: 'VALIDATION_FAILED', retryable: false, details: { use: 'POST /api/conflicts/:id/resolve with resolution keep_authoritative' } });
   });
 
-  it('a price proposal that carries resolvesConflictId is refused with a message saying what to do', async () => {
+  it('a price proposal that carries resolvesConflictId is accepted as input; the item is looked up first (the link itself: routines.test.ts)', async () => {
     const res = await w.app.inject({ method: 'POST', url: `/api/businesses/${PIZZA}/catalog/prices/propose`, headers: OWNER, payload: { variationId: 'x', newPriceMinor: 2100, currency: 'USD', resolvesConflictId: 'cfl_use_price' } });
-    expect(res.json()).toMatchObject({ code: 'VALIDATION_FAILED', retryable: false });
-    expect(res.json().message).toMatch(/keep the current value/i);
+    expect(res.json()).toMatchObject({ code: 'NOT_FOUND', retryable: false });
+    expect((await w.t.db.query("select state from fact_conflicts where id = 'cfl_use_price'")).rows[0]).toEqual({ state: 'open' });
   });
 
   it('any other resolve body gets the redirect answer, not marked retryable', async () => {

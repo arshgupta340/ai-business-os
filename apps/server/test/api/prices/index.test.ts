@@ -63,16 +63,16 @@ describe('price proposals', () => {
       expect(approval).not.toHaveProperty('variationName');
     } finally { await app.close(); }
   });
-  it('issue #108: resolvesConflictId is in the contract, and the route still refuses it before any read', async () => {
-    const { app, deps, createPendingPriceEditApproval } = await setup();
+  it('issue #96: resolvesConflictId goes to the approval port beside the payload, never into the hashed payload', async () => {
+    const { app, createPendingPriceEditApproval } = await setup();
     try {
       expect(ENDPOINTS.proposePrice.body.safeParse({ ...body, resolvesConflictId: 'cfl_pizza_01' }).success).toBe(true);
       const response = await app.inject({ method: 'POST', url, payload: { ...body, resolvesConflictId: 'cfl_pizza_01' } });
-      expect(response.statusCode).toBe(400);
-      expect(response.json()).toMatchObject({ code: 'VALIDATION_FAILED', message: 'A price change cannot resolve a conflict yet. Change the price, sync, then keep the current value on the conflict.' });
-      expect(deps.catalog.findVariation).not.toHaveBeenCalled();
-      expect(deps.square.readVariationPrice).not.toHaveBeenCalled();
-      expect(createPendingPriceEditApproval).not.toHaveBeenCalled();
+      expect(response.statusCode).toBe(201);
+      const input = createPendingPriceEditApproval.mock.calls[0]![0];
+      expect(input.resolvesConflictId).toBe('cfl_pizza_01');
+      expect(input.payload).not.toHaveProperty('resolvesConflictId');
+      expect(response.json().approval.payload).not.toHaveProperty('resolvesConflictId');
     } finally { await app.close(); }
   });
   it('refuses an item of another business before reading Square', async () => {
@@ -85,7 +85,7 @@ describe('price proposals', () => {
       expect(createPendingPriceEditApproval).not.toHaveBeenCalled();
     } finally { await app.close(); }
   });
-  it.each([{ ...body, currency: 'EUR' }, { ...body, newPriceMinor: -1 }, { ...body, newPriceMinor: 19.5 }, { ...body, resolvesConflictId: 'cfl_other' }])('validates contract input %j', async (payload) => {
+  it.each([{ ...body, currency: 'EUR' }, { ...body, newPriceMinor: -1 }, { ...body, newPriceMinor: 19.5 }, { ...body, resolvesConflictId: 'not_a_conflict' }])('validates contract input %j', async (payload) => {
     const { app, deps } = await setup();
     try {
       expect((await app.inject({ method: 'POST', url, payload })).statusCode).toBe(400);

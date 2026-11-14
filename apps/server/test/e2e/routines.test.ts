@@ -201,6 +201,40 @@ describe('price change', () => {
     await w.settle();
     expect(state.upserts).toBe(1);
   });
+
+  // Issue #96: "use the uploaded price" in one step. The price approval names the conflict; approving it
+  // resolves that conflict when local.catalog.sync succeeds, in the step's transaction.
+  it('an approved price change that names its conflict resolves it; a conflict about another item or already resolved is refused', async () => {
+    const cat = (await w.t.db.query("select id, price_minor, square_variation_version from catalog_items where business_id = $1 and square_variation_id = 'SQ_VAR_PEP_LG'", [PIZZA])).rows[0] as
+      { id: string; price_minor: number; square_variation_version: string | number };
+    // The fake Square variation starts where the catalog cache is (the cache sync above does not read this fake).
+    Object.assign(state, { priceMinor: cat.price_minor, version: Number(cat.square_variation_version) });
+    const other = (await w.t.db.query("select id from catalog_items where business_id = $1 and square_variation_id <> 'SQ_VAR_PEP_LG' limit 1", [PIZZA])).rows[0] as { id: string };
+    const candidates = (ref: string) => JSON.stringify([{ sourceType: 'square', sourceRef: ref, value: { priceMinor: state.priceMinor } }, { sourceType: 'upload', value: { priceMinor: state.priceMinor + 250 } }]);
+    await w.t.admin((q) => q.query(`insert into public.fact_conflicts (id, business_id, kind, key, candidates, required, state) values
+      ('cfl_price_link', $1, 'menu_item', 'pepperoni:large', $2::jsonb, true, 'open'),
+      ('cfl_price_other', $1, 'menu_item', 'other:item', $3::jsonb, true, 'open')`, [PIZZA, candidates(cat.id), candidates(other.id)]));
+    const propose = (resolvesConflictId: string) => w.app.inject({ method: 'POST', url: `/api/businesses/${PIZZA}/catalog/prices/propose`, headers: OWNER,
+      payload: { variationId: 'SQ_VAR_PEP_LG', newPriceMinor: state.priceMinor + 250, currency: 'USD', resolvesConflictId } });
+    expect((await propose('cfl_price_other')).json()).toMatchObject({ code: 'VALIDATION_FAILED' });
+    expect((await propose('cfl_missing_01')).json()).toMatchObject({ code: 'NOT_FOUND' });
+    expect(await n(w, "select count(*)::int as n from approval_requests where business_id = $1 and bundle_type = 'price_edit' and state = 'PENDING'", [PIZZA])).toBe(0);
+
+    const res = await propose('cfl_price_link');
+    expect(res.statusCode, res.body).toBe(201);
+    const approval = res.json().approval as { id: string; payload: Record<string, unknown> };
+    expect(approval.payload).not.toHaveProperty('resolvesConflictId');
+    expect((await w.t.db.query('select payload->>$2 as named from approval_requests where id = $1', [approval.id, 'resolvesConflictId'])).rows[0]).toEqual({ named: 'cfl_price_link' });
+    expect((await w.t.db.query("select state from fact_conflicts where id = 'cfl_price_link'")).rows[0]).toEqual({ state: 'open' });
+    await approve(w, PIZZA, approval.id);
+    await w.settle();
+    expect((await steps(w, approval.id)).map((s) => s.status)).toEqual(['SUCCEEDED', 'SUCCEEDED']);
+    expect((await w.t.db.query("select state, resolved_by, resolved_fact_id from fact_conflicts where id = 'cfl_price_link'")).rows[0])
+      .toEqual({ state: 'resolved', resolved_by: 'usr_owner_01', resolved_fact_id: null });
+    // The other conflict is untouched, and a resolved one cannot be named again.
+    expect((await w.t.db.query("select state from fact_conflicts where id = 'cfl_price_other'")).rows[0]).toEqual({ state: 'open' });
+    expect((await propose('cfl_price_link')).json()).toMatchObject({ code: 'INVALID_STATE' });
+  });
 });
 
 describe('human fallback', () => {
