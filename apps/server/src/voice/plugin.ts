@@ -123,8 +123,13 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
     return ok(buildConnectTwiml(publicUrl, token));
   }
 
+  // HTTP parser and method errors use fixed replies. Framework URL/error logging is disabled on
+  // these credential-bearing routes, including unsupported methods.
+  app.setErrorHandler((_error, _req, reply) => reply.code(400).type('text/xml').send(buildRejectTwiml()));
+
   // B1 to B3.
-  app.post(VOICE_WEBHOOK_PATH, async (req, reply) => {
+  app.all(VOICE_WEBHOOK_PATH, { logLevel: 'silent' }, async (req, reply) => {
+    if (req.method !== 'POST') return reply.code(405).type('text/xml').send(buildRejectTwiml());
     const params = formParams(req.body);
     const signature = req.headers['x-twilio-signature'];
     let valid = false;
@@ -160,13 +165,15 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
   });
 
   // B4 to B30.
-  app.get(WS_PATH, { websocket: true }, (socket) => {
+  app.route({ method: ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD', 'TRACE'], url: WS_PATH, logLevel: 'silent', handler: async (_req, reply) => reply.code(405).type('text/xml').send(buildRejectTwiml()) });
+  app.get(WS_PATH, { websocket: true, logLevel: 'silent' }, (socket) => {
     runPhoneRelay({
       phone: adaptWs(socket),
       tokens,
       calls: opts.calls,
       events: opts.events,
       decisions: opts.decisions,
+      finishes: opts.finishes,
       toolsetFactory: opts.toolsetFactory,
       openaiSocketFactory: opts.openaiSocketFactory,
       messageChannel: opts.messageChannel,
@@ -176,6 +183,7 @@ export const voicePlugin: FastifyPluginAsync<VoicePluginOptions> = async (app, o
       redactSecrets: secrets,
       now,
       limits: opts.limits,
+      fallback: opts.fallback,
     });
   });
 };

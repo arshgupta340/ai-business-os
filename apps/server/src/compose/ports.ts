@@ -5,7 +5,7 @@
 import {
   SLOT_CONFLICT_MAX_ALTERNATIVES, AgentSpecSchema, HoursKeySchema, OrderStatusSchema, HoursValueSchema, ReadableFactKindSchema, ServiceOfferingSchema, ToolFailureReasonSchema,
   type AvailabilitySlot, type CallEndReason, type CallStage, type CallStatus, type CatalogItem, type HoursKey, type HoursValue,
-  type JsonValue, type ServiceOffering, type ToolFailureReason, type ActionExecution, type ActivityEvent,
+  type JsonValue, type ServiceOffering, type ToolFailureReason,
 } from '@abos/contracts';
 import type { Db, QueryDb } from '../db/index';
 import { AppError } from '../errors';
@@ -171,9 +171,37 @@ function toolReason(error: unknown): ToolFailureReason {
   return 'INTEGRATION_UNAVAILABLE';
 }
 
+/**
+ * Results by operation ID, so a retry of one operation returns its stored result instead of a second
+ * proposal. INTEGRATION GAP (voice NOTES 1 and 2): this is per process. Cross-process uniqueness needs a
+ * routine with a unique (business_id, call_id, operation_id), which 0005 does not have. Within one
+ * process the engine's own replay (same call and cart returns the stored pending proposal) also holds.
+ */
+const OPERATION_MEMORY = 500;
+function operationMemo() {
+  const done = new Map<string, Promise<unknown>>();
+  return <T>(input: { businessId: string; callId?: string | undefined; operationId: string }, run: () => Promise<T>): Promise<T> => {
+    const key = `${input.businessId}:${input.callId ?? ''}:${input.operationId}`;
+    const existing = done.get(key);
+    if (existing) return existing as Promise<T>;
+    const result = run();
+    done.set(key, result);
+    if (done.size > OPERATION_MEMORY) done.delete(done.keys().next().value as string);
+    return result;
+  };
+}
+
 export function engineProposalPort(engine: PolicyEngine, pinned: PinnedFacts, providers: Providers, now: () => Date = () => new Date()): ProposalPort {
+  const once = operationMemo();
   return {
-    async createOrderProposal(input) {
+    // One engine transaction stores the subject and its approval together, and refuses unless the call
+    // is this business's IN_PROGRESS call on this agent version (policy/engine.ts assertCall).
+    atomicOperations: true,
+    createOrderProposal: (input) => input.signal.aborted ? Promise.resolve({ ok: false, reason: 'INTEGRATION_UNAVAILABLE' }) : once(input, () => createOrder(input)),
+    createBookingProposal: (input) => input.signal.aborted ? Promise.resolve({ ok: false, reason: 'INTEGRATION_UNAVAILABLE' }) : once(input, () => createBooking(input)),
+  };
+  async function createOrder(input: Parameters<ProposalPort['createOrderProposal']>[0]): ReturnType<ProposalPort['createOrderProposal']> {
+    {
       try {
         const { order, approval } = await engine.createOrderProposal({
           businessId: input.businessId, callId: input.callId ?? '', agentVersionId: input.agentVersionId,
@@ -183,8 +211,10 @@ export function engineProposalPort(engine: PolicyEngine, pinned: PinnedFacts, pr
       } catch (error) {
         return { ok: false, reason: toolReason(error) };
       }
-    },
-    async createBookingProposal(input) {
+    }
+  }
+  async function createBooking(input: Parameters<ProposalPort['createBookingProposal']>[0]): ReturnType<ProposalPort['createBookingProposal']> {
+    {
       try {
         const ctx = bookingContext(await pinned(input.businessId), input.businessId, input.serviceId, providers.calendarId);
         if (!ctx) return { ok: false, reason: 'NOT_FOUND', message: 'No such service.' };
@@ -212,8 +242,8 @@ export function engineProposalPort(engine: PolicyEngine, pinned: PinnedFacts, pr
       } catch (error) {
         return { ok: false, reason: toolReason(error) };
       }
-    },
-  };
+    }
+  }
 }
 
 // ---------- order status ----------
@@ -221,11 +251,13 @@ export function engineProposalPort(engine: PolicyEngine, pinned: PinnedFacts, pr
 export function dbOrderStatusPort(db: Db): OrderStatusPort {
   return {
     async read({ businessId, orderId, callId }) {
-      const order = (await rows(db, `select id, status, call_id from public.orders where id = $1 and business_id = $2`, [orderId, businessId]))[0];
-      if (!order || (callId !== undefined && order.call_id !== callId)) return null;
+      // Scoped by business and, when given, by call in the query itself (voice NOTES 6).
+      const order = (await rows(db, `select id, business_id, status, call_id from public.orders where id = $1 and business_id = $2 and ($3::text is null or call_id = $3)`,
+        [orderId, businessId, callId ?? null]))[0];
+      if (!order || order.business_id !== businessId || (callId !== undefined && order.call_id !== callId)) return null;
       const sent = await rows(db, `select 1 from public.message_dispatches where business_id = $1 and order_id = $2 and status in ('SENT','DELIVERED') limit 1`, [businessId, orderId]);
       const status = OrderStatusSchema.parse(order.status);
-      return { orderId, status, paid: status === 'PAID_VERIFIED' || status === 'FULFILLMENT_READY', checkoutLinkSent: sent.length > 0 };
+      return { businessId, callId: String(order.call_id), orderId, status, paid: status === 'PAID_VERIFIED' || status === 'FULFILLMENT_READY', checkoutLinkSent: sent.length > 0 };
     },
   };
 }
@@ -303,40 +335,19 @@ export function dbCallsPort(db: Db, newId: (prefix: string) => string): CallsSto
 }
 
 /** webhook.rejected and guardrail.refused from the voice worker. Payloads are fixed codes. */
-export function dbVoiceEventsPort(db: Db, newId: (prefix: string) => string, now: () => Date): VoiceEventsPort {
+export function dbVoiceEventsPort(db: Db, newId: (prefix: string) => string, now: () => Date, twilioNumber?: string): VoiceEventsPort {
+  // SPEC 2.9: a rejected webhook is written against the business that owns the integration the URL
+  // belongs to. The voice webhook belongs to the Twilio number, so its owner is that number's business.
+  const twilioOwner = async () => twilioNumber
+    ? ((await rows(db, 'select business_id from public.live_agent where phone_number = $1', [twilioNumber]))[0]?.business_id as string | undefined)
+    : undefined;
   const write = (businessId: string, type: 'webhook.rejected' | 'guardrail.refused', payload: unknown, correlationId: string) =>
     emitActivity(db, { id: newId('evt_'), businessId, correlationId, type, actorType: type === 'webhook.rejected' ? 'provider' : 'system', occurredAt: now().toISOString(), payload });
   return {
-    async webhookRejected({ businessId, payload }) { if (businessId) await write(businessId, 'webhook.rejected', payload, newId('req_')); },
+    async webhookRejected({ businessId, payload }) {
+      const owner = businessId ?? await twilioOwner();
+      if (owner) await write(owner, 'webhook.rejected', payload, newId('req_'));
+    },
     async guardrailRefused({ businessId, payload }) { await write(businessId, 'guardrail.refused', payload, payload.callId ?? newId('req_')); },
   };
-}
-
-// ---------- writes served by migration 0005 routines ----------
-
-/**
- * The state changes that need one checked database routine. `interim-db.ts` implements them with the
- * 0005 wrappers (and, where no routine exists yet, an INTERIM(0005) direct write); swapping a routine
- * changes only that file.
- */
-export interface InterimDb {
-  /**
-   * Every step RUNNING under a lease claimed before `olderThan` moves to NEEDS_REVIEW (never back to
-   * QUEUED), and its subject moves as a failed step would (checkout: RECOVERY_REQUIRED, calendar:
-   * RETRY_REQUIRED). Returns the steps it moved.
-   */
-  recoverStaleExecutions(input: { olderThan: Date }): Promise<ActionExecution[]>;
-  /**
-   * All or nothing, inside the caller's transaction (the order row is already locked): refuse unless
-   * PAYMENT_PENDING or PAYMENT_FAILED; save the payment ID; PAID_VERIFIED; enqueue the one Sheets job
-   * and write sync.queued; FULFILLMENT_READY; append `events`.
-   */
-  markPaid(tx: QueryDb, input: { businessId: string; orderId: string; paymentId: string; amountMinor: number; currency: string; events: ActivityEvent[] }): Promise<void>;
-  /** All or nothing: refuse unless PAYMENT_PENDING; PAYMENT_FAILED; append `events`. */
-  markFailed(tx: QueryDb, input: { businessId: string; orderId: string; paymentId: string; events: ActivityEvent[] }): Promise<void>;
-  /**
-   * Marks a stored webhook row processed. Returns false when the role cannot record it; the caller then
-   * keeps the row pending in memory and recovery re-runs it after a restart (processing is idempotent).
-   */
-  markWebhookProcessed(input: { webhookId: string; error?: string | undefined }): Promise<boolean>;
 }

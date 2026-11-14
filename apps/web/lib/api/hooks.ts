@@ -12,24 +12,19 @@ import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tansta
 import * as api from "./client";
 import { queryKeys, type Resource } from "./query-keys";
 import type { ApiError } from "./errors";
+import type { ScopedQuery } from "./client";
 import type {
-  ActivityQuery,
-  AgentsQuery,
-  ApprovalsQuery,
-  BookingsQuery,
-  BusinessPatch,
-  CreateAgentRequest,
-  FactProposeRequest,
-  FactsQuery,
-  ListParams,
-  OrdersQuery,
-  PriceProposeRequest,
-  PublishRequest,
-  RollbackRequest,
-  BuilderMessageRequest,
-  CallsQuery,
-} from "./api-shapes";
-import type { AgentRunResponse, ApprovalDecision } from "./pending-contracts";
+  AgentRunResponse,
+  ApprovalDecision,
+  BuilderMessageBody,
+  CreateAgentBody,
+  ListFactsQuery,
+  ProposeFactBody,
+  ProposePriceBody,
+  PublishBody,
+  RollbackBody,
+  UpdateBusinessBody,
+} from "@abos/contracts";
 
 type MaybeId = string | null | undefined;
 
@@ -59,7 +54,7 @@ export function useBusiness(businessId: MaybeId) {
 
 export function useUpdateBusiness(businessId: MaybeId) {
   const qc = useQueryClient();
-  return useMutation<Awaited<ReturnType<typeof api.updateBusiness>>, ApiError, BusinessPatch>({
+  return useMutation<Awaited<ReturnType<typeof api.updateBusiness>>, ApiError, UpdateBusinessBody>({
     mutationFn: (patch) => api.updateBusiness(requireId(businessId, "businessId"), patch),
     onSuccess: async () => {
       await Promise.all([invalidate(qc, businessId!, "business"), qc.invalidateQueries({ queryKey: queryKeys.businesses() })]);
@@ -69,7 +64,7 @@ export function useUpdateBusiness(businessId: MaybeId) {
 
 // ---------------------------------------------------------------- facts
 
-export function useFacts(businessId: MaybeId, query: FactsQuery = {}) {
+export function useFacts(businessId: MaybeId, query: ListFactsQuery = {}) {
   return useQuery({
     queryKey: queryKeys.facts(businessId ?? "", query),
     queryFn: () => api.getFacts(requireId(businessId, "businessId"), query),
@@ -80,7 +75,7 @@ export function useFacts(businessId: MaybeId, query: FactsQuery = {}) {
 /** Creates a fact_edit approval. Show the confirm dialog, then call useDecideApproval with its payloadHash. */
 export function useProposeFact(businessId: MaybeId) {
   const qc = useQueryClient();
-  return useMutation<Awaited<ReturnType<typeof api.proposeFact>>, ApiError, FactProposeRequest>({
+  return useMutation<Awaited<ReturnType<typeof api.proposeFact>>, ApiError, ProposeFactBody>({
     mutationFn: (body) => api.proposeFact(requireId(businessId, "businessId"), body),
     onSuccess: async () => {
       await invalidate(qc, businessId!, "approvals");
@@ -101,7 +96,7 @@ export function useSyncCatalog(businessId: MaybeId) {
 /** SHOULD tier. Creates a price_edit approval. */
 export function useProposePrice(businessId: MaybeId) {
   const qc = useQueryClient();
-  return useMutation<Awaited<ReturnType<typeof api.proposePrice>>, ApiError, PriceProposeRequest>({
+  return useMutation<Awaited<ReturnType<typeof api.proposePrice>>, ApiError, ProposePriceBody>({
     mutationFn: (body) => api.proposePrice(requireId(businessId, "businessId"), body),
     onSuccess: async () => {
       await invalidate(qc, businessId!, "approvals");
@@ -183,7 +178,7 @@ export function useBuilderSession(businessId: MaybeId, sessionId: MaybeId) {
 /** Sends one owner turn. The session (with both new messages) is refetched after the server replies. */
 export function useSendBuilderMessage(businessId: MaybeId, sessionId: MaybeId) {
   const qc = useQueryClient();
-  return useMutation<Awaited<ReturnType<typeof api.sendBuilderMessage>>, ApiError, BuilderMessageRequest>({
+  return useMutation<Awaited<ReturnType<typeof api.sendBuilderMessage>>, ApiError, BuilderMessageBody>({
     mutationFn: (body) => api.sendBuilderMessage(requireId(businessId, "businessId"), requireId(sessionId, "sessionId"), body),
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: queryKeys.builderSession(businessId!, sessionId!) });
@@ -199,7 +194,7 @@ export function useRealtimeClientSecret(businessId: MaybeId) {
 
 // ---------------------------------------------------------------- agents
 
-export function useAgents(businessId: MaybeId, query: AgentsQuery = {}) {
+export function useAgents(businessId: MaybeId, query: ScopedQuery<"listAgents"> = {}) {
   return useQuery({
     queryKey: queryKeys.agents(businessId ?? "", query),
     queryFn: () => api.listAgents(requireId(businessId, "businessId"), query),
@@ -215,7 +210,7 @@ export function useAgent(businessId: MaybeId, agentId: MaybeId) {
   });
 }
 
-export function useAgentVersions(businessId: MaybeId, agentId: MaybeId, query: ListParams = {}) {
+export function useAgentVersions(businessId: MaybeId, agentId: MaybeId, query: ScopedQuery<"listAgentVersions"> = {}) {
   return useQuery({
     queryKey: queryKeys.agentVersions(businessId ?? "", agentId ?? "", query),
     queryFn: () => api.listAgentVersions(requireId(businessId, "businessId"), requireId(agentId, "agentId"), query),
@@ -225,7 +220,7 @@ export function useAgentVersions(businessId: MaybeId, agentId: MaybeId, query: L
 
 export function useCreateAgent(businessId: MaybeId) {
   const qc = useQueryClient();
-  return useMutation<Awaited<ReturnType<typeof api.createAgent>>, ApiError, CreateAgentRequest>({
+  return useMutation<Awaited<ReturnType<typeof api.createAgent>>, ApiError, CreateAgentBody>({
     mutationFn: (body) => api.createAgent(requireId(businessId, "businessId"), body),
     onSuccess: async () => {
       await invalidate(qc, businessId!, "agents");
@@ -242,7 +237,7 @@ export function usePreviewAgent(businessId: MaybeId, agentId: MaybeId) {
 
 export function usePublishAgent(businessId: MaybeId, agentId: MaybeId) {
   const qc = useQueryClient();
-  return useMutation<Awaited<ReturnType<typeof api.publishAgent>>, ApiError, PublishRequest>({
+  return useMutation<Awaited<ReturnType<typeof api.publishAgent>>, ApiError, PublishBody>({
     mutationFn: (body) => api.publishAgent(requireId(businessId, "businessId"), requireId(agentId, "agentId"), body),
     onSettled: async () => {
       await Promise.all([invalidate(qc, businessId!, "agents", "facts"), qc.invalidateQueries({ queryKey: queryKeys.liveAgent() })]);
@@ -252,7 +247,7 @@ export function usePublishAgent(businessId: MaybeId, agentId: MaybeId) {
 
 export function usePauseAgent(businessId: MaybeId, agentId: MaybeId) {
   const qc = useQueryClient();
-  return useMutation<void, ApiError, void>({
+  return useMutation<Awaited<ReturnType<typeof api.pauseAgent>>, ApiError, void>({
     mutationFn: () => api.pauseAgent(requireId(businessId, "businessId"), requireId(agentId, "agentId")),
     onSettled: async () => {
       await Promise.all([invalidate(qc, businessId!, "agents"), qc.invalidateQueries({ queryKey: queryKeys.liveAgent() })]);
@@ -263,7 +258,7 @@ export function usePauseAgent(businessId: MaybeId, agentId: MaybeId) {
 /** SHOULD tier. */
 export function useRollbackAgent(businessId: MaybeId, agentId: MaybeId) {
   const qc = useQueryClient();
-  return useMutation<Awaited<ReturnType<typeof api.rollbackAgent>>, ApiError, RollbackRequest>({
+  return useMutation<Awaited<ReturnType<typeof api.rollbackAgent>>, ApiError, RollbackBody>({
     mutationFn: (body) => api.rollbackAgent(requireId(businessId, "businessId"), requireId(agentId, "agentId"), body),
     onSettled: async () => {
       await Promise.all([invalidate(qc, businessId!, "agents"), qc.invalidateQueries({ queryKey: queryKeys.liveAgent() })]);
@@ -349,7 +344,7 @@ export function useSetLiveAgent() {
 
 // ------------------------------------------------------------- approvals
 
-export function useApprovals(businessId: MaybeId, query: ApprovalsQuery = {}) {
+export function useApprovals(businessId: MaybeId, query: ScopedQuery<"listApprovals"> = {}) {
   return useQuery({
     queryKey: queryKeys.approvals(businessId ?? "", query),
     queryFn: () => api.listApprovals(requireId(businessId, "businessId"), query),
@@ -407,7 +402,7 @@ export function useDecideApproval(businessId: MaybeId) {
 
 // ------------------------------------------------------- orders, bookings
 
-export function useOrders(businessId: MaybeId, query: OrdersQuery = {}) {
+export function useOrders(businessId: MaybeId, query: ScopedQuery<"listOrders"> = {}) {
   return useQuery({
     queryKey: queryKeys.orders(businessId ?? "", query),
     queryFn: () => api.listOrders(requireId(businessId, "businessId"), query),
@@ -432,7 +427,7 @@ export function useOrderCheckout(businessId: MaybeId, orderId: MaybeId) {
   });
 }
 
-export function useBookings(businessId: MaybeId, query: BookingsQuery = {}) {
+export function useBookings(businessId: MaybeId, query: ScopedQuery<"listBookings"> = {}) {
   return useQuery({
     queryKey: queryKeys.bookings(businessId ?? "", query),
     queryFn: () => api.listBookings(requireId(businessId, "businessId"), query),
@@ -450,7 +445,7 @@ export function useBooking(businessId: MaybeId, bookingId: MaybeId) {
 
 // --------------------------------------------------------------- activity
 
-export function useActivity(businessId: MaybeId, query: ActivityQuery = {}) {
+export function useActivity(businessId: MaybeId, query: ScopedQuery<"listActivity"> = {}) {
   return useQuery({
     queryKey: queryKeys.activity(businessId ?? "", query),
     queryFn: () => api.listActivity(requireId(businessId, "businessId"), query),
@@ -460,7 +455,7 @@ export function useActivity(businessId: MaybeId, query: ActivityQuery = {}) {
 
 // ------------------------------------------------------------------ calls
 
-export function useCalls(businessId: MaybeId, query: CallsQuery = {}) {
+export function useCalls(businessId: MaybeId, query: ScopedQuery<"listCalls"> = {}) {
   return useQuery({
     queryKey: queryKeys.calls(businessId ?? "", query),
     queryFn: () => api.listCalls(requireId(businessId, "businessId"), query),

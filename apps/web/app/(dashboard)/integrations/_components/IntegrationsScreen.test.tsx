@@ -84,8 +84,9 @@ describe('IntegrationsScreen', {timeout: 20_000}, () => {
     expect(within(calendar).getByText(/Bookings cannot be created/)).toBeTruthy();
   });
 
-  it('labels Square sandbox even when the environment field is missing', async () => {
-    getState().health.square = {state: 'connected', lastCheckedAt: new Date().toISOString()};
+  // IntegrationHealthSchema requires square.environment "sandbox", so a response without it is refused by the client.
+  it('labels Square sandbox', async () => {
+    getState().health.square = {state: 'connected', environment: 'sandbox', lastCheckedAt: new Date().toISOString()};
     renderScreen();
     const square = await card('Square');
     expect(within(square).getByText('Sandbox')).toBeTruthy();

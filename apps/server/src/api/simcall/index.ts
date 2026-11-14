@@ -22,7 +22,7 @@ import { AppError } from '../../errors';
 import { emitActivity } from '../../policy/activity';
 import type { RealToolset } from '../../tools/real/types';
 import { nextStage } from '../../voice/relay';
-import { PLAIN_SPEECH_RULE, plainSpeech } from '../../voice/prompt';
+import { PLAIN_SPEECH_RULE, plainSpeech } from './plain';
 import type { CallsStore } from '../../compose/ports';
 
 const MAX_TOOL_CALLS_PER_TURN = 8;

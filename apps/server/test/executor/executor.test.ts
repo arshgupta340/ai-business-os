@@ -165,13 +165,13 @@ describe('executor', () => {
     expect(h.deps.subjects.updateFact).toHaveBeenCalledWith(row.businessId, approvalFactEditPending.payload);
     expect(h.deps.checkout.createCheckout).not.toHaveBeenCalled();
   });
-  it.each(['square.catalog.price.update', 'local.catalog.sync'] as const)('clearly fails unimplemented %s', async (actionType) => {
+  it.each(['square.catalog.price.update', 'local.catalog.sync'] as const)('fails %s closed when no price port is configured', async (actionType) => {
     const h = harness(); const row = h.rows[0]!;
     h.rows.splice(1); row.actionType = actionType; row.stepIndex = actionType === 'local.catalog.sync' ? 1 : 0;
     row.capabilityId = actionType === 'local.catalog.sync' ? undefined : 'catalog.price.update';
     h.setMaterial(approvalPriceEditPending.payload);
     await createExecutor(h.deps).tick(); expect(row.status).toBe('FAILED');
-    expect(h.history[0]?.reason).toContain('not implemented');
+    expect(h.history[0]?.reason).toContain('not configured');
     expect(h.deps.checkout.createCheckout).not.toHaveBeenCalled();
   });
   it('classifies definite permanent refusals and explicit safe retries', () => {

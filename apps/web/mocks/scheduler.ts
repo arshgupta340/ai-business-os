@@ -50,10 +50,12 @@ export function latencyMs(): number {
 }
 
 const timers = new Set<ReturnType<typeof setTimeout>>();
+/** Scheduled steps that returned a promise and have not settled yet (the contract's hashing is async). */
+let running = 0;
 let idleWaiters: (() => void)[] = [];
 
 function checkIdle() {
-  if (timers.size === 0) {
+  if (timers.size === 0 && running === 0) {
     const waiters = idleWaiters;
     idleWaiters = [];
     for (const w of waiters) w();
@@ -61,13 +63,25 @@ function checkIdle() {
 }
 
 /** Run fn after ms. Tracked so reset() can cancel it and tests can wait for idle. */
-export function schedule(fn: () => void, ms: number): ReturnType<typeof setTimeout> {
+export function schedule(fn: () => void | Promise<void>, ms: number): ReturnType<typeof setTimeout> {
   const id = setTimeout(() => {
     timers.delete(id);
+    let result: void | Promise<void> = undefined;
     try {
-      fn();
+      result = fn();
     } finally {
-      checkIdle();
+      if (result instanceof Promise) {
+        // whenIdle() waits for an async step too.
+        running += 1;
+        result
+          .catch((err: unknown) => console.error("Scripted mock step failed", err))
+          .finally(() => {
+            running -= 1;
+            checkIdle();
+          });
+      } else {
+        checkIdle();
+      }
     }
   }, ms);
   timers.add(id);
@@ -89,10 +103,10 @@ export function cancelAllScheduled(): void {
 
 /** Resolves when no scripted step is waiting. */
 export function whenIdle(): Promise<void> {
-  if (timers.size === 0) return Promise.resolve();
+  if (timers.size === 0 && running === 0) return Promise.resolve();
   return new Promise((resolve) => idleWaiters.push(resolve));
 }
 
 export function pendingCount(): number {
-  return timers.size;
+  return timers.size + running;
 }

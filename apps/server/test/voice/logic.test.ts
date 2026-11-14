@@ -168,3 +168,34 @@ describe('voice logic: redaction', () => {
     expect(last4('12')).toBeUndefined();
   });
 });
+
+
+describe('rereview playback lifecycle', () => {
+  it('R6: completed and acknowledged items release all retained offsets', () => {
+    const p = new PlaybackTracker();
+    for (let i = 0; i < 2000; i++) {
+      const id = `item_${i}`;
+      const mark = p.onAudioSent(id, 20);
+      p.onItemDone(id);
+      p.onMark(mark);
+    }
+    expect(p.retainedItems).toBe(0);
+  });
+
+  it('R6: canceled item tombstones survive late deltas until generation ends', () => {
+    const p = new PlaybackTracker();
+    for (let i = 0; i < 2000; i++) {
+      const id = `cut_${i}`;
+      p.onAudioSent(id, 20); p.interrupt();
+      expect(p.isCut(id)).toBe(true);
+      p.onItemDone(id);
+    }
+    expect(p.retainedItems).toBe(0);
+    p.clear(); expect(p.pendingMarks).toBe(0);
+  });
+});
+
+
+it('strips Markdown emphasis from server speech', () => {
+  expect(buildSayTwiml('**Hello** _friend_')).toContain('<Say>Hello friend</Say>');
+});

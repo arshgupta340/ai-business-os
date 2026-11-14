@@ -4,11 +4,15 @@ import type {
   MessageDispatchStatus, Order, OrderApprovalPayload, SyncJobState, SyncRecordType,
 } from '@abos/contracts';
 
+/** api/prices PriceStepResult, restated so this directory imports no route module. */
+export type PriceStepOutcome =
+  | { state: 'SUCCEEDED'; squareVersion: number }
+  | { state: 'QUEUED' | 'FAILED' | 'NEEDS_REVIEW'; code: ErrorCode };
 export type CheckoutResult = { squareOrderId: string; paymentLinkId: string; url: string };
 /** The calendar adapter's own result shape (adapters/calendar): it reports failures, it does not throw them. */
 export type CalendarResult =
   | { ok: true; googleEventId: string }
-  | { ok: false; reason: ErrorCode; retryable: boolean; alternatives?: AvailabilitySlot[] };
+  | { ok: false; reason: ErrorCode; retryable: boolean; alternatives?: AvailabilitySlot[]; outcome?: 'unknown' };
 /** The message layer's sendOnce result (adapters/message). A replay of an existing dispatch reports its stored state. */
 export type MessageResult = {
   status: MessageDispatchStatus | 'SKIPPED';
@@ -99,6 +103,13 @@ export interface ExecutorDeps {
   calendar: {
     /** idempotencyKey is the step's stored key and becomes the Google event id; the adapter looks it up before inserting. */
     createEvent(input: { bookingId: string; calendarId: string; startUtc: string; endUtc: string; summary: string; description: string; idempotencyKey: string }): Promise<CalendarResult>;
+  };
+  /** P-11 price change (api/prices). Absent: both price steps fail closed with CAPABILITY_NOT_ALLOWED. */
+  prices?: {
+    /** One Square price write for this approved step, under its stored key. Throws only before any request. */
+    update(input: { executionId: string; approvalId: string; idempotencyKey: string; attempt: number }): Promise<PriceStepOutcome>;
+    /** Refreshes the local catalog cache from Square after the price write succeeded. */
+    sync(input: { businessId: string; attempt: number }): Promise<PriceStepOutcome>;
   };
   templates: {
     checkout(input: { order: Order; approved: OrderApprovalPayload; url: string }): string;

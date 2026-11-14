@@ -4,19 +4,19 @@
 //   create an approval      -> createApproval            (the database rebuilds the material and checks the hash)
 //   decide and enqueue       -> runtimeDecideAndEnqueue   (the database derives every idempotency key and inserts the steps)
 //   expire past-due approvals-> runtimeExpireApprovals
-//   run the local fact step  -> runtimeClaimExecution + finishExecution
+//   run the local fact step  -> runtimeClaimExecution + applyFactUpdate (0005: it supersedes or promotes, audits and finishes)
 // This file builds the exact material payload, stores the subject (order, booking or the fact it
 // edits), writes the activity events the routines do not write, and maps routine refusals to the
 // contract error codes. It never performs an external write.
 import {
-  ActionExecutionSchema, ApprovalRequestSchema, OrderSchema, BookingSchema, BusinessIdSchema, UserIdSchema,
+  ActionExecutionSchema, ApprovalRequestSchema, PriceEditApprovalPayloadSchema, type PriceEditApprovalPayload, OrderSchema, BookingSchema, BusinessIdSchema, UserIdSchema,
   MessageChannelSettingSchema, ContactSchema, BookingCustomerSchema, FactKindSchema,
   BUNDLE_ACTIONS, APPROVAL_EXPIRY_MS, ACTION_TYPE_CAPABILITY, CAPABILITIES,
   executionStepsFor, cartHash, payloadHash, idempotencyKey, canonicalJson, hashCanonical, pickMaterialFields,
   type ApprovalRequest, type BundleType, type ActivityEventType, type ActivityEventPayloads, type ActorType,
   type ActionExecution, type ErrorCode, type FactEditApprovalRequest, type Order, type Booking, type JsonValue,
 } from '@abos/contracts';
-import { createApproval, finishExecution, runtimeClaimExecution, runtimeDecideAndEnqueue, runtimeExpireApprovals, type ExpiredApproval } from '@abos/db';
+import { applyFactUpdate, createApproval, runtimeClaimExecution, runtimeDecideAndEnqueue, runtimeExpireApprovals, type ExpiredApproval } from '@abos/db';
 import { mapRow } from '../api/rows';
 import { emitActivity } from './activity';
 import {
@@ -96,6 +96,8 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
   async function assertCall(tx: QueryInterface, businessId: string, callId: string | undefined, agentVersionId: string) {
     const row = await one(tx, 'select agent_version_id, status from public.calls where id=$1 and business_id=$2 for update', [callId ?? '', businessId]);
     if (!row || row.agent_version_id !== agentVersionId) throw new PolicyError('FORBIDDEN_BUSINESS');
+    // A proposal belongs to a live call (voice NOTES 1): an ended call cannot propose.
+    if (row.status !== 'IN_PROGRESS') throw new PolicyError('INVALID_STATE', 'The call has ended.');
   }
 
   /** Stores the approval through the routine: payload is exactly the material, hashed as canonical JSON. */
@@ -147,27 +149,27 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
         const a = await approvalById(tx, claimed.approval_id, input.businessId);
         if (!a || a.bundleType !== 'fact_edit' || a.state !== 'APPROVED' || !a.decidedBy) throw new PolicyError('INVALID_STATE');
         await event(tx, at, a.businessId, a.id, 'execution.started', { executionId: claimed.id, approvalId: a.id, actionType: 'local.fact.update', stepIndex: claimed.step_index, attempt: claimed.attempts });
-        const p = a.payload;
-        // The claim routine already checked this row against the signed material. Lock it and check again.
-        const current = await one(tx, `select * from public.business_facts where id=$1 and business_id=$2 for update`, [p.subjectId, a.businessId]);
-        if (!current || current.status !== 'verified' || current.version !== p.fromVersion || canonicalJson(current.value) !== canonicalJson(p.before)) {
-          throw new PolicyError('INVALID_STATE', 'The fact changed after the edit was proposed.');
-        }
-        await tx.query("update public.business_facts set status='superseded' where id=$1", [p.subjectId]);
-        const newId = deps.newId('fact_');
-        await tx.query(`insert into public.business_facts (id, business_id, kind, key, value, source_type, status, confidence, version,
-          supersedes_id, verified_at, verified_by, created_at, updated_at)
-          values ($1,$2,$3,$4,$5::jsonb,'owner_ui','verified',1,$6,$7,$8,$9,$8,$8)`,
-        [newId, a.businessId, p.kind, p.key, JSON.stringify(p.after), p.fromVersion + 1, p.subjectId, at, a.decidedBy]);
-        // No conflict is resolved here (review finding 2). The approval does not carry a selected conflict,
-        // so resolving by kind and key would settle conflicts the owner never saw. Resolving the one the
-        // owner selected needs that conflict bound into the signed material (contract and 0005 change).
-        await event(tx, at, a.businessId, a.id, 'fact.changed', { factId: newId, kind: p.kind, key: p.key, fromVersion: p.fromVersion, toVersion: p.fromVersion + 1, sourceType: 'owner_ui' }, 'owner');
-        await finishExecution(tx, { businessId: a.businessId, executionId: claimed.id, workerId, attempt: claimed.attempts, status: 'SUCCEEDED' });
+        // apply_fact_update re-checks the subject against the signed material under the lease, then either
+        // supersedes the verified row and inserts the next version, or promotes the new-key draft to
+        // verified version 1. It writes fact.changed and finishes the step in this transaction.
+        // No conflict is resolved here (review finding 2): the approval does not carry a selected conflict.
+        await applyFactUpdate(tx, { businessId: a.businessId, executionId: claimed.id, workerId, attempt: claimed.attempts });
         await event(tx, at, a.businessId, a.id, 'execution.succeeded', { executionId: claimed.id, actionType: 'local.fact.update' });
         return true;
       });
     } catch (error) { return rethrow(error); }
+  }
+
+  /** Reuses a draft of this kind and key whose value equals `value`, or inserts one (owner_ui). */
+  async function newKeyDraft(tx: QueryInterface, businessId: string, kind: string, key: string, value: JsonValue): Promise<string> {
+    const drafts = (await tx.query(`select id, value from public.business_facts where business_id=$1 and kind=$2 and key=$3 and status='draft' order by created_at, id for update`,
+      [businessId, kind, key])).rows as Row[];
+    const same = drafts.find((d) => canonicalJson(d.value) === canonicalJson(value));
+    if (same) return String(same.id);
+    const id = deps.newId('fact_');
+    await tx.query(`insert into public.business_facts (id, business_id, kind, key, value, source_type, status, version)
+      values ($1,$2,$3,$4,$5::jsonb,'owner_ui','draft',1)`, [id, businessId, kind, key, JSON.stringify(value)]);
+    return id;
   }
 
   return {
@@ -182,11 +184,29 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
         return await db.transaction(async (tx) => {
           await assertCall(tx, input.businessId, input.callId, input.agentVersionId);
           // A repeated propose for the same call and cart returns the stored proposal.
-          const existing = await one(tx, `select * from public.orders where business_id=$1 and call_id=$2 and cart_hash=$3
-            and status='AWAITING_OWNER_APPROVAL' and approval_id is not null`, [input.businessId, input.callId, hash]);
+          // orders.approval_id is written only by decide_and_enqueue (0005 guards it), so the pending
+          // approval is found by its subject.
+          const existing = await one(tx, `select o.*, a.id as pending_approval_id from public.orders o
+            join public.approval_requests a on a.subject_id = o.id and a.business_id = o.business_id and a.bundle_type = 'order_bundle' and a.state = 'PENDING'
+            where o.business_id=$1 and o.call_id=$2 and o.cart_hash=$3 and o.status='AWAITING_OWNER_APPROVAL' order by a.created_at desc limit 1`, [input.businessId, input.callId, hash]);
+          // Issue #93 item 3: only a repeat with the same contact, pickup and channel is the same proposal.
+          // The stored order is frozen from insert (0006) and orders are unique per call and cart, so a
+          // changed recipient or pickup time for the same cart on the same call is refused, never merged
+          // into the pending one: the owner only ever approves the details the caller confirmed.
+          const pickupIso = new Date(input.fulfillment.pickupAt).toISOString();
           if (existing) {
-            const approval = await approvalById(tx, String(existing.approval_id), input.businessId);
-            if (approval?.state === 'PENDING') return { order: OrderSchema.parse(mapRow(existing)), approval };
+            const approval = await approvalById(tx, String(existing.pending_approval_id), input.businessId);
+            const { pending_approval_id: _p, ...orderRow } = existing;
+            const stored = OrderSchema.parse(mapRow(orderRow));
+            // consentAt is the time of each propose, so it is not a detail the owner approves.
+            const material = (c: typeof contact) => ({ name: c.name, messageRecipient: c.messageRecipient ?? null, messageConsent: c.messageConsent });
+            const same = canonicalJson(material(stored.contact)) === canonicalJson(material(contact))
+              && stored.fulfillment.type === input.fulfillment.type && new Date(stored.fulfillment.pickupAt).toISOString() === pickupIso
+              && (approval?.payload as { messageChannel?: string } | undefined)?.messageChannel === channel;
+            if (approval?.state === 'PENDING') {
+              if (same) return { order: { ...stored, approvalId: approval.id }, approval };
+              throw new PolicyError('INVALID_STATE', 'A proposal for this cart is already waiting for the owner with different details.');
+            }
           }
           const at = await dbNow(tx);
           const createdAt = at.toISOString();
@@ -205,7 +225,6 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
             ...(contact.messageConsent && contact.messageRecipient ? { messageRecipient: contact.messageRecipient } : {}),
             messageChannel: channel, actionBundle: BUNDLE_ACTIONS.order_bundle, expiresAt,
           }, 'deployed_agent', input.agentVersionId);
-          await tx.query('update public.orders set approval_id=$2 where id=$1', [order.id, approval.id]);
           await event(tx, at, order.businessId, order.callId, 'proposal.created', { subjectId: order.id, subjectType: 'order', callId: order.callId, totalMinor: order.totalMinor, currency: order.currency }, 'deployed_agent');
           await requested(tx, at, approval, order.callId);
           await event(tx, at, order.businessId, order.callId, 'order.status_changed', { orderId: order.id, callId: order.callId, to: 'AWAITING_OWNER_APPROVAL' });
@@ -240,7 +259,6 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
             ...(customer.messageConsent && customer.messageRecipient ? { messageRecipient: customer.messageRecipient } : {}),
             messageChannel: channel, actionBundle: BUNDLE_ACTIONS.booking_bundle, expiresAt,
           }, 'deployed_agent', input.agentVersionId);
-          await tx.query('update public.bookings set approval_id=$2 where id=$1', [booking.id, approval.id]);
           await event(tx, at, booking.businessId, callId, 'proposal.created', { subjectId: booking.id, subjectType: 'booking', callId, serviceName: booking.serviceName, startUtc: booking.startUtc }, 'deployed_agent');
           await requested(tx, at, approval, callId);
           await event(tx, at, booking.businessId, callId, 'booking.status_changed', { bookingId: booking.id, callId, to: 'AWAITING_OWNER_APPROVAL' });
@@ -271,18 +289,66 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
             if (conflict.kind !== kind || conflict.key !== input.key) throw new PolicyError('VALIDATION_FAILED');
           }
           const current = await one(tx, `select * from public.business_facts where business_id=$1 and kind=$2 and key=$3 and status='verified' for update`, [input.businessId, kind, input.key]);
-          // DATA-MODEL: versions start at 1 and the routine binds the edit to the current version, so a brand-new key cannot be proposed here.
-          if (!current) throw new PolicyError('NOT_FOUND', 'There is no verified fact with that kind and key to edit.');
-          if (canonicalJson(current.value) === canonicalJson(input.value)) throw new PolicyError('VALIDATION_FAILED', 'The new value equals the current value.');
+          if (current && canonicalJson(current.value) === canonicalJson(input.value)) throw new PolicyError('VALIDATION_FAILED', 'The new value equals the current value.');
           const at = await dbNow(tx);
           const expiresAt = new Date(at.getTime() + APPROVAL_EXPIRY_MS).toISOString();
+          // A brand-new key (0005): the subject is a draft row whose value is exactly `after`, with
+          // fromVersion 0 and before null. Confirming promotes that draft to verified version 1.
+          if (input.fromVersion !== undefined && input.fromVersion !== (current ? Number(current.version) : 0)) throw new PolicyError('VALIDATION_FAILED', 'The fact changed since it was read.');
+          if (input.before !== undefined && canonicalJson(input.before ?? null) !== canonicalJson(current ? current.value : null)) throw new PolicyError('VALIDATION_FAILED', 'The fact changed since it was read.');
+          if (current && input.subjectId !== undefined && input.subjectId !== String(current.id)) throw new PolicyError('VALIDATION_FAILED', 'The subject is not the verified fact.');
+          let subjectId: string;
+          if (current) subjectId = String(current.id);
+          else if (input.subjectId !== undefined) {
+            const draft = await one(tx, `select id, value from public.business_facts where id=$1 and business_id=$2 and kind=$3 and key=$4 and status='draft' for update`,
+              [input.subjectId, input.businessId, kind, input.key]);
+            if (!draft || canonicalJson(draft.value) !== canonicalJson(input.value)) throw new PolicyError('VALIDATION_FAILED', 'The subject is not a draft with this value.');
+            subjectId = String(draft.id);
+          } else subjectId = await newKeyDraft(tx, input.businessId, kind, input.key, input.value);
+          // The same answer for the same subject returns the approval already pending for it.
+          const pending = await one(tx, `select * from public.approval_requests where business_id=$1 and subject_id=$2 and bundle_type='fact_edit' and state='PENDING'
+            and expires_at > $3 order by created_at desc limit 1`, [input.businessId, subjectId, at.toISOString()]);
+          if (pending) {
+            const existing = approvalFromRow(pending);
+            if (existing.bundleType === 'fact_edit' && canonicalJson((existing.payload as { after: unknown }).after) === canonicalJson(input.value)) return { approval: existing };
+          }
           const approval = await storeApproval(tx, 'fact_edit', {
-            businessId: input.businessId, subjectId: String(current.id), kind, key: input.key, fromVersion: Number(current.version),
-            before: current.value as JsonValue, after: input.value, actionBundle: BUNDLE_ACTIONS.fact_edit, expiresAt,
+            businessId: input.businessId, subjectId, kind, key: input.key, fromVersion: current ? Number(current.version) : 0,
+            before: current ? current.value as JsonValue : null, after: input.value, actionBundle: BUNDLE_ACTIONS.fact_edit, expiresAt,
           }, 'owner', input.ownerUserId);
           await requested(tx, at, approval, approval.id);
           if (approval.bundleType !== 'fact_edit') throw new PolicyError('INTERNAL');
           return { approval };
+        });
+      } catch (error) { return rethrow(error); }
+    },
+
+    /**
+     * P-11 price change (api/prices). Stores a PENDING price_edit approval through create_approval and
+     * writes approval.requested, in one transaction. An identical pending proposal for the variation is
+     * returned as it is; a different one pending for the same row is a conflict. Nothing is written to
+     * Square until the owner approves and the executor runs the step.
+     */
+    async createPriceEditApproval(input: { ownerUserId: string; payload: PriceEditApprovalPayload; payloadHash: string }):
+      Promise<{ kind: 'created' | 'existing'; approval: ApprovalRequest } | { kind: 'conflict' }> {
+      const p = PriceEditApprovalPayloadSchema.parse(input.payload);
+      try {
+        return await db.transaction(async (tx) => {
+          await assertOwner(tx, p.businessId, input.ownerUserId);
+          const pending = await one(tx, `select * from public.approval_requests where business_id=$1 and subject_id=$2 and bundle_type='price_edit' and state='PENDING'
+            order by created_at desc limit 1`, [p.businessId, p.subjectId]);
+          if (pending) {
+            const existing = approvalFromRow(pending);
+            // The same proposal again differs only in its expiry (read from the clock): return the pending one.
+            const { expiresAt: _a, ...had } = existing.payload as Record<string, unknown>;
+            const { expiresAt: _b, ...asked } = p as unknown as Record<string, unknown>;
+            return canonicalJson(had) === canonicalJson(asked) ? { kind: 'existing' as const, approval: existing } : { kind: 'conflict' as const };
+          }
+          const at = await dbNow(tx);
+          const approval = await storeApproval(tx, 'price_edit', p as unknown as Record<string, unknown>, 'owner', input.ownerUserId);
+          if (approval.payloadHash !== input.payloadHash) throw new PolicyError('PAYLOAD_HASH_MISMATCH');
+          await requested(tx, at, approval, approval.id);
+          return { kind: 'created' as const, approval };
         });
       } catch (error) { return rethrow(error); }
     },
@@ -301,6 +367,8 @@ export function createPolicyEngine(db: PolicyDb, deps: PolicyDeps) {
           payloadHash: input.payloadHash, decision: target, reason: input.reason ?? null,
         }));
       } catch (error) {
+        // Issue #93 item 4: approving a booking whose slot overlaps an approved one trips bookings_no_overlap.
+        if (error && typeof error === 'object' && 'code' in error && (error as { code: unknown }).code === '23P01') throw new PolicyError('SLOT_CONFLICT');
         const code = routineErrorCode(error);
         if (code !== 'APPROVAL_ALREADY_DECIDED') return rethrow(error);
         // A repeat that differs only in its reason is still the same decision (AC-10).

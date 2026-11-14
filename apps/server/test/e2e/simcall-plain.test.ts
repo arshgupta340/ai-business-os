@@ -2,7 +2,7 @@
 // any Markdown it still produces is stripped from the reply.
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { notWiredExecutor } from '../../src/compose/seams';
-import { PLAIN_SPEECH_RULE } from '../../src/voice/prompt';
+import { PLAIN_SPEECH_RULE } from '../../src/api/simcall/plain';
 import { OWNER, createWorld, type World } from './world';
 
 let w: World;

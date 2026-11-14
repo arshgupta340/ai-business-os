@@ -52,11 +52,16 @@ export interface VoiceEventsPort {
 }
 
 /** The owner's decision on this call's proposal, from the executor (FLOWS 3.1). */
-export type CallDecision = { kind: 'approved'; messageSent: boolean } | { kind: 'rejected' } | { kind: 'expired' };
+export type CallDecision = ({ kind: 'approved'; messageSent: boolean } | { kind: 'rejected' } | { kind: 'expired' }) & { proposalId?: string; approvalId?: string };
 
 export interface CallDecisionsPort {
   /** Returns an unsubscribe function. */
   subscribe(callId: string, listener: (decision: CallDecision) => void): () => void;
+}
+
+/** Trusted conversation controller, never a model tool or a transcript parser in this module. */
+export interface CallFinishesPort {
+  subscribe(callId: string, listener: (event: { callId: string; agentVersionId: string; responseId: string }) => void): () => void;
 }
 
 export type VoiceToolsetContext = {
@@ -157,11 +162,14 @@ export type VoicePluginOptions = {
   calls: CallsPort;
   events: VoiceEventsPort;
   decisions?: CallDecisionsPort | undefined;
+  finishes?: CallFinishesPort | undefined;
   toolsetFactory: VoiceToolsetFactory;
   twilioValidator: TwilioRequestValidator;
   openaiSocketFactory: OpenAISocketFactory;
   /** The server's MESSAGE_CHANNEL setting, for the consent question and the wait script. */
   messageChannel: MessageChannelSetting;
+  /** Human fallback (B-28) at the relay's hook points. Absent: those failures end the call as before. */
+  fallback?: import('./relay').RelayFallback | undefined;
   /** The business that owns the Twilio integration, from configuration. Used only for `webhook.rejected`. */
   twilioBusinessId?: string | undefined;
   /** Defaults to REALTIME_MODEL from the contracts. */

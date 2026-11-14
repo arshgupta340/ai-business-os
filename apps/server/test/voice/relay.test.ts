@@ -1,8 +1,10 @@
+import { EventEmitter } from 'node:events';
+import type WebSocket from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CAPABILITIES, TOOL_CAPABILITY, ToolNameSchema, isToolEffect, type AgentSpec } from '@abos/contracts';
 import { barberSpecV1, pizzaSpecV2 } from '@abos/contracts/fixtures';
 import { StreamTokenStore } from '../../src/voice/logic';
-import { buildSessionUpdate, checkSessionCapabilities, nextStage, runPhoneRelay } from '../../src/voice/relay';
+import { adaptWs, buildSessionUpdate, checkSessionCapabilities, nextStage, runPhoneRelay } from '../../src/voice/relay';
 import type { CallDecision, PinnedCall, RelayLimits } from '../../src/voice/types';
 import { FakeSocket, PIZZA_SNAPSHOT, fakeCalls, fakeEvents, fakeLogger, fakeToolset, specWith, ulaw, type Json } from './helpers';
 
@@ -12,12 +14,12 @@ function pinnedFor(spec: AgentSpec): PinnedCall {
   return { callId: 'call_test_01', providerCallId: 'CA123', businessId: spec.businessId, businessName: 'Demo Pizza Co.', agentId: spec.id, agentVersionId: 'agv_pizza_01_v2', spec, facts: PIZZA_SNAPSHOT };
 }
 
-type SetupOpts = { spec?: AgentSpec; result?: unknown; status?: 'IN_PROGRESS' | 'COMPLETED'; limits?: Partial<RelayLimits>; withDecisions?: boolean };
+type SetupOpts = { spec?: AgentSpec; result?: unknown; status?: 'IN_PROGRESS' | 'COMPLETED'; limits?: Partial<RelayLimits>; withDecisions?: boolean; credential?: string };
 
 function setup(opts: SetupOpts = {}) {
   const spec = opts.spec ?? pizzaSpecV2;
   const tokens = new StreamTokenStore<PinnedCall>();
-  const token = tokens.mint(pinnedFor(spec)) ?? '';
+  const token = tokens.mint(pinnedFor(spec), Date.now(), opts.credential) ?? '';
   const phone = new FakeSocket();
   const sockets: FakeSocket[] = [];
   const openaiSocketFactory = vi.fn(() => {
@@ -146,9 +148,23 @@ describe('voice relay: tool calls', () => {
     await vi.waitFor(() => expect(s.outputs()).toHaveLength(1));
     expect(s.outputs()[0]).toMatchObject({ type: 'function_call_output', call_id: 'fc_abc' });
     expect(JSON.parse(String(s.outputs()[0]?.output))).toEqual({ ok: true, items: [] });
-    expect(s.call).toHaveBeenCalledWith('read_catalog', { query: 'pepperoni' }, { businessId: 'biz_pizza_01', agentVersionId: 'agv_pizza_01_v2', callId: 'call_test_01', correlationId: 'call_test_01' });
+    expect(s.call).toHaveBeenCalledWith('read_catalog', { query: 'pepperoni' }, { businessId: 'biz_pizza_01', agentVersionId: 'agv_pizza_01_v2', callId: 'call_test_01', correlationId: 'call_test_01' }, { signal: expect.any(AbortSignal), timeoutMs: CAPABILITIES['catalog.read'].timeoutMs });
     await vi.waitFor(() => expect(s.openai().ofType('response.create')).toHaveLength(2));
     await vi.waitFor(() => expect(s.calls.updateStage).toHaveBeenCalledWith('call_test_01', 'COLLECTING'));
+    s.phone.emit({ event: 'stop' });
+    await s.relay.done;
+  });
+
+  it('issue #95 item 7: a function call on a response that did not complete is not run', async () => {
+    const s = setup({ result: { ok: true, items: [] } });
+    await s.connect();
+    for (const status of ['cancelled', 'incomplete', 'failed']) {
+      s.openai().emit({ type: 'response.done', response: { status, output: [{ type: 'function_call', name: 'read_catalog', arguments: '{}', call_id: `fc_${status}` }] } });
+    }
+    s.openai().emit(s.fnCall('read_catalog', '{"query":"pepperoni"}', 'fc_ok'));
+    await vi.waitFor(() => expect(s.outputs()).toHaveLength(1));
+    expect(s.outputs()[0]).toMatchObject({ call_id: 'fc_ok' });
+    expect(s.call).toHaveBeenCalledTimes(1);
     s.phone.emit({ event: 'stop' });
     await s.relay.done;
   });
@@ -225,7 +241,7 @@ describe('voice relay: tool calls', () => {
     await s.relay.done;
   });
 
-  it('S5: a tool result that arrives after hangup changes nothing', async () => {
+  it('S5: a fake handler result after hangup writes no stage or function output', async () => {
     let finish: (v: unknown) => void = () => undefined;
     const s = setup({ result: { ok: true, items: [] } });
     s.call.mockImplementationOnce(() => new Promise((r) => (finish = r)));
@@ -270,21 +286,23 @@ describe('voice relay: wait and finish (FLOWS 3.1)', () => {
     await s.connect();
     s.openai().emit(s.fnCall('propose_order', '{}', 'fc_p'));
     await vi.waitFor(() => expect(s.openai().sent.some((m) => JSON.stringify(m).includes('still pending'))).toBe(true));
-    // The model speaks the goodbye; Twilio plays it out; the response finishes.
+    const request = s.openai().ofType('response.create').find((m) => m.response !== undefined) as { response: Json };
+    s.openai().emit({ type: 'response.created', response: { id: 'resp_goodbye', metadata: request.response.metadata } });
+    // Simulated audio and its Twilio acknowledgment, bound to this response.
     s.openai().emit({ type: 'response.output_audio.delta', item_id: 'item_bye', delta: ulaw(20) });
-    s.openai().emit({ type: 'response.done', response: { status: 'completed', output: [] } });
+    s.openai().emit({ type: 'response.done', response: { id: 'resp_goodbye', status: 'completed', output: [] } });
     s.phone.emit({ event: 'mark', mark: { name: 'p1' } });
     expect(await s.relay.done).toMatchObject({ endReason: 'completed', why: 'goodbye played' });
     expect(s.calls.endCall).toHaveBeenCalledWith('call_test_01', 'completed');
     expect(s.phone.isOpen).toBe(false);
   });
 
-  it('S12: an owner decision is spoken and cancels the pending goodbye', async () => {
+  it('S12: an owner decision instruction is queued and cancels the pending goodbye', async () => {
     const s = setup({ result: { ok: true, proposalId: 'ord_1', approvalId: 'apv_1', missingFields: [] }, limits: { pendingWaitMs: 150 }, withDecisions: true });
     await s.connect();
     s.openai().emit(s.fnCall('propose_order', '{}', 'fc_p'));
     await vi.waitFor(() => expect(s.calls.updateStage).toHaveBeenCalledWith('call_test_01', 'CUSTOMER_CONFIRMED'));
-    s.decide({ kind: 'rejected' });
+    s.decide({ kind: 'rejected', proposalId: 'ord_1', approvalId: 'apv_1' });
     expect(JSON.stringify(s.openai().sent)).toContain('not able to take this order');
     await new Promise((r) => setTimeout(r, 250));
     expect(JSON.stringify(s.openai().sent)).not.toContain('still pending');
@@ -520,4 +538,212 @@ describe('voice relay: capability rules', () => {
     expect(nextStage('appointment_booker', 'PROPOSAL', 'propose_booking', { ok: true, proposalId: 'bkg_1', approvalId: 'apv_1' })).toBe('CUSTOMER_CONFIRMED');
     expect(nextStage('restaurant_order_taker', 'CUSTOMER_CONFIRMED', 'quote_order', { ok: true })).toBe('CUSTOMER_CONFIRMED');
   });
+});
+
+
+describe('rereview regressions', () => {
+  it('R1: provider code and socket name fields cannot log credentials or private words', async () => {
+    for (const value of ['PRIVATE_CALLER_SPEECH', 'OpaqueStreamCredentialAbcdef12345']) {
+      const s = setup();
+      await s.connect();
+      s.openai().emit({ type: 'error', error: { type: value, code: value } });
+      s.phone.fail(Object.assign(new Error(value), { name: value, code: value }));
+      await s.relay.done;
+      expect(JSON.stringify(s.lines)).not.toContain(value);
+    }
+  });
+
+  it('R4: the production adapter terminates CLOSING peers at the grace deadline', async () => {
+    vi.useFakeTimers();
+    class ClosingSocket extends EventEmitter {
+      readyState = 1;
+      bufferedAmount = 0;
+      send(_data: string, cb: (err?: Error) => void) { cb(); }
+      close() { this.readyState = 2; }
+      terminate = vi.fn(() => { this.readyState = 3; this.emit('close', 1000); });
+    }
+    const raw = new ClosingSocket();
+    const phone = adaptWs(raw as unknown as WebSocket);
+    const relay = runPhoneRelay({ phone, tokens: new StreamTokenStore<PinnedCall>(), calls: fakeCalls(), events: fakeEvents(), toolsetFactory: () => fakeToolset().toolset, openaiSocketFactory: () => new FakeSocket(), messageChannel: 'qr_only', logger: fakeLogger().logger, limits: { startTimeoutMs: 10, closeGraceMs: 20 } });
+    await vi.advanceTimersByTimeAsync(11);
+    await relay.done;
+    expect(raw.readyState).toBe(2);
+    await vi.advanceTimersByTimeAsync(21);
+    expect(raw.terminate).toHaveBeenCalledOnce();
+  });
+
+  it('R5: the next encoded caller frame is included in model back-pressure', async () => {
+    const s = setup({ limits: { maxBufferedBytes: 512 } });
+    await s.connect();
+    s.openai().bufferedAmount = 400;
+    s.phone.emit({ event: 'media', media: { payload: ulaw(20) } });
+    expect(s.openai().ofType('input_audio_buffer.append')).toHaveLength(0);
+    expect(s.phone.isOpen).toBe(false);
+    expect((await s.relay.done).endReason).toBe('failed');
+  });
+
+  it('R7: pending QR proposals never promise messaging or a recipient', async () => {
+    vi.useFakeTimers();
+    const s = setup({ result: { ok: true, proposalId: 'ord_test_01', approvalId: 'apv_test_01' }, limits: { pendingWaitMs: 50 } });
+    s.start(); await vi.advanceTimersByTimeAsync(1);
+    s.openai().open(); s.openai().emit({ type: 'session.updated' });
+    s.openai().emit(s.fnCall('propose_order', '{"contact":{"messageConsent":false}}', 'fc_qr'));
+    await vi.advanceTimersByTimeAsync(60);
+    const text = JSON.stringify(s.openai().ofType('conversation.item.create'));
+    expect(text).toContain('counter');
+    expect(text).not.toMatch(/will come by|number ending|by text message/);
+    s.phone.emit({ event: 'stop' }); await s.relay.done;
+  });
+
+  it('R8: a decision after the pending deadline cancels all old goodbye work', async () => {
+    vi.useFakeTimers();
+    const s = setup({ withDecisions: true, result: { ok: true, proposalId: 'ord_test_01', approvalId: 'apv_test_01' }, limits: { pendingWaitMs: 50, goodbyeMaxMs: 100 } });
+    s.start(); await vi.advanceTimersByTimeAsync(1);
+    s.openai().open(); s.openai().emit({ type: 'session.updated' });
+    s.openai().emit(s.fnCall('propose_order', '{}', 'fc_pending'));
+    await vi.advanceTimersByTimeAsync(60);
+    s.decide({ kind: 'approved', messageSent: true, proposalId: 'ord_test_01', approvalId: 'apv_test_01' });
+    s.openai().emit({ type: 'response.done', response: { id: 'unrelated', status: 'completed', output: [] } });
+    await vi.advanceTimersByTimeAsync(150);
+    expect(s.phone.isOpen).toBe(true);
+    s.phone.emit({ event: 'stop' }); await s.relay.done;
+  });
+
+  it('R10: one fatal error after readiness closes both sockets despite caller media', async () => {
+    const s = setup(); await s.connect();
+    s.openai().emit({ type: 'error', error: { type: 'invalid_request_error', code: 'invalid_api_key' } });
+    s.phone.emit({ event: 'media', media: { payload: ulaw(20) } });
+    expect(s.phone.isOpen).toBe(false);
+    expect(s.openai().isOpen).toBe(false);
+    expect((await s.relay.done).endReason).toBe('failed');
+  });
+});
+
+
+it('R9: a trusted scoped finish waits for exactly its response and playback, then disposes', async () => {
+  const phone = new FakeSocket(); const model = new FakeSocket();
+  const tokens = new StreamTokenStore<PinnedCall>(); const token = tokens.mint(pinnedFor(pizzaSpecV2)) ?? '';
+  const calls = fakeCalls(); const tools = fakeToolset(); const unsubscribe = vi.fn();
+  let finish: ((event: { callId: string; agentVersionId: string; responseId: string }) => void) | undefined;
+  const finishes = { subscribe: vi.fn((_callId: string, listener: NonNullable<typeof finish>) => { finish = listener; return unsubscribe; }) };
+  const relay = runPhoneRelay({ phone, tokens, calls, events: fakeEvents(), toolsetFactory: () => tools.toolset, openaiSocketFactory: () => model, logger: fakeLogger().logger, messageChannel: 'qr_only', finishes });
+  phone.emit({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ1', customParameters: { streamToken: token } } });
+  await vi.waitFor(() => expect(finishes.subscribe).toHaveBeenCalled());
+  model.open(); model.emit({ type: 'session.updated' });
+  finish?.({ callId: 'other_call', agentVersionId: 'agv_pizza_01_v2', responseId: 'bye' });
+  model.emit({ type: 'response.done', response: { id: 'bye', status: 'completed', output: [] } });
+  expect(phone.isOpen).toBe(true);
+  finish?.({ callId: 'call_test_01', agentVersionId: 'agv_pizza_01_v2', responseId: 'bye2' });
+  model.emit({ type: 'response.output_audio.delta', item_id: 'bye_item', delta: ulaw(20) });
+  model.emit({ type: 'response.done', response: { id: 'unrelated', status: 'completed', output: [] } });
+  expect(phone.isOpen).toBe(true);
+  model.emit({ type: 'response.done', response: { id: 'bye2', status: 'completed', output: [] } });
+  expect(phone.isOpen).toBe(true);
+  phone.emit({ event: 'mark', mark: { name: 'p1' } });
+  expect((await relay.done).why).toBe('goodbye played');
+  expect(phone.isOpen).toBe(false); expect(model.isOpen).toBe(false);
+  expect(unsubscribe).toHaveBeenCalledOnce(); expect(tools.dispose).toHaveBeenCalledOnce();
+});
+
+
+it('R1: even an allowlisted code is redacted when it is the accepted stream credential', async () => {
+  const s = setup({ credential: 'invalid_api_key' }); await s.connect();
+  s.openai().emit({ type: 'error', error: { type: 'invalid_request_error', code: s.token } });
+  await s.relay.done;
+  expect(JSON.stringify(s.lines)).not.toContain(s.token);
+});
+
+it.each([40, 60])('R8: a correlated decision at %s ms invalidates goodbye while unrelated decisions do not', async (at) => {
+  vi.useFakeTimers();
+  const s = setup({ withDecisions: true, result: { ok: true, proposalId: 'ord_1', approvalId: 'apv_1' }, limits: { pendingWaitMs: 50, goodbyeMaxMs: 100 } });
+  s.start(); await vi.advanceTimersByTimeAsync(1);
+  s.openai().open(); s.openai().emit({ type: 'session.updated' });
+  s.openai().emit(s.fnCall('propose_order', '{}', 'fc_p'));
+  await vi.advanceTimersByTimeAsync(at);
+  const goodbye = s.openai().ofType('response.create').find((m) => m.response !== undefined) as { response?: Json } | undefined;
+  if (goodbye?.response) s.openai().emit({ type: 'response.created', response: { id: 'pending_bye', metadata: goodbye.response.metadata } });
+  s.decide({ kind: 'rejected', proposalId: 'wrong', approvalId: 'apv_other' });
+  expect(JSON.stringify(s.openai().sent)).not.toContain('not able to take this order');
+  s.decide({ kind: 'rejected', proposalId: 'ord_1', approvalId: 'apv_1' });
+  s.openai().emit({ type: 'response.done', response: { id: 'pending_bye', status: 'cancelled', output: [] } });
+  s.openai().emit({ type: 'response.done', response: { id: 'pending_bye', status: 'completed', output: [] } });
+  await vi.advanceTimersByTimeAsync(150);
+  expect(s.phone.isOpen).toBe(true);
+  s.phone.emit({ event: 'stop' }); await s.relay.done;
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+
+it('R6: acknowledged audio with completed generations stays bounded through a long call', async () => {
+  const s = setup(); await s.connect();
+  for (let i = 0; i < 2000; i++) {
+    s.openai().emit({ type: 'response.output_audio.delta', item_id: `item_${i}`, delta: ulaw(1) });
+    s.openai().emit({ type: 'response.output_item.done', item: { id: `item_${i}` } });
+    s.phone.emit({ event: 'mark', mark: { name: `p${i + 1}` } });
+  }
+  expect(s.phone.isOpen).toBe(true);
+  expect(s.phone.ofType('media')).toHaveLength(2000);
+  s.phone.emit({ event: 'stop' }); await s.relay.done;
+});
+
+it('R6: missing generation-end events cannot grow item metadata beyond the relay bound', async () => {
+  const s = setup(); await s.connect();
+  for (let i = 0; i < 130; i++) {
+    s.openai().emit({ type: 'response.output_audio.delta', item_id: `item_${i}`, delta: ulaw(1) });
+    s.phone.emit({ event: 'mark', mark: { name: `p${i + 1}` } });
+  }
+  expect(s.phone.ofType('media')).toHaveLength(128);
+  expect((await s.relay.done).endReason).toBe('failed');
+});
+
+it('R10: only enumerated recoverable errors are tolerated, with a finite retry budget', async () => {
+  const s = setup(); await s.connect();
+  s.openai().emit({ type: 'error', error: { type: 'invalid_request_error', code: 'response_cancel_not_active' } });
+  expect(s.phone.isOpen).toBe(true);
+  s.openai().emit({ type: 'error', error: { type: 'invalid_request_error', code: 'response_cancel_not_active' } });
+  expect(s.phone.isOpen).toBe(true);
+  s.openai().emit({ type: 'error', error: { type: 'invalid_request_error', code: 'response_cancel_not_active' } });
+  expect((await s.relay.done).why).toBe('repeated model errors');
+});
+
+
+it('R4: an adapted model socket in CLOSING is also terminated at the configured grace', async () => {
+  vi.useFakeTimers();
+  class ClosingModel extends EventEmitter {
+    readyState = 1; bufferedAmount = 0;
+    send(_data: string, cb: (error?: Error) => void) { cb(); }
+    close() { this.readyState = 2; }
+    terminate = vi.fn(() => { this.readyState = 3; this.emit('close', 1000); });
+  }
+  const raw = new ClosingModel(); const phone = new FakeSocket();
+  const tokens = new StreamTokenStore<PinnedCall>(); const token = tokens.mint(pinnedFor(pizzaSpecV2)) ?? '';
+  const relay = runPhoneRelay({ phone, tokens, calls: fakeCalls(), events: fakeEvents(), toolsetFactory: () => fakeToolset().toolset, openaiSocketFactory: () => adaptWs(raw as unknown as WebSocket), logger: fakeLogger().logger, messageChannel: 'qr_only', limits: { closeGraceMs: 20 } });
+  phone.emit({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ1', customParameters: { streamToken: token } } });
+  await vi.advanceTimersByTimeAsync(1);
+  phone.emit({ event: 'stop' }); await relay.done;
+  expect(raw.readyState).toBe(2);
+  await vi.advanceTimersByTimeAsync(21);
+  expect(raw.terminate).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('R9: a trusted ordinary finish with no audio or proposal closes both peers immediately', async () => {
+  vi.useFakeTimers();
+  const phone = new FakeSocket(); const model = new FakeSocket(); const tools = fakeToolset();
+  const tokens = new StreamTokenStore<PinnedCall>(); const token = tokens.mint(pinnedFor(pizzaSpecV2)) ?? '';
+  let finish: ((event: { callId: string; agentVersionId: string; responseId: string }) => void) | undefined;
+  const unsubscribe = vi.fn();
+  const relay = runPhoneRelay({ phone, tokens, calls: fakeCalls(), events: fakeEvents(), toolsetFactory: () => tools.toolset, openaiSocketFactory: () => model, logger: fakeLogger().logger, messageChannel: 'qr_only', finishes: { subscribe: (_id, listener) => { finish = listener; return unsubscribe; } } });
+  phone.emit({ event: 'start', start: { callSid: 'CA123', streamSid: 'MZ1', customParameters: { streamToken: token } } });
+  await vi.advanceTimersByTimeAsync(1);
+  model.open(); model.emit({ type: 'session.updated' });
+  finish?.({ callId: 'call_test_01', agentVersionId: 'wrong_version', responseId: 'bye' });
+  model.emit({ type: 'response.done', response: { id: 'bye', status: 'completed', output: [] } });
+  expect(phone.isOpen).toBe(true);
+  finish?.({ callId: 'call_test_01', agentVersionId: 'agv_pizza_01_v2', responseId: 'bye' });
+  model.emit({ type: 'response.done', response: { id: 'bye', status: 'completed', output: [] } });
+  expect((await relay.done).why).toBe('goodbye played');
+  expect(phone.isOpen).toBe(false); expect(model.isOpen).toBe(false);
+  expect(unsubscribe).toHaveBeenCalledOnce(); expect(tools.dispose).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(0);
 });

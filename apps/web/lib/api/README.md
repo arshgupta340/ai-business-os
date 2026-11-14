@@ -12,10 +12,11 @@ Every business-scoped hook takes `businessId` as its first argument. Pass `useBu
 
 | File | What it holds |
 |---|---|
-| `pending-contracts.ts` | Temporary Zod schemas and types transcribed from `docs/CONTRACTS.md`. Type names match CONTRACTS.md; schemas add `Schema`. Replaced by `packages/contracts` once S-02 merges. |
-| `api-shapes.ts` | Temporary request and response shapes from `docs/API.md` (`Business`, `Agent`, `AgentVersion`, `PreviewResponse`, `PublishResponse`, `BuilderTurnResponse`, `FactsListResponse`, `OrderCheckout`, `Page`). Same swap rule. |
-| `client.ts` | One function per endpoint, exported as `api` from the barrel. Validates every response. |
-| `errors.ts` | `ApiError` and the code table. |
+| `index.ts` | The barrel. Re-exports every type and schema of `@abos/contracts`, so screens import them from `@/lib/api`. The contract's error envelope type is `ApiErrorBody`, because `ApiError` is the class below. |
+| `client.ts` | One function per endpoint, exported as `api` from the barrel. Method, path and response schema come from `ENDPOINTS` in `@abos/contracts`; bodies and queries are typed with `EndpointBody` and `EndpointQuery`. Validates every response. |
+| `payload.ts` | `payloadOf(event)`: an event's payload with the contract's type for its `type`. |
+| `realtime-row.ts` | What a Supabase Realtime row does: it always refetches the affected queries; it joins the feed only if `activityEventFromRow` parses it. |
+| `errors.ts` | `ApiError`. The code table is the contract's `ERROR_CODE_INFO`. |
 | `hooks.ts` | The hooks below. |
 | `useActivityFeed.ts` | Live events, mock or Supabase Realtime. |
 | `query-keys.ts` | Every query key. |
@@ -46,7 +47,7 @@ Queries return the normal React Query result (`data`, `isPending`, `error`, `ref
 
 | Hook | Arguments | `data` or mutation variables |
 |---|---|---|
-| `useBusinesses({ enabled? })` | optional `enabled` (default true) | `Page<BusinessListItem>`. `useBusiness()` from `@/lib/session` already uses it for the selector. |
+| `useBusinesses({ enabled? })` | optional `enabled` (default true) | `ListBusinessesResponse` `{ items: BusinessSummary[] }` (`id`, `name`, `category`, `timezone`; no cursor). `useBusiness()` from `@/lib/session` already uses it for the selector. |
 | `useBusiness(businessId)` | | `Business` (contact has `phone?`, `email?`, `address?`) |
 | `useUpdateBusiness(businessId)` | mutate `{ name?, contact?, settings? }` | `Business` |
 | `useFacts(businessId, { kind?, status? })` | `kind`: `hours`, `policy`, `service`, `contact`, `faq`, `menu_item`. Default status leaves out `superseded`. | `FactsListResponse` `{ items: BusinessFact[], conflicts: FactConflict[] }` (open conflicts) |
@@ -69,8 +70,8 @@ A price conflict (`kind: "menu_item"`) is never resolved by a fact edit. Keep Sq
 
 | Hook | Arguments | Result |
 |---|---|---|
-| `useCreateBuilderSession(businessId)` | mutate `{ agentId? }` or nothing | `BuilderSessionResponse` (`BuilderSession` with `messages`, plus `progress`) |
-| `useBuilderSession(businessId, sessionId)` | | `BuilderSessionResponse` |
+| `useCreateBuilderSession(businessId)` | mutate `{ agentId? }` or nothing | `BuilderSession` (with `messages` and `progress`) |
+| `useBuilderSession(businessId, sessionId)` | | `BuilderSession` |
 | `useSendBuilderMessage(businessId, sessionId)` | mutate `{ text, inputMode: "text" \| "voice" }` | `BuilderTurnResponse`: `reply`, `draftSpec`, `missingFields`, `suggestions`, `stopConditions`, `progress`, `unsupportedRequests` (always), `proposedChange?` `{ approvalId, bundleType }`. When `proposedChange` is present, open the confirm dialog for that approval. |
 | `useRealtimeClientSecret(businessId)` | mutate `{ builderSessionId }` | `RealtimeClientSecret`. In mock mode the secret is fake, so fall back to typed input. |
 
@@ -84,7 +85,7 @@ A price conflict (`kind: "menu_item"`) is never resolved by a fact edit. Keep Sq
 | `useCreateAgent(businessId)` | mutate `{ builderSessionId }` or `{ spec }` | `Agent` in `draft` |
 | `usePreviewAgent(businessId, agentId)` | mutate `{ scenarios? }` or nothing | `PreviewResponse`. Mock tools only. |
 | `usePublishAgent(businessId, agentId)` | mutate `{ confirm: true, makeLive? }` | `PublishResponse` `{ agent, version, phoneNumber }`. `CONFLICT_UNRESOLVED` lists `details.conflictIds`. |
-| `usePauseAgent(businessId, agentId)` | mutate with no argument | nothing; the agent refetches |
+| `usePauseAgent(businessId, agentId)` | mutate with no argument | `Agent` (the paused agent); the agent queries refetch too |
 | `useRollbackAgent(businessId, agentId)` (SHOULD) | mutate `{ toVersionId, confirm: true }` | `PublishResponse` |
 | `useAgentConversation(businessId, agentId, mode)` | `mode`: `"test"` or `"sim-call"` | `{ mode, turns, sessionId, send(message), end(), isPending, error, reset() }`. `turns` holds `{ role, text, response? }`; the agent turn's `response.toolTrace` and `response.guardrail` drive the trace panel. Label `test` as "Test with mock tools" and `sim-call` as "Simulated call". |
 
@@ -128,14 +129,14 @@ Green only for `PAID_VERIFIED`, `FULFILLMENT_READY` and `BOOKED_VERIFIED` (FLOWS
 | Hook | Arguments | Result |
 |---|---|---|
 | `useActivity(businessId, { types?, correlationId?, since?, limit?, cursor? })` | | `Page<ActivityEvent>`, newest first. Use `correlationId` (a `call_` id) for one call's timeline. |
-| `useActivityFeed(businessId, { limit? })` | | `{ events, status, source, lastEventAt? }`. `events` are the ones received since mount, newest first. In mock mode the mock `reset()` control empties `events` and refetches every query. Label `status` with `statusView('feed', status)`. `status` is `connecting`, `connected`, `disconnected`, `unavailable` (no Supabase settings) or `idle` (no business). `source` is `mock` or `realtime`. Each event also refetches the affected queries, so most screens only need to mount it once. |
+| `useActivityFeed(businessId, { limit? })` | | `{ events, status, source, lastEventAt? }`. `events` are the ones received since mount, newest first. In mock mode the mock `reset()` control empties `events` and refetches every query. Label `status` with `statusView('feed', status)`. `status` is `connecting`, `connected`, `disconnected`, `unavailable` (no Supabase settings) or `idle` (no business). `source` is `mock` or `realtime`. Each event also refetches the affected queries, so most screens only need to mount it once. In real mode every Realtime row refetches, even one that does not match the contract (status rows stored as `{ subjectId, from, to }`); only rows that parse join `events`, and one warning per unparsable type is logged without the payload. |
 | `useIntegrationsHealth(businessId)` | | `IntegrationHealth`: one entry per provider (`square`, `twilio`, `openai`, `google_calendar`, `google_sheets`, `message_channel`) with `state` `connected`, `degraded` or `disconnected`. Refetches every minute. |
 | `useRefreshIntegrationsHealth(businessId)` | mutate with no argument | runs the live checks (`refresh=1`) |
 | `useTelemetry(businessId, { since? })` (SHOULD) | | `{ metrics: { name, p50Ms, p95Ms, count }[] }` |
 
-Read an event payload with its CONTRACTS.md types through `payloadOf(event)`.
+`ActivityEvent` is a union on `type`: after a check on `event.type`, `event.payload` has that type's fields. `payloadOf(event)` reads it the same way where the code passes `{ ...event, type }`.
 
-`CAPABILITY_REGISTRY` gives each capability's `effect` and `approvalMode`, for the read versus approval-gated lists in the builder and preview.
+`CAPABILITIES` gives each capability's `effect` and `approvalMode`, for the read versus approval-gated lists in the builder and preview.
 
 ## Mock mode
 
@@ -153,9 +154,9 @@ Run `npm run dev:mock` (or set `NEXT_PUBLIC_MOCK=1`). Requests go to MSW in the 
 | `simulateSyncRetry()` | The next Sheets sync fails once (`sync.failed`, `final: false`) and then succeeds. |
 | `simulateCallLost()` | Drops the scripted call before its proposal, or starts one that drops. No order is created. |
 | `simulateRejectedWebhook()` | Emits `webhook.rejected` for the pizza business. |
-| `simulatePayloadChanged(approvalId)` | Changes a pending approval's stored payload, so the next decision gets `PAYLOAD_HASH_MISMATCH`. |
+| `simulatePayloadChanged(approvalId)` | Changes a pending approval's stored payload, so the next decision gets `PAYLOAD_HASH_MISMATCH`. Returns a promise (hashing is async). |
 | `simulateNoLiveAgent()` | Leaves the number unanswered: the live agent loses `agentId` and `agentVersionId`. |
-| `reset()` | Puts every fixture back, clears stored builder sessions, and tells `useActivityFeed` to drop its events (`subscribeMockReset`). |
+| `reset()` | Puts every fixture back, clears stored builder sessions, and tells `useActivityFeed` to drop its events (`subscribeMockReset`). Returns a promise that resolves once the fixtures are back. |
 | `simulateExtractionFailed?()` | The next uploaded file ends in `FAILED`: `extraction.completed` with `extractionState: "FAILED"` and no drafts or conflicts. |
 | `simulateCatalogSyncFailed?()` | The next catalog sync ends with `sync.failed` (`target: "catalog"`, `final: true`). The catalog and `syncedAt` stay as they were. |
 | `simulateQrOnlyChannel?()` | The next pizza call is proposed with `messageChannel: "qr_only"`. After approval the message step is `SKIPPED`: no dispatch, no message event, `checkout.message` is absent, and the order goes from `PAYMENT_LINK_READY` straight to `PAYMENT_PENDING`, then to a verified sandbox payment. |
@@ -168,7 +169,7 @@ Approving any pending approval runs its scripted follow-up, not only the ones fr
 
 ### Rules the mock enforces
 
-Wrong payload hash, a second different decision, deciding an expired approval, publish without `confirm: true`, publish while a required conflict is open (the pizza fixture `cfl_pizza_01` blocks it), a simulated call on an agent that is not live, an upload over 10 MB or of a type that is not accepted, pausing a draft, resolving a price conflict through a fact edit, a reused `Idempotency-Key` with a different body. Each answers with the API.md error code. The test console reads fixtures only: it returns `apv_mock_` IDs and never stores a row or writes an event.
+Wrong payload hash, a second different decision, deciding an expired approval, publish without `confirm: true`, publish while a required conflict is open (the pizza fixture `cfl_pizza_01` blocks it), a simulated call on an agent that is not live, an upload over 10 MB, an empty upload or one of a type that is not accepted, a createAgent `spec` that is not a full `AgentSpec`, publishing a draft whose spec is not complete, pausing a draft, resolving a price conflict through a fact edit, a reused `Idempotency-Key` with a different body. Each answers with the API.md error code. The test console reads fixtures only: it returns `apv_mock_` IDs and never stores a row or writes an event.
 
 ### Fixtures (`apps/web/mocks/fixtures`)
 
@@ -183,4 +184,4 @@ Integration health: Google Calendar `degraded`, Google Sheets `disconnected`, th
 
 ### Tests
 
-`mocks/server.ts` runs the same handlers on `msw/node`. `mocks/test-setup.ts` has `useMockServer()`, which starts it with fast timing, points the client at it and resets the db before each test. Use `whenIdle()` to wait for scripted steps to finish.
+`mocks/server.ts` runs the same handlers on `msw/node`. `mocks/test-setup.ts` has `useMockServer()`, which starts it with fast timing, points the client at it and resets the db before each test (`await resetDb()`: seeding hashes with the contract's async functions). Use `whenIdle()` to wait for scripted steps to finish. To test expiry, move the mock clock with `advanceMockClock(ms)` or re-create an approval with `setApprovalExpiry(id, at)`; editing `expiresAt` alone breaks the contract's cross-field rules. `mocks/contract.test.ts` sends one request to every endpoint in `ENDPOINTS` and parses each answer with its response schema.

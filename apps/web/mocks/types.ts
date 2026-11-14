@@ -1,9 +1,13 @@
 import type {
   ActionExecution,
   ActivityEvent,
+  Agent,
+  AgentVersion,
   ApprovalRequest,
   Booking,
+  BuilderProgress,
   BuilderSession,
+  Business,
   BusinessFact,
   Call,
   CatalogItem,
@@ -13,17 +17,19 @@ import type {
   LiveAgent,
   MessageDispatch,
   Order,
-} from "@/lib/api/pending-contracts";
-import type { Agent, AgentVersion, Business } from "@/lib/api/api-shapes";
+  SyncJobState,
+  SyncRecordType,
+  SyncTarget,
+} from "@abos/contracts";
 
 /** A sync_jobs row (DATA-MODEL.md). Not exposed by any endpoint; seen through sync.* events. */
 export interface SyncJob {
   id: string;
   businessId: string;
-  target: "google_sheets" | "catalog";
-  recordType?: "order" | "booking";
+  target: SyncTarget;
+  recordType?: SyncRecordType;
   recordId?: string;
-  status: "PENDING" | "RUNNING" | "DONE" | "RETRYING" | "FAILED";
+  status: SyncJobState;
   attempts: number;
   createdAt: string;
   updatedAt: string;
@@ -33,11 +39,11 @@ export interface SyncJob {
 export type AgentRecord = Omit<Agent, "isLiveAgent" | "activeVersion">;
 
 export interface BuilderSessionRecord {
-  /** session.messages is the message list. */
-  session: BuilderSession;
+  /** session.messages is the message list. progress is kept beside it and added when served. */
+  session: Omit<BuilderSession, "progress">;
   script: "restaurant_order_taker" | "appointment_booker" | "revise";
   step: number;
-  progress: { answered: number; required: number };
+  progress: BuilderProgress;
 }
 
 export interface MockState {

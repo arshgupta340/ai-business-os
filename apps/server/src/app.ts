@@ -7,6 +7,8 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { healthRoutes } from './api/health';
 import { apiRoutes } from './api/routes';
 import { registerSimCall } from './api/simcall/index';
+import { pricesPlugin } from './api/prices/index';
+import { createRecoveryPlugin } from './api/recovery/index';
 import { createAuthGuard, routeAuthPolicyOf, withAuthPolicy, type RouteAuthPolicy } from './auth/verify';
 import { builderPlugin } from './builder/index';
 import { composeServer, type ComposeOptions, type ComposedServer } from './compose/index';
@@ -100,13 +102,33 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
   // Authenticates every contract route Arsh owns. Builder routes use their own BuilderAuth seam.
   app.addHook('preHandler', createAuthGuard(composed.db, composed.verifier));
 
-  await app.register(healthRoutes, { env });
+  await app.register(healthRoutes, { env, ...(composed.databaseProbe ? { database: composed.databaseProbe } : {}) });
   await app.register(withAuthPolicy('owner', apiRoutes), { db: composed.db, ports: composed.enginePorts, env, catalog: composed.catalogSync, providerStatus: composed.providers.status, health: composed.health });
   await app.register(withAuthPolicy('owner', async (scope) => {
     registerSimCall(scope, { db: composed.db, calls: composed.calls, toolsetFor: composed.toolsetFor, model: composed.agentModel, now: composed.now, newId: composed.newId });
   }));
-  // The builder authenticates its own routes through BuilderAuth (composed.builder.auth).
-  await app.register(withAuthPolicy('builder', builderPlugin), composed.builder);
+  // The builder authenticates its own routes through BuilderAuth (composed.builder.auth). Every builder
+  // route declares config { auth: 'builder' } itself, which the default-deny guard reads.
+  // Issue #96 item 3: uploads and their conflicts are still held in memory by the builder (no database
+  // stores for files, upload facts and conflicts yet), while the facts list reads fact_conflicts. A
+  // database conflict sent to the in-memory resolve route would be a silent 404, so it gets a contract
+  // error naming the route that resolves it on the database instead.
+  if (composed.databaseProbe) {
+    app.addHook('preHandler', async (request) => {
+      const match = /^\/api\/conflicts\/([^/?]+)\/resolve$/.exec(request.url.split('?')[0] ?? '');
+      if (!match || request.method !== 'POST') return;
+      // Only for an authenticated owner of that conflict's business; anything else goes on to the
+      // builder's own auth and handler, so a conflict's existence is never shown to anyone else.
+      const auth = composed.builder.auth;
+      const owner = auth ? await auth.authenticate(request).catch(() => null) : null;
+      if (!auth || !owner) return;
+      const found = (await composed.db.query('select business_id from public.fact_conflicts where id = $1', [decodeURIComponent(match[1]!)])).rows[0] as { business_id: string } | undefined;
+      if (!found || !(await auth.ownsBusiness(owner, found.business_id))) return;
+      throw new AppError('INTEGRATION_UNAVAILABLE', 'This conflict is resolved from the facts list on this server.', undefined, false,
+        { use: 'POST /api/businesses/:id/facts/propose with resolvesConflictId' });
+    });
+  }
+  await app.register(builderPlugin, composed.builder);
 
   // Phone calls (B-15). Off, with a log line naming the missing settings, when a key is absent.
   // When it is off, the voice webhook answers 503 (Twilio retries later) and /ws/phone does not exist.
@@ -121,6 +143,12 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
         code: 'INTEGRATION_UNAVAILABLE', message: 'Phone voice is not configured on this server.', correlationId: request.correlationId, retryable: true }));
     });
   }
+
+  // P-11 price change proposals (B-26). The global guard authenticates the owner and the business first.
+  await app.register(withAuthPolicy('owner', pricesPlugin), composed.prices);
+
+  // Order cancel and NEEDS_REVIEW resolution (B-32). The plugin re-checks the owner and the business.
+  await app.register(withAuthPolicy('owner', createRecoveryPlugin(composed.recovery)));
 
   // GET /api/telemetry (B-30). The global guard has already authenticated the owner.
   await app.register(withAuthPolicy('owner', telemetryPlugin), composed.telemetry);

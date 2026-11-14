@@ -3,7 +3,7 @@ import {
   canonicalJson, type ActionExecution, type ActivityEvent, type ApprovalPayload,
 } from '@abos/contracts';
 import { handlers } from './handlers.js';
-import type { ExecutorDeps, StepOutcome } from './types.js';
+import type { ExecutorDeps, StepOutcome, SubjectsPort } from './types.js';
 
 /** Far above any provider timeout, so a live call is never mistaken for a crashed one. */
 export const DEFAULT_STALE_AFTER_MS = 15 * 60 * 1000;
@@ -126,9 +126,17 @@ export function createExecutor(deps: ExecutorDeps) {
     try {
       await deps.queue.finish(step.id, deps.workerId, outcome);
     } catch {
-      // A rolled-back local commit after a provider request must never trigger a new request.
+      // A rolled-back local commit after a provider request must never trigger a new request. The
+      // provider reference the step learned (the Square order ID of a created link) is kept on the
+      // review result, so recovery can read the link back instead of losing it (review finding 2), and
+      // a checkout subject moves to RECOVERY_REQUIRED with it, in the same transaction.
+      const knownRef = outcome.externalRef;
+      const subjectId = material?.subjectId;
       outcome = { status: externalAttempted ? 'NEEDS_REVIEW' : 'FAILED', errorCode: 'INTERNAL', reason: 'Execution persistence failed',
-        continueBundle: externalAttempted && isMessage(step) };
+        continueBundle: externalAttempted && isMessage(step), ...(knownRef ? { externalRef: knownRef } : {}),
+        ...(subjectId && step.actionType === 'square.checkout.create'
+          ? { apply: (subjects: SubjectsPort) => subjects.moveOrder(step.businessId, subjectId, 'RECOVERY_REQUIRED') } : {}) };
+      // If even this fails, the step stays RUNNING and stale recovery moves it (and the order) to review.
       await deps.queue.finish(step.id, deps.workerId, outcome);
     }
     const event: ActivityEvent = outcome.status === 'SUCCEEDED'

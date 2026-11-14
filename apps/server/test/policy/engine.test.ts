@@ -253,8 +253,29 @@ describe('bookings and facts', () => {
     await expect(engine.decide(decision(approval))).rejects.toMatchObject({ code: 'INVALID_STATE' });
     expect(await counts()).toMatchObject({ executions: 0 });
   });
-  it('refuses an edit of a key that has no verified fact, and a second pending edit of one fact', async () => {
-    await expect(engine.proposeFactEdit({ businessId: ids.businessId, ownerUserId: ids.ownerUserId, kind: 'policy', key: 'nothing', value: 'x' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  it('a new key: the subject is a draft holding the value, and confirming promotes it to verified version 1', async () => {
+    const { approval } = await engine.proposeFactEdit({ businessId: ids.businessId, ownerUserId: ids.ownerUserId, kind: 'policy', key: 'parking', value: 'street' });
+    expect(approval.payload).toMatchObject({ fromVersion: 0, before: null, after: 'street', kind: 'policy', key: 'parking' });
+    const draft = (await t.db.query('select id, status, value, source_type from business_facts where id=$1', [approval.subjectId])).rows[0];
+    expect(draft).toEqual({ id: approval.subjectId, status: 'draft', value: 'street', source_type: 'owner_ui' });
+    const result = await engine.decide(decision(approval));
+    expect(result.executions[0]?.status).toBe('SUCCEEDED');
+    const facts = (await t.db.query("select id, status, version, verified_by from business_facts where business_id=$1 and kind='policy' and key='parking'", [ids.businessId])).rows;
+    expect(facts).toEqual([{ id: approval.subjectId, status: 'verified', version: 1, verified_by: ids.ownerUserId }]);
+    const changed = (await t.db.query("select payload from activity_events where correlation_id=$1 and type='fact.changed'", [approval.id])).rows;
+    expect(changed).toEqual([{ payload: expect.objectContaining({ factId: approval.subjectId, fromVersion: 0, toVersion: 1 }) }]);
+  });
+  it('a new key reuses a draft with the same value, and refuses a draft changed after the proposal (INVALID_STATE)', async () => {
+    const draftId = newId('fact_');
+    await t.insert('business_facts', { id: draftId, business_id: ids.businessId, kind: 'policy', key: 'wifi', value: JSON.stringify('yes'), source_type: 'upload', status: 'draft', version: 1 });
+    const { approval } = await engine.proposeFactEdit({ businessId: ids.businessId, ownerUserId: ids.ownerUserId, kind: 'policy', key: 'wifi', value: 'yes' });
+    expect(approval.subjectId).toBe(draftId);
+    await t.db.query(`update business_facts set value='"no"' where id=$1`, [draftId]);
+    await expect(engine.decide(decision(approval))).rejects.toMatchObject({ code: 'INVALID_STATE' });
+    expect((await t.db.query('select status from business_facts where id=$1', [draftId])).rows[0]).toEqual({ status: 'draft' });
+  });
+  it('refuses an unknown conflict ID (NOT_FOUND) and a second pending edit of one fact', async () => {
+    await expect(engine.proposeFactEdit({ businessId: ids.businessId, ownerUserId: ids.ownerUserId, kind: 'policy', key: 'nothing', value: 'x', resolvesConflictId: 'cfl_missing' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
     await verifiedFact('policy', 'pickup', 'a');
     await engine.proposeFactEdit({ businessId: ids.businessId, ownerUserId: ids.ownerUserId, kind: 'policy', key: 'pickup', value: 'b' });
     await expect(engine.proposeFactEdit({ businessId: ids.businessId, ownerUserId: ids.ownerUserId, kind: 'policy', key: 'pickup', value: 'c' })).rejects.toMatchObject({ code: 'INVALID_STATE' });

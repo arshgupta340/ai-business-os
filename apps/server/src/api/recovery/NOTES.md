@@ -1,0 +1,21 @@
+# B-32 recovery wiring and holds
+
+Register `createRecoveryPlugin(ports)` after the owner auth guard. It reads `request.ownerUserId` and independently verifies business ownership. No app.ts or compose changes were made.
+
+`resolveNeedsReview` maps one to one to the migration's checked recovery routine. That routine must lock the execution and subject, verify owner, business, current `NEEDS_REVIEW` state, original approved material, attempts and unchanged key, write exactly one decision for the execution attempt, append the supplied audit event and return the execution. Repeating that same action in the same attempt returns current state. The opposing action is `INVALID_STATE`. A later worker-created `NEEDS_REVIEW` attempt is a new generation and keeps the original provider key. The routine must not use `private.finish_execution`, which requires a worker lease on `RUNNING`.
+
+The route currently supports only `abandon` after a bounded lookup proves absence. It refuses retry before any provider lookup. It also refuses provider evidence that an effect exists. These are deliberate holds until the dependencies below are merged. An unknown, partial or unsupported provider lookup must return `unknown`, which the route refuses. A list miss, missing external ID, incomplete pagination or eventual-consistency window never proves absence.
+
+Needed from the database and contract owners before enabling retry or existing-effect resolution:
+
+- Add reviewed execution, dispatch, order and booking recovery transitions. These include `FAILED` recovery where intended, `RECOVERY_REQUIRED` checkout continuation, and any message retry state. The current shared state machines do not permit them.
+- Add checked routines that atomically combine the recovery decision with all related changes. A discovered checkout needs saved verified references and the order transition. A discovered calendar event needs booking verification and exactly one Sheets sync job. A message retry needs a durable recovery-attempt claim bound to the proven-absent decision and exact approved body.
+- Update the message worker and store. `sendOnce` currently returns any existing `QUEUED`, `FAILED` or `UNKNOWN` dispatch without sending, so resetting or requeuing the same row cannot resend it. The recovery-attempt claim must preserve the existing execution and provider key, permit only one worker to consume it, and never make `SENT`, `DELIVERED` or uncertain attempts sendable.
+- Implement durable decision storage and routine wrappers against the restricted `abos_app` role. Test these routines under that role for rollback, restart, executor and webhook contention, duplicate decisions, booking sync-job uniqueness and cancellation during a running or uncertain checkout.
+- Verify per-provider discovery before returning `exists` or `absent`: Square checkout lookup by stored references or another proven material match; each message provider's accepted or absent result; and Calendar deterministic-ID visibility and absence. Until spikes establish that evidence, adapters must return `unknown`.
+
+Cancellation remains injected because it changes the non-protected `orders` row, but its implementation must fence queued and running work and write the order event atomically. Payment reconciliation runs outside cancellation's lock and commits independently, then cancellation re-reads the order.
+
+Proposal for owner ratification: human fallback does not need per-call owner approval because it is not Square, customer messaging, Calendar or Sheets. It is permitted only when the fallback number is a verified business fact, the published version handling the call enables human fallback, and the call is an active record for that business. One provider handoff call uses one stable key. This recovery module has no human fallback route, call update or provider call, so it cannot perform or authorize a handoff.
+
+The plugin contains no provider write port. Tests use only local fakes and cover in-process serialization, not restart durability or a live database. No provider, production credential, live database or server wiring was used.

@@ -68,8 +68,14 @@ function renderScreen(agentId: string) {
 }
 
 async function createPizzaDraft(name = 'Pizza Test Agent') {
+  // CreateAgentBodySchema: a spec sent directly is a full AgentSpec.
   const agent = await api.createAgent(PIZZA, {
     spec: {
+      id: 'agt_pizza_test',
+      businessId: PIZZA,
+      version: 1,
+      status: 'draft',
+      guardrailVersion: 'v1',
       template: 'restaurant_order_taker',
       name,
       channel: 'phone',
@@ -78,7 +84,7 @@ async function createPizzaDraft(name = 'Pizza Test Agent') {
       capabilities: ['catalog.read', 'order.quote', 'order.propose', 'order.checkout.prepare', 'message.checkout.send'],
       writePolicy: 'owner_approval_each_action_bundle',
       escalation: 'explain_unsupported_or_offer_callback',
-    } as never,
+    },
   });
   requests.length = 0;
   return agent;

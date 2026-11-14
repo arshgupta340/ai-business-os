@@ -5,6 +5,7 @@ import {
   type BuilderTurnResponse as ContractBuilderTurnResponse,
   type BusinessFact,
   type DraftAgentSpec,
+  type JsonValue,
 } from '@abos/contracts';
 import { BuilderAgentSpecSchema } from '../spec';
 import { toPlainSpokenText } from '../runner/plain-text';
@@ -16,7 +17,9 @@ import {
   TEMPLATE_KNOWLEDGE_SCOPES,
   type CapabilitySetFit,
 } from '../registry';
+import { KeyedLock } from '../publish/lock';
 import { apiError, newId } from '../util';
+import { readableFactValue, sameFactMeaning, typedFactValue } from './fact-values';
 import type { BusinessContext, BusinessKnowledge } from './knowledge';
 import { BuilderModelUnavailable, BuilderTurnOutputSchema, type BuilderModel, type BuilderTurnOutput } from './model';
 import { computeFieldStatus, fieldRule, stopConditions, suggestions, type BuilderStopCondition, type FieldStatus } from './requirements';
@@ -31,9 +34,47 @@ const AI_DISCLOSURE = /\b(AI|artificial intelligence)\b/i;
 export type BuilderSessionView = BuilderSession;
 
 // The package's BuilderTurnResponse. `proposedChange` is present only when a
-// turn created a fact_edit or price_edit approval. This builder does not create
-// approvals yet (the approval engine is Arsh's), so it is never set today.
+// turn created a fact_edit approval through `proposeFactFromChat`.
 export type BuilderTurnResponse = ContractBuilderTurnResponse & { stopConditions: BuilderStopCondition[] };
+
+// Creates a fact_edit approval for an owner's chat answer (P-09). The server
+// composition passes the approval engine's version. The input is the shape of
+// compose/builder.ts ProposeFactFromChat plus three fields the builder knows:
+//   new key:      subjectId is the draft fact row (its value equals `value`),
+//                 fromVersion 0, before null (migration 0005).
+//   existing key: subjectId is the verified fact, with its version and value.
+// `value` is always typed for its readers (fact-values.ts), never a text blob.
+// The same draft always gives the same subjectId, so the engine can find an
+// approval it already opened for it. A function that ignores the extra fields
+// still fits.
+export interface ProposeFactFromChatInput {
+  businessId: string;
+  ownerUserId: string;
+  kind: BusinessFact['kind'];
+  key: string;
+  value: JsonValue;
+  reason?: string;
+  subjectId: string;
+  fromVersion: number;
+  before: JsonValue | null;
+}
+export type ProposeFactFromChat = (input: ProposeFactFromChatInput) => Promise<{ approvalId: string; bundleType: 'fact_edit' }>;
+
+const CONFIRM_PENDING = 'I saved your answer as a draft, but I could not open the confirmation for it just now, so it still needs your confirmation. I will try again on your next message.';
+
+// An approval expires 10 minutes after it is created (SPEC 2.9). After that,
+// repeating the same answer opens a new one.
+const APPROVAL_EXPIRY_MS = 10 * 60_000;
+
+// What the builder records about a proposal, on the stored assistant message of
+// the turn that made it. The session's messages are stored whole, so the
+// record survives a restart. It is removed from every message the API returns.
+interface ProposalRecord {
+  factId: string;
+  approvalId: string;
+  proposedAt: string;
+}
+type StoredMessage = BuilderMessage & { proposals?: ProposalRecord[] };
 
 export interface BuilderSessionDeps {
   sessions: BuilderSessionStore;
@@ -42,9 +83,14 @@ export interface BuilderSessionDeps {
   knowledge: BusinessKnowledge;
   model: BuilderModel;
   now: () => Date;
+  // Optional. Without it, chat answers stay drafts and no approval is created.
+  proposeFactFromChat?: ProposeFactFromChat;
 }
 
 export class BuilderSessionService {
+  // One turn per session at a time, in this process (see message()).
+  private readonly turns = new KeyedLock();
+
   constructor(private readonly deps: BuilderSessionDeps) {}
 
   async create(input: { businessId: string; ownerId: string; agentId?: string }): Promise<BuilderSessionView> {
@@ -80,8 +126,18 @@ export class BuilderSessionService {
     return view(session, status);
   }
 
+  // Turns for one session run one at a time in this process, so two answers
+  // sent together cannot both read "no draft yet" or overwrite each other's
+  // messages. The session store has no revision column, so across processes
+  // the builder only refuses a write when the stored session changed since it
+  // was read (a check, not an atomic compare and swap).
   async message(businessId: string, sessionId: string, input: { text: string; inputMode: 'text' | 'voice' }): Promise<BuilderTurnResponse> {
+    return this.turns.run(`${businessId}:${sessionId}`, () => this.turn(businessId, sessionId, input));
+  }
+
+  private async turn(businessId: string, sessionId: string, input: { text: string; inputMode: 'text' | 'voice' }): Promise<BuilderTurnResponse> {
     const session = await this.load(businessId, sessionId);
+    const loadedAt = session.updatedAt;
     if (session.status !== 'active') throw apiError('INVALID_STATE', 'This builder session is closed.', { state: session.status });
     const context = await this.context(businessId);
     const priorDrafts = await this.deps.draftFacts.listBySession(businessId, sessionId);
@@ -125,31 +181,83 @@ export class BuilderSessionService {
 
     const { spec: nextSpec, patch, dropped } = mergeSpec(session.draftSpec, out, split.allowed, context);
 
-    // Answers count only for fields that were missing and can be answered in chat.
+    // Answers count only for fields that can be answered in chat. Without
+    // proposeFactFromChat, only a field that was missing before the turn takes
+    // an answer, kept as the owner's text (as before). With it, the answer is
+    // typed for its readers, and an answer may also change a verified fact or
+    // correct an earlier draft; each saved draft then opens a fact_edit.
+    const propose = this.deps.proposeFactFromChat;
+    const ledger = proposalLedger(session.messages);
     const newDrafts: BusinessFact[] = [];
+    const repeated = new Set<string>();
+    const hints: string[] = [];
     for (const answer of out.answers) {
       const rule = fieldRule(answer.field);
       const value = answer.value.trim().slice(0, LIMITS.answer);
-      if (!rule?.answerableInChat || !before.missing.includes(answer.field) || !value) continue;
-      if (newDrafts.some((f) => `${f.kind}.${f.key}` === answer.field)) continue;
-      newDrafts.push(this.draftFact(businessId, sessionId, answer.field, value));
+      if (!rule?.answerableInChat || !value) continue;
+      if (newDrafts.some((f) => fieldOf(f) === answer.field)) continue;
+      if (!propose) {
+        if (before.missing.includes(answer.field)) newDrafts.push(this.draftFact(businessId, sessionId, answer.field, { text: value }));
+        continue;
+      }
+      const latest = latestDraft(priorDrafts, answer.field);
+      const verified = verifiedFact(context, answer.field);
+      if (!before.missing.includes(answer.field) && !latest && !verified) continue;
+      const typed = typedFactValue(answer.field, value);
+      if (!typed.ok) {
+        if (!hints.includes(typed.hint)) hints.push(typed.hint);
+        continue;
+      }
+      if (latest && sameFactMeaning(answer.field, latest.value, typed.value)) {
+        repeated.add(latest.id);
+        continue;
+      }
+      if (!latest && verified && (sameFactMeaning(answer.field, verified.value, typed.value) || sameValue(verified.value, value))) continue;
+      newDrafts.push(this.draftFact(businessId, sessionId, answer.field, typed.value));
     }
     for (const fact of newDrafts) await this.deps.draftFacts.insertDraft(fact);
 
+    // What to propose this turn: the latest draft of each field that has a
+    // typed value and no open approval. That covers a new draft, a draft whose
+    // proposal failed on an earlier turn, and a repeated answer whose approval
+    // has expired. A draft replaced by a correction is never proposed.
+    const toPropose: BusinessFact[] = [];
+    if (propose) {
+      const latestByField = new Map<string, BusinessFact>();
+      for (const f of [...priorDrafts, ...newDrafts]) latestByField.set(fieldOf(f), f);
+      for (const [field, draft] of latestByField) {
+        if (!readableFactValue(field, draft.value)) continue;
+        const verified = verifiedFact(context, field);
+        if (verified && sameFactMeaning(field, verified.value, draft.value)) continue;
+        const record = ledger.get(draft.id);
+        if (record) {
+          const expired = this.deps.now().getTime() - Date.parse(record.proposedAt) > APPROVAL_EXPIRY_MS;
+          if (!(expired && repeated.has(draft.id))) continue;
+        }
+        toPropose.push(draft);
+      }
+    }
     const after = computeFieldStatus(nextSpec, context, [...priorDrafts, ...newDrafts]);
-    const replyText = composeReply(out.reply, unsupportedRequests, after, dropped);
+    const composed = [composeReply(out.reply, unsupportedRequests, after, dropped), ...hints].join(' ');
 
-    const reply: BuilderMessage = {
+    const reply: StoredMessage = {
       id: newId('bmsg_'),
       sessionId,
       role: 'assistant',
       inputMode: input.inputMode,
-      text: replyText,
+      text: composed,
       ...(Object.keys(patch).length > 0 ? { specPatch: patch } : {}),
       ...(after.evidence.length > 0 ? { evidenceRefs: after.evidence } : {}),
       createdAt: this.timestamp(),
     };
 
+    // The owner's turn is written before any approval is opened, so a failed
+    // session write leaves no approval behind; its drafts are proposed on the
+    // next turn.
+    const current = await this.deps.sessions.get(businessId, sessionId);
+    if (current && current.updatedAt !== loadedAt) {
+      throw apiError('INVALID_STATE', 'This builder session changed while the message was handled. Send it again.', { state: current.status });
+    }
     session.messages.push(ownerMessage, reply);
     session.draftSpec = nextSpec;
     session.missingFields = after.missing;
@@ -157,14 +265,52 @@ export class BuilderSessionService {
     await this.deps.sessions.update(session);
     await this.writeAgentDraft(session);
 
+    // Each draft opens a fact_edit approval. The turn reports the first one.
+    // A failed call keeps the draft and marks nothing, so a later turn tries
+    // again. The approval IDs are then recorded on this turn's reply. If that
+    // second write fails, the next turn proposes the same subject again: the
+    // engine sees the same subjectId, but nothing here can stop a second
+    // approval for it.
+    let proposedChange: BuilderTurnResponse['proposedChange'];
+    let confirmPending = false;
+    const made: ProposalRecord[] = [];
+    if (propose) {
+      for (const fact of toPropose) {
+        const verified = verifiedFact(context, fieldOf(fact));
+        try {
+          const created = await propose({
+            businessId,
+            ownerUserId: session.ownerId,
+            kind: fact.kind,
+            key: fact.key,
+            value: fact.value,
+            reason: 'Owner answer in the builder chat.',
+            subjectId: verified ? verified.id : fact.id,
+            fromVersion: verified ? verified.version : 0,
+            before: verified ? verified.value : null,
+          });
+          made.push({ factId: fact.id, approvalId: created.approvalId, proposedAt: this.timestamp() });
+          proposedChange ??= { approvalId: created.approvalId, bundleType: created.bundleType };
+        } catch {
+          confirmPending = true;
+        }
+      }
+    }
+    if (made.length > 0 || confirmPending) {
+      if (made.length > 0) reply.proposals = made;
+      if (confirmPending) reply.text = `${reply.text} ${CONFIRM_PENDING}`;
+      await this.deps.sessions.update(session);
+    }
+
     return {
-      reply,
+      reply: publicMessage(reply),
       draftSpec: nextSpec,
       missingFields: after.missing,
       suggestions: suggestions(after),
       stopConditions: stopConditions(nextSpec, context, after),
       progress: progress(after),
       unsupportedRequests,
+      ...(proposedChange ? { proposedChange } : {}),
     };
   }
 
@@ -184,7 +330,7 @@ export class BuilderSessionService {
     await this.deps.agents.update(agent);
   }
 
-  private draftFact(businessId: string, sessionId: string, field: string, text: string): BusinessFact {
+  private draftFact(businessId: string, sessionId: string, field: string, value: JsonValue): BusinessFact {
     const dot = field.indexOf('.');
     const now = this.timestamp();
     return {
@@ -192,9 +338,9 @@ export class BuilderSessionService {
       businessId,
       kind: field.slice(0, dot) as BusinessFact['kind'],
       key: field.slice(dot + 1),
-      // The owner's words, kept as text. Turning them into a typed value is
-      // the owner's confirm step, not the model's.
-      value: { text },
+      // Without proposeFactFromChat, the owner's words kept as text. With it,
+      // the typed value the approval proposes (the draft row is its subject).
+      value,
       sourceType: 'owner_chat',
       sourceRef: sessionId,
       status: 'draft',
@@ -310,9 +456,46 @@ export function composeReply(
   return parts.filter(Boolean).join(' ');
 }
 
+function fieldOf(f: Pick<BusinessFact, 'kind' | 'key'>): string {
+  return `${f.kind}.${f.key}`;
+}
+
+function latestDraft(drafts: readonly BusinessFact[], field: string): BusinessFact | undefined {
+  return [...drafts].reverse().find((f) => fieldOf(f) === field);
+}
+
+function proposalLedger(messages: readonly StoredMessage[]): Map<string, ProposalRecord> {
+  const out = new Map<string, ProposalRecord>();
+  for (const m of messages) for (const p of m.proposals ?? []) out.set(p.factId, p);
+  return out;
+}
+
+function publicMessage(m: StoredMessage): BuilderMessage {
+  const { proposals: _proposals, ...rest } = m;
+  return rest;
+}
+
+function verifiedFact(context: BusinessContext, field: string): BusinessFact | undefined {
+  const dot = field.indexOf('.');
+  if (dot < 0) return undefined;
+  const kind = field.slice(0, dot);
+  const key = field.slice(dot + 1);
+  return context.verifiedFacts.find((f) => f.kind === kind && f.key === key && f.status === 'verified');
+}
+
+// An answer repeats a verified fact when its text equals the fact's text, or
+// any text field of the fact's value (for example a consent policy's wording).
+function sameValue(current: BusinessFact['value'], text: string): boolean {
+  if (typeof current === 'string') return current.trim() === text;
+  if (current && typeof current === 'object' && !Array.isArray(current)) {
+    return Object.values(current).some((v) => typeof v === 'string' && v.trim() === text);
+  }
+  return false;
+}
+
 function view(session: BuilderSessionRecord, status: FieldStatus): BuilderSessionView {
   const { ownerId: _ownerId, ...rest } = session;
-  return { ...rest, missingFields: status.missing, progress: progress(status) };
+  return { ...rest, messages: rest.messages.map(publicMessage), missingFields: status.missing, progress: progress(status) };
 }
 
 function progress(status: FieldStatus) {

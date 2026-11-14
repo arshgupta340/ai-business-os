@@ -83,9 +83,9 @@ describe('KnowledgeScreen', () => {
     // jsdom's File does not survive multipart parsing in msw/node, so this test
     // answers the upload with the same mock db call the real handler makes.
     server.use(
-      http.post('*/api/businesses/:id/files', ({params}) =>
+      http.post('*/api/businesses/:id/files', async ({params}) =>
         HttpResponse.json(
-          {file: db.createFile(String(params.id), {name: 'prices.csv', mime: 'text/csv', size: 31, bytes: new Uint8Array(31)})},
+          {file: await db.createFile(String(params.id), {name: 'prices.csv', mime: 'text/csv', size: 31, bytes: new Uint8Array(31)})},
           {status: 202},
         ),
       ),
@@ -162,17 +162,16 @@ describe('FileCard', () => {
   it('says a failed extraction failed and offers to upload again', async () => {
     server.use(
       http.get('*/api/files/:id', ({params}) =>
+        // GET /api/files/:id answers with the bare FileRecord (contract ENDPOINTS.getFile).
         HttpResponse.json({
-          file: {
-            id: String(params.id),
-            businessId: 'biz_pizza_01',
-            name: 'scan.png',
-            mime: 'image/png',
-            sizeBytes: 2048,
-            sha256: 'abc',
-            extractionState: 'FAILED',
-            createdAt: at,
-          },
+          id: String(params.id),
+          businessId: 'biz_pizza_01',
+          name: 'scan.png',
+          mime: 'image/png',
+          sizeBytes: 2048,
+          sha256: `sha256:${'a'.repeat(64)}`,
+          extractionState: 'FAILED',
+          createdAt: at,
         }),
       ),
     );

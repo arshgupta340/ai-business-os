@@ -12,7 +12,6 @@ import { AppError } from '../errors';
 import type { Db } from '../db/index';
 import type { Env } from '../env';
 import type { PolicyEngine } from '../policy/engine';
-import type { InterimDb } from './ports';
 import type { Providers } from './providers';
 
 /** Everything an executor or webhook handler may need, already built from the environment. */
@@ -21,8 +20,6 @@ export interface SeamDeps {
   db: Db;
   engine: PolicyEngine;
   providers: Providers;
-  /** Writes waiting for migration 0005 (interim-db.ts). */
-  interim: InterimDb;
   now(): Date;
   newId(prefix: string): string;
   log: { info(data: Record<string, unknown>, msg: string): void; warn(data: Record<string, unknown>, msg: string): void; error(data: Record<string, unknown>, msg: string): void };
