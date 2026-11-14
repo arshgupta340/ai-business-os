@@ -1,7 +1,7 @@
 // The one place every route group is registered. Dependencies come from the composition root
 // (compose/index.ts); tests pass overrides through the same options.
 import { randomUUID } from 'node:crypto';
-import { ERROR_CODE_INFO, ResolveConflictBodySchema, WEBHOOK_ENDPOINTS, type ErrorCode } from '@abos/contracts';
+import { ENDPOINTS, ERROR_CODE_INFO, ResolveConflictBodySchema, WEBHOOK_ENDPOINTS, type ErrorCode } from '@abos/contracts';
 import cors from '@fastify/cors';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { healthRoutes } from './api/health';
@@ -110,10 +110,10 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
   }));
   // The builder authenticates its own routes through BuilderAuth (composed.builder.auth). Every builder
   // route declares config { auth: 'builder' } itself, which the default-deny guard reads.
-  // Issue #96 item 3: uploads and their conflicts are still held in memory by the builder (no database
-  // stores for files, upload facts and conflicts yet), while the facts list reads fact_conflicts. A
-  // database conflict sent to the in-memory resolve route would be a silent 404, so it gets a contract
-  // error naming the route that resolves it on the database instead.
+  // Issue #96 item 3: POST /api/conflicts/:id/resolve on a database conflict. Uploads and their
+  // conflicts are database rows now (compose/builder-extraction.ts), the same rows the facts list
+  // reads. "Keep the current value" is resolved here (api/conflicts.ts); any other choice gets a
+  // contract error naming the route that makes that change.
   if (composed.databaseProbe) {
     app.addHook('preHandler', async (request, reply) => {
       const match = /^\/api\/conflicts\/([^/?]+)\/resolve$/.exec(request.url.split('?')[0] ?? '');
@@ -126,6 +126,12 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
       const conflictId = decodeURIComponent(match[1]!);
       const found = (await composed.db.query('select business_id, kind from public.fact_conflicts where id = $1', [conflictId])).rows[0] as { business_id: string; kind: string } | undefined;
       if (!found || !(await auth.ownsBusiness(owner, found.business_id))) return;
+      // The contract scopes this route by ?businessId (API.md section 1). Under any scope but the
+      // conflict's own business the request goes on to the builder's route, which answers as every
+      // scoped route does: 400 without a scope, 403 for a business not owned, 404 for a conflict that
+      // is not in the named business, even when the same owner owns both.
+      const scope = ENDPOINTS.resolveConflict.query.safeParse(request.query);
+      if (!scope.success || scope.data.businessId !== found.business_id) return;
       // "Keep the current value": resolved here on the database, with no approval (nothing external is written).
       if (ResolveConflictBodySchema.safeParse(request.body).success) {
         const conflict = await resolveConflictKeepCurrent(composed.db, { conflictId, businessId: found.business_id, ownerUserId: owner.userId, newId: composed.newId });
