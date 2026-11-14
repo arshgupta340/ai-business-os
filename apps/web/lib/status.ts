@@ -23,7 +23,13 @@ export type StatusMachine =
   | 'agent'
   | 'fact'
   | 'fileExtraction'
-  | 'integration';
+  | 'integration'
+  /** useActivityFeed status. A client connection, not a server state. */
+  | 'feed'
+  /** A Square catalog sync job, read from sync.* events with target "catalog". */
+  | 'catalogSync'
+  /** BuilderSession.status. */
+  | 'builderSession';
 
 const view = (label: string, tone: Tone): StatusView => ({label, tone});
 
@@ -118,6 +124,29 @@ const TABLE: Record<StatusMachine, Record<string, StatusView>> = {
     degraded: view('Degraded', 'warning'),
     disconnected: view('Disconnected', 'danger'),
   },
+  // The feed is how this screen hears about changes. A connected feed
+  // confirms nothing about any order or booking, so it is never green.
+  feed: {
+    connecting: view('Live updates: connecting', 'neutral'),
+    connected: view('Live updates: on', 'info'),
+    disconnected: view('Live updates lost, data may be stale', 'warning'),
+    unavailable: view('Live updates not configured', 'warning'),
+    idle: view('No business selected', 'neutral'),
+  },
+  // Same job states as syncJob, worded for the Square catalog. syncJob stays
+  // worded for the Sheets report.
+  catalogSync: {
+    PENDING: view('Catalog sync queued', 'info'),
+    RUNNING: view('Syncing the catalog from Square', 'info'),
+    RETRYING: view('Catalog sync failed, retrying', 'warning'),
+    DONE: view('Catalog synced from Square', 'success'),
+    FAILED: view('Catalog sync failed', 'danger'),
+  },
+  builderSession: {
+    active: view('In progress', 'info'),
+    completed: view('Finished', 'neutral'),
+    abandoned: view('Abandoned', 'neutral'),
+  },
 };
 
 /** Label and tone for a server state. An unknown state shows as itself, in neutral. */
@@ -129,4 +158,19 @@ export function statusView(machine: StatusMachine, state: string): StatusView {
 export function conflictView(status: 'open' | 'resolved', required: boolean): StatusView {
   if (status === 'resolved') return view('Resolved', 'neutral');
   return required ? view('Conflict, blocks publish', 'danger') : view('Conflict', 'warning');
+}
+
+/**
+ * A menu_item draft from an upload is never a price source. Prices always
+ * come from Square, so the draft is shown for comparison only.
+ */
+export const MENU_ITEM_DRAFT_VIEW: StatusView = view('Menu draft, for comparison only', 'neutral');
+
+/**
+ * Label and tone for a fact, given its kind. Same as statusView('fact', status)
+ * except a menu_item draft, which gets MENU_ITEM_DRAFT_VIEW.
+ */
+export function factView(kind: string, status: string): StatusView {
+  if (kind === 'menu_item' && status === 'draft') return MENU_ITEM_DRAFT_VIEW;
+  return statusView('fact', status);
 }

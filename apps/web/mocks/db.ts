@@ -74,11 +74,85 @@ const fail = (code: ErrorCode, message: string, details?: Record<string, unknown
 
 let state: MockState = buildSeed();
 
+// ------------------------------------------- builder sessions across reload
+
+/**
+ * In the browser mock, builder sessions (and nothing else) are kept in
+ * sessionStorage, so a reload of /build resumes the session. Every other row
+ * still lives in memory and goes back to the fixtures on reload. The node
+ * test server turns this off (mocks/server.ts), and it is off wherever there
+ * is no service worker API (jsdom, node).
+ */
+export const BUILDER_SESSIONS_STORAGE_KEY = "abos.mock.builderSessions";
+
+type SessionStore = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
+function defaultSessionStore(): SessionStore | null {
+  if (typeof window === "undefined" || typeof navigator === "undefined" || !("serviceWorker" in navigator)) return null;
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+let sessionStore: SessionStore | null = defaultSessionStore();
+
+/** Set where builder sessions persist. null turns persistence off. Tests pass a memory store. */
+export function setBuilderSessionStore(store: SessionStore | null): void {
+  sessionStore = store;
+}
+
+/** Write the builder sessions to the store, if one is set. The handlers call this after every request. */
+export function saveBuilderSessions(): void {
+  if (!sessionStore) return;
+  try {
+    sessionStore.setItem(BUILDER_SESSIONS_STORAGE_KEY, JSON.stringify(state.builderSessions));
+  } catch {
+    // Storage full or blocked. Sessions then last until the next reload only.
+  }
+}
+
+/** Read builder sessions back from the store into the current state. Unknown or malformed data is ignored. */
+export function restoreBuilderSessions(): void {
+  if (!sessionStore) return;
+  try {
+    const raw = sessionStore.getItem(BUILDER_SESSIONS_STORAGE_KEY);
+    if (!raw) return;
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    const known = new Set(state.builderSessions.map((r) => r.session.id));
+    for (const rec of parsed as MockState["builderSessions"]) {
+      if (rec && rec.session && typeof rec.session.id === "string" && !known.has(rec.session.id)) {
+        state.builderSessions.push(rec);
+      }
+    }
+  } catch {
+    // Ignore what cannot be read.
+  }
+}
+
+restoreBuilderSessions();
+
 interface Flags {
   nextPaymentFails: boolean;
   nextSyncRetries: boolean;
+  /** The next uploaded file fails extraction. */
+  nextExtractionFails: boolean;
+  /** The next catalog sync fails. */
+  nextCatalogSyncFails: boolean;
+  /** The next pizza call is proposed with messageChannel "qr_only". */
+  nextCallQrOnly: boolean;
 }
-const flags: Flags = { nextPaymentFails: false, nextSyncRetries: false };
+const flags: Flags = {
+  nextPaymentFails: false,
+  nextSyncRetries: false,
+  nextExtractionFails: false,
+  nextCatalogSyncFails: false,
+  nextCallQrOnly: false,
+};
+/** Files whose scripted extraction ends in FAILED. */
+const failingExtractions = new Set<string>();
 
 /** Scripted payment timers by order id, so a control can fail a payment instead. */
 const paymentTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -107,7 +181,12 @@ export function resetDb(now: number = Date.now()): void {
   idempotency.clear();
   flags.nextPaymentFails = false;
   flags.nextSyncRetries = false;
+  flags.nextExtractionFails = false;
+  flags.nextCatalogSyncFails = false;
+  flags.nextCallQrOnly = false;
+  failingExtractions.clear();
   state = buildSeed(now);
+  saveBuilderSessions();
 }
 
 export function setFlag(name: keyof Flags, value: boolean): void {
@@ -354,6 +433,12 @@ export function getCatalog(businessId: string) {
 export function syncCatalog(businessId: string) {
   const jobId = newId("job_");
   emit(businessId, "sync.queued", jobId, "system", { target: "catalog", jobId });
+  if (flags.nextCatalogSyncFails) {
+    flags.nextCatalogSyncFails = false;
+    // Square did not answer. The stored catalog and syncedAt stay as they were.
+    schedule(() => emit(businessId, "sync.failed", jobId, "system", { target: "catalog", jobId, attempts: 1, final: true }), timing.stepMs);
+    return { jobId };
+  }
   schedule(() => {
     const at = nowIso();
     for (const item of state.catalog) if (item.businessId === businessId) item.syncedAt = at;
@@ -425,11 +510,30 @@ export function createFile(businessId: string, input: { name: string; mime: stri
     createdAt: nowIso(),
   };
   state.files.push(file);
+  if (flags.nextExtractionFails) {
+    flags.nextExtractionFails = false;
+    failingExtractions.add(file.id);
+  }
   schedule(() => {
     file.extractionState = "EXTRACTING";
-    schedule(() => finishExtraction(file), timing.extractionMs);
+    schedule(() => (failingExtractions.has(file.id) ? failExtraction(file) : finishExtraction(file)), timing.extractionMs);
   }, timing.extractionStartMs);
   return file;
+}
+
+/** Mock control outcome: the file could not be read, so it has no drafts and no conflicts. */
+function failExtraction(file: FileRecord): void {
+  failingExtractions.delete(file.id);
+  file.extractionState = "FAILED";
+  file.draftFactIds = [];
+  file.conflictIds = [];
+  emit(file.businessId, "extraction.completed", file.id, "system", {
+    fileId: file.id,
+    mime: file.mime,
+    extractionState: "FAILED",
+    draftFactCount: 0,
+    conflictCount: 0,
+  });
 }
 
 function finishExtraction(file: FileRecord): void {
@@ -867,8 +971,9 @@ function runOrderBundle(apv: ApprovalRequest): void {
   const record = exes.get("local.order.record")!;
   setOrderStatus(order, "APPROVED");
   let messageSent = false;
+  const qrOnly = (apv.payload as { messageChannel?: string }).messageChannel === "qr_only";
 
-  sequence([
+  const checkoutSteps: (() => void)[] = [
     () => {
       startStep(apv, checkout, c);
       setOrderStatus(order, "CREATING_CHECKOUT");
@@ -890,6 +995,31 @@ function runOrderBundle(apv: ApprovalRequest): void {
       succeedStep(apv, checkout, c, order.squarePaymentLinkId);
       setOrderStatus(order, "PAYMENT_LINK_READY");
     },
+  ];
+  const recordStep = () => {
+    startStep(apv, record, c);
+    succeedStep(apv, record, c);
+    setOrderStatus(order, "PAYMENT_PENDING");
+    void messageSent;
+    schedulePayment(order);
+  };
+
+  if (qrOnly) {
+    // SPEC 2.9: under qr_only the message step is SKIPPED, no dispatch row is
+    // created and no message event is written. The QR code carries the link.
+    sequence([
+      ...checkoutSteps,
+      () => {
+        message.status = "SKIPPED";
+        message.updatedAt = nowIso();
+        recordStep();
+      },
+    ]);
+    return;
+  }
+
+  sequence([
+    ...checkoutSteps,
     () => {
       startStep(apv, message, c);
       state.dispatches.push({
@@ -924,13 +1054,7 @@ function runOrderBundle(apv: ApprovalRequest): void {
       succeedStep(apv, message, c, dispatch.providerMessageId);
       setOrderStatus(order, "MESSAGE_SENT");
     },
-    () => {
-      startStep(apv, record, c);
-      succeedStep(apv, record, c);
-      setOrderStatus(order, "PAYMENT_PENDING");
-      void messageSent;
-      schedulePayment(order);
-    },
+    recordStep,
   ]);
 }
 
@@ -1335,7 +1459,9 @@ export function proposeOrderOnCall(call: Call, contact: { name: string; messageR
     pickupAt: at + 30 * MINUTE,
     at,
   });
-  const approval = orderApproval(order, call.agentVersionId, newId("apv_"), at);
+  const channel = flags.nextCallQrOnly ? "qr_only" : MESSAGE_CHANNEL;
+  flags.nextCallQrOnly = false;
+  const approval = orderApproval(order, call.agentVersionId, newId("apv_"), at, channel);
   order.approvalId = approval.id;
   state.orders.push(order);
   state.approvals.push(approval);

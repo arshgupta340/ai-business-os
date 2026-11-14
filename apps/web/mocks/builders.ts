@@ -127,7 +127,14 @@ export function buildOrder(input: {
   };
 }
 
-export function orderApproval(order: Order, agentVersionId: string, id: string, at: number): ApprovalRequest {
+/** messageChannel defaults to MESSAGE_CHANNEL. The mock passes "qr_only" for a call made after simulateQrOnlyChannel(). */
+export function orderApproval(
+  order: Order,
+  agentVersionId: string,
+  id: string,
+  at: number,
+  messageChannel: string = MESSAGE_CHANNEL,
+): ApprovalRequest {
   const expiresAt = iso(at + APPROVAL_TTL_MS);
   const actionBundle = [...BUNDLE_ACTIONS.order_bundle];
   const payload = {
@@ -139,7 +146,7 @@ export function orderApproval(order: Order, agentVersionId: string, id: string, 
     currency: "USD" as const,
     pickupAt: order.fulfillment.pickupAt,
     messageRecipient: order.contact.messageRecipient,
-    messageChannel: MESSAGE_CHANNEL,
+    messageChannel,
     actionBundle,
     expiresAt,
   };

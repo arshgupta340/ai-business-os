@@ -16,8 +16,9 @@ import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ActivityEventSchema, type ActivityEvent } from "./pending-contracts";
 import { isMockMode } from "./config";
-import { subscribeMockActivity } from "./mock-bridge";
+import { subscribeMockActivity, subscribeMockReset } from "./mock-bridge";
 import { invalidateForEvent } from "./invalidation";
+import { queryKeys } from "./query-keys";
 
 export type ActivityFeedStatus =
   /** Subscribing. */
@@ -80,7 +81,17 @@ export function useActivityFeed(businessId: string | null | undefined, options: 
 
     if (mock) {
       setStatus("connected");
-      return subscribeMockActivity(businessId, onEvent);
+      const stopEvents = subscribeMockActivity(businessId, onEvent);
+      // After the mock reset() control the held events describe data that no
+      // longer exists, so drop them and refetch what is on screen.
+      const stopReset = subscribeMockReset(() => {
+        setEvents([]);
+        void queryClient.invalidateQueries({ queryKey: queryKeys.all });
+      });
+      return () => {
+        stopEvents();
+        stopReset();
+      };
     }
 
     let cancelled = false;

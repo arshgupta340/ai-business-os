@@ -44,8 +44,9 @@ function requireId(id: MaybeId, name: string): string {
 
 // ----------------------------------------------------------- businesses
 
-export function useBusinesses() {
-  return useQuery({ queryKey: queryKeys.businesses(), queryFn: () => api.listBusinesses() });
+/** Pass `{ enabled: false }` to hold the call, for example while signed out. */
+export function useBusinesses(options: { enabled?: boolean } = {}) {
+  return useQuery({ queryKey: queryKeys.businesses(), queryFn: () => api.listBusinesses(), enabled: options.enabled ?? true });
 }
 
 export function useBusiness(businessId: MaybeId) {

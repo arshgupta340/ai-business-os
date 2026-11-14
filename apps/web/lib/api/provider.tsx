@@ -9,11 +9,16 @@
  * Next.js drops it and MSW never reaches the production bundle.
  */
 import { useEffect, useState, type ReactNode } from "react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ApiError } from "./errors";
+import { reportApiError } from "./session-errors";
 
 export function createApiQueryClient(): QueryClient {
   return new QueryClient({
+    // Every failed call is reported once, centrally. The session layer turns
+    // UNAUTHENTICATED into sign-in and FORBIDDEN_BUSINESS into a business fallback.
+    queryCache: new QueryCache({ onError: (error, query) => reportApiError(error, query.queryKey) }),
+    mutationCache: new MutationCache({ onError: (error) => reportApiError(error) }),
     defaultOptions: {
       queries: {
         staleTime: 15_000,

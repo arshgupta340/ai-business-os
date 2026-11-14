@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="AI Business OS">
+  <!-- App mark: a speech bubble (the phone agent) holding a check (the owner's approval). -->
+  <path d="M6 4h20a4 4 0 0 1 4 4v12a4 4 0 0 1-4 4H14l-6 5v-5H6a4 4 0 0 1-4-4V8a4 4 0 0 1 4-4z" fill="rgb(28 43 74)"/>
+  <path d="M10 14.5l4 4 8-8" fill="none" stroke="rgb(255 255 255)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

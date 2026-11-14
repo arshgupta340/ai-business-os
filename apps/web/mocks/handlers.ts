@@ -47,6 +47,9 @@ function route(fn: (ctx: Ctx) => unknown | Promise<unknown>, okStatus = 200): Ht
       if (err instanceof db.MockHttpError) return errorResponse(err, correlationId);
       const message = err instanceof Error ? err.message : String(err);
       return errorResponse(new db.MockHttpError("INTERNAL", `Mock handler error: ${message}`), correlationId);
+    } finally {
+      // Browser mock only: keeps builder sessions across a reload (no effect in tests).
+      db.saveBuilderSessions();
     }
   };
 }
