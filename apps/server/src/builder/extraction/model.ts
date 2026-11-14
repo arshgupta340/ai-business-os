@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { FileMime } from './types';
+import type { FileMime } from '@abos/contracts';
 
 // The extraction model: one structured-output call per file (P-12). Two
 // implementations, as for the builder model: OpenAiDocumentExtractor

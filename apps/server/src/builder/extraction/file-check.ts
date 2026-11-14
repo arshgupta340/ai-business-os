@@ -1,7 +1,12 @@
 import { apiError } from '../util';
 import { CsvParseError, parseCsv } from './csv';
 import { readXlsxRows, SpreadsheetError } from './spreadsheet';
-import { ACCEPTED_MIME, MAX_UPLOAD_BYTES, XLSX_MIME, type FileMime } from './types';
+import { FileMimeSchema, UPLOAD_MAX_BYTES, type FileMime } from '@abos/contracts';
+
+// The upload cap (SPEC 2.9) and the accepted types (API.md 3.2, P-12), from the package.
+export const MAX_UPLOAD_BYTES = UPLOAD_MAX_BYTES;
+export const ACCEPTED_MIME: readonly FileMime[] = FileMimeSchema.options;
+export const XLSX_MIME = FileMimeSchema.enum['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'];
 
 // The upload check. It runs on the server before anything is stored or sent
 // to a model. Three things must agree: the file name's extension, the

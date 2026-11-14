@@ -1,3 +1,4 @@
+import { ActivityEventSchema } from '@abos/contracts';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../../app';
@@ -149,7 +150,7 @@ describe('publish: confirm and validation', () => {
     expect(up.statusCode).toBe(202);
     let file;
     for (let i = 0; i < 200; i++) {
-      file = (await get(h.app, `/api/files/${up.json().file.id}?${PIZZA}`)).json().file;
+      file = (await get(h.app, `/api/files/${up.json().file.id}?${PIZZA}`)).json();
       if (file.extractionState === 'EXTRACTED' || file.extractionState === 'FAILED') break;
       await new Promise((r) => setTimeout(r, 5));
     }
@@ -290,7 +291,8 @@ describe('publish: makeLive and events', () => {
     h.events.events.length = 0;
     const quiet = await publish(h, faq, { confirm: true, makeLive: false }, BARBER);
     expect(quiet.statusCode).toBe(200);
-    expect(quiet.json().phoneNumber).toBeUndefined();
+    // The package's PublishResponse always carries the number; isLiveAgent says this agent does not answer it.
+    expect(quiet.json().phoneNumber).toBe(NUMBER);
     expect(quiet.json().agent).toMatchObject({ state: 'live', isLiveAgent: false });
     expect(h.events.events.map((e) => e.type)).toEqual(['agent.published']);
     expect(h.events.events[0]!.payload).toEqual({ agentId: faq, agentVersionId: quiet.json().version.id, version: 1 });
@@ -325,6 +327,8 @@ describe('publish: makeLive and events', () => {
       'live_agent.changed': ['phoneNumberLast4', 'agentId', 'agentVersionId', 'previousAgentId'],
     };
     for (const e of h.events.events) for (const key of Object.keys(e.payload)) expect(allowed[e.type]).toContain(key);
+    // And each one matches the package's ActivityEventSchema.
+    for (const e of h.events.events) expect(ActivityEventSchema.safeParse(e).success).toBe(true);
   });
 });
 
@@ -341,7 +345,8 @@ describe('pause', () => {
     h.events.events.length = 0;
     const paused = await post(h.app, `/api/agents/${id}/pause?${PIZZA}`);
     expect(paused.statusCode).toBe(200);
-    expect(paused.json().agent).toMatchObject({ id, state: 'paused', activeVersionId: v1, isLiveAgent: true });
+    // The package's pauseAgent response is the Agent itself, not { agent }.
+    expect(paused.json()).toMatchObject({ id, state: 'paused', activeVersionId: v1, isLiveAgent: true });
     expect(h.events.events.map((e) => [e.type, e.payload])).toEqual([['agent.paused', { agentId: id }]]);
     expect(await h.liveAgents.get()).toEqual(pointer);
 
@@ -512,9 +517,24 @@ describe('rollback', () => {
     h.events.events.length = 0;
     const res = (await post(h.app, `/api/agents/${id}/rollback?${PIZZA}`, { toVersionId: v1.id, confirm: true })).json();
     expect(res.agent).toMatchObject({ state: 'live', activeVersionId: v1.id, isLiveAgent: false });
-    expect(res.phoneNumber).toBeUndefined();
+    expect(res.phoneNumber).toBe(NUMBER);
     expect(h.events.events.map((e) => e.type)).toEqual(['agent.published']);
     expect(await h.liveAgents.get()).toBeUndefined();
+  });
+
+  it('rollback with makeLive true (in the package RollbackBodySchema) moves the number to the agent', async () => {
+    const h = await harness();
+    const id = await createAgent(h);
+    const v1 = (await publish(h, id, { confirm: true, makeLive: false })).json().version;
+    await editDraft(h, id, 'Second goal.');
+    const v2 = (await publish(h, id, { confirm: true, makeLive: false })).json().version;
+    h.events.events.length = 0;
+    const res = (await post(h.app, `/api/agents/${id}/rollback?${PIZZA}`, { toVersionId: v1.id, confirm: true, makeLive: true })).json();
+    expect(res).toMatchObject({ agent: { state: 'live', activeVersionId: v1.id, isLiveAgent: true }, phoneNumber: NUMBER });
+    expect(h.events.events.map((e) => [e.type, e.payload])).toEqual([
+      ['live_agent.changed', { phoneNumberLast4: '0142', agentId: id, agentVersionId: v1.id }],
+      ['agent.published', { agentId: id, agentVersionId: v1.id, version: 1, phoneNumberLast4: '0142', rolledBackFrom: v2.id }],
+    ]);
   });
 });
 

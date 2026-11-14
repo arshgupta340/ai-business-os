@@ -1,7 +1,9 @@
-import type { DayKey } from './fixtures';
+import type { HoursKey } from '@abos/contracts';
 
-// Time zone helpers built on Intl only. Used by the mock toolset to place
-// slots and pickup times in the business timezone.
+type DayKey = HoursKey;
+
+// Time zone helpers built on Intl only. Used by the recorded agent scripts to
+// place slots and pickup times in the business timezone.
 
 interface LocalParts {
   year: number;

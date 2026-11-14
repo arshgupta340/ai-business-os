@@ -1,5 +1,10 @@
-import { DAY_KEYS, type DayKey } from '../fixtures';
-import { FactKindSchema, type FactKind } from '../pending-contracts';
+import { FactKindSchema, HoursKeySchema, type FactKind, type HoursKey, type JsonValue } from '@abos/contracts';
+
+// A plain JSON object: every value sanitize builds is a fact value (jsonb).
+export type JsonObject = { [key: string]: JsonValue };
+
+type DayKey = HoursKey;
+const DAY_KEYS = HoursKeySchema.options;
 import { ExtractedFactSchema, type ExtractedValue } from './model';
 
 // Turns raw extractor output into safe draft fact candidates. This is the
@@ -14,7 +19,7 @@ export const LIMITS = { facts: 200, text: 500, name: 80, variation: 40, sourceRe
 export interface DraftCandidate {
   kind: FactKind;
   key: string;
-  value: Record<string, unknown>;
+  value: JsonObject;
   confidence: number;
   sourceRef: string;
 }
@@ -61,7 +66,7 @@ function hhmm(raw: string | null): string | undefined {
 
 const intIn = (v: number | null, min: number, max: number) => (v != null && Number.isInteger(v) && v >= min && v <= max ? v : undefined);
 
-function hoursFact(key: string, v: ExtractedValue): { key: string; value: Record<string, unknown> } | undefined {
+function hoursFact(key: string, v: ExtractedValue): { key: string; value: JsonObject } | undefined {
   const k = key.trim().toLowerCase();
   const day = (DAY_KEYS as readonly string[]).includes(k) ? (k as DayKey) : DAY_NAMES[k];
   if (!day) return undefined;
@@ -72,7 +77,7 @@ function hoursFact(key: string, v: ExtractedValue): { key: string; value: Record
   return { key: day, value: { open, close } };
 }
 
-function menuItemFact(v: ExtractedValue): { key: string; value: Record<string, unknown> } | undefined {
+function menuItemFact(v: ExtractedValue): { key: string; value: JsonObject } | undefined {
   const itemName = cleanText(v.itemName, LIMITS.name);
   const priceMinor = intIn(v.priceMinor, 0, LIMITS.priceMinor);
   if (!itemName || priceMinor === undefined || !normalizeName(itemName)) return undefined;
@@ -81,7 +86,7 @@ function menuItemFact(v: ExtractedValue): { key: string; value: Record<string, u
   return { key, value: { itemName, ...(variationName ? { variationName } : {}), priceMinor, currency: 'USD' } };
 }
 
-function serviceFact(v: ExtractedValue): { key: string; value: Record<string, unknown> } | undefined {
+function serviceFact(v: ExtractedValue): { key: string; value: JsonObject } | undefined {
   const name = cleanText(v.itemName ?? v.text, LIMITS.name);
   if (!name || !normalizeName(name)) return undefined;
   const priceMinor = intIn(v.priceMinor, 0, LIMITS.priceMinor);
@@ -97,7 +102,7 @@ function serviceFact(v: ExtractedValue): { key: string; value: Record<string, un
   };
 }
 
-function policyFact(key: string, v: ExtractedValue): { key: string; value: Record<string, unknown> } | undefined {
+function policyFact(key: string, v: ExtractedValue): { key: string; value: JsonObject } | undefined {
   const k = slug(key);
   if (!/^[a-z][a-z0-9_]*$/.test(k)) return undefined;
   const minutes = intIn(v.minutes, 0, 10_080);
@@ -107,14 +112,14 @@ function policyFact(key: string, v: ExtractedValue): { key: string; value: Recor
   return text ? { key: k, value: { text } } : undefined;
 }
 
-function contactFact(key: string, v: ExtractedValue): { key: string; value: Record<string, unknown> } | undefined {
+function contactFact(key: string, v: ExtractedValue): { key: string; value: JsonObject } | undefined {
   const k = key.trim().toLowerCase();
   if (k !== 'phone' && k !== 'email' && k !== 'address') return undefined;
   const text = cleanText(v.text, k === 'address' ? 200 : 120);
   return text ? { key: k, value: { text } } : undefined;
 }
 
-function faqFact(key: string, v: ExtractedValue): { key: string; value: Record<string, unknown> } | undefined {
+function faqFact(key: string, v: ExtractedValue): { key: string; value: JsonObject } | undefined {
   const answer = cleanText(v.text, LIMITS.text);
   const question = cleanText(v.question, 200);
   const k = slug(question ?? key);
@@ -134,7 +139,7 @@ export function sanitizeExtraction(raw: unknown): DraftCandidate[] {
     const kind = FactKindSchema.safeParse(fact.kind.trim());
     if (!kind.success) continue; // kinds outside the documented list are dropped
     const key = fact.key.slice(0, 200);
-    let shaped: { key: string; value: Record<string, unknown> } | undefined;
+    let shaped: { key: string; value: JsonObject } | undefined;
     switch (kind.data) {
       case 'hours':
         shaped = hoursFact(key, fact.value);

@@ -1,7 +1,8 @@
+import { BuilderSessionIdSchema, type Agent, type AgentStatus } from '@abos/contracts';
 import { z } from 'zod';
-import { AgentSpecSchema, type AgentSpec, type AgentStatus } from './pending-contracts';
 import { validateCapabilitySet } from './registry';
-import { toVersionView, type AgentVersionRecord, type AgentVersionView } from './publish/stores';
+import { toVersionView, type AgentVersionRecord } from './publish/stores';
+import { BuilderAgentSpecSchema } from './spec';
 import type { AgentDraftStore, AgentRecord, BuilderSessionStore } from './session/stores';
 import { apiError, newId } from './util';
 
@@ -24,25 +25,22 @@ export interface ActiveVersionReader {
   get(businessId: string, id: string): Promise<AgentVersionRecord | undefined>;
 }
 
-export interface AgentSummary {
-  id: string;
-  businessId: string;
-  name: string;
-  template: AgentRecord['template'];
-  state: AgentStatus;
-  activeVersionId?: string;
-  activeVersion?: AgentVersionView;
-  draftSpec: AgentSpec;
-  isLiveAgent: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
+// The agent summary of API.md 3.4 (the package's Agent).
+export type AgentSummary = Agent;
 
-export const CreateAgentBodySchema = z.union([
-  z.strictObject({ builderSessionId: z.string().min(1) }),
+// The body of POST /api/agents. The package's CreateAgentBodySchema is
+// `{ builderSessionId } | { spec: AgentSpec }`. The `spec` form is read here as
+// an object and checked in `create`: first against the registry and the set
+// rules (an unknown capability is CAPABILITY_NOT_ALLOWED, API.md 3.4, which a
+// schema error would turn into VALIDATION_FAILED), then against the package's
+// AgentSpecSchema after the server sets id, businessId, version and status.
+// The contract's spec form requires those four fields, which the server owns;
+// this route does not require the client to send them (see docs/notes-saina.md).
+export const CreateAgentEnvelopeSchema = z.union([
+  z.strictObject({ builderSessionId: BuilderSessionIdSchema }),
   z.strictObject({ spec: z.record(z.string(), z.unknown()) }),
 ]);
-export type CreateAgentBody = z.infer<typeof CreateAgentBodySchema>;
+export type CreateAgentBody = z.infer<typeof CreateAgentEnvelopeSchema>;
 
 export interface AgentServiceDeps {
   agents: AgentDraftStore;
@@ -83,7 +81,7 @@ export class AgentService {
     // The server owns id, businessId, version and status. A client cannot set them.
     // version 1 is the version this draft would publish as; B-17 owns versions.
     const candidate = { ...draft, id, businessId, version: 1, status: 'draft' };
-    const parsed = AgentSpecSchema.safeParse(candidate);
+    const parsed = BuilderAgentSpecSchema.safeParse(candidate);
     if (!parsed.success) {
       throw apiError('VALIDATION_FAILED', 'The draft is not complete enough to create an agent.', {
         issues: parsed.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),

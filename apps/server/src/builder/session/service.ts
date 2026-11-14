@@ -1,4 +1,13 @@
-import { AgentSpecSchema, type AgentSpec, type BuilderMessage, type BuilderSession, type BusinessFact } from '../pending-contracts';
+import {
+  type AgentSpec,
+  type BuilderMessage,
+  type BuilderSession,
+  type BuilderTurnResponse as ContractBuilderTurnResponse,
+  type BusinessFact,
+  type DraftAgentSpec,
+} from '@abos/contracts';
+import { BuilderAgentSpecSchema } from '../spec';
+import { toPlainSpokenText } from '../runner/plain-text';
 import {
   fitCapabilitySet,
   knowledgeScopesForCapabilities,
@@ -10,7 +19,7 @@ import {
 import { apiError, newId } from '../util';
 import type { BusinessContext, BusinessKnowledge } from './knowledge';
 import { BuilderModelUnavailable, BuilderTurnOutputSchema, type BuilderModel, type BuilderTurnOutput } from './model';
-import { computeFieldStatus, fieldRule, stopConditions, suggestions, type FieldStatus, type StopCondition } from './requirements';
+import { computeFieldStatus, fieldRule, stopConditions, suggestions, type BuilderStopCondition, type FieldStatus } from './requirements';
 import type { AgentDraftStore, BuilderSessionRecord, BuilderSessionStore, DraftFactStore } from './stores';
 
 export const OPENING_QUESTION = 'What would you like an agent to do for your business?';
@@ -18,22 +27,13 @@ export const OPENING_QUESTION = 'What would you like an agent to do for your bus
 const LIMITS = { reply: 2000, name: 80, goal: 300, greeting: 300, answer: 500, unsupported: 120 } as const;
 const AI_DISCLOSURE = /\b(AI|artificial intelligence)\b/i;
 
-export type BuilderSessionView = BuilderSession & { progress: { answered: number; required: number } };
+// The session as API.md 3.3 returns it (the package's BuilderSession).
+export type BuilderSessionView = BuilderSession;
 
-// API.md 3.3 and 3.12. Field names follow CONTRACTS.md where both define them.
-export interface BuilderTurnResponse {
-  reply: BuilderMessage;
-  draftSpec: Partial<AgentSpec>;
-  missingFields: string[];
-  suggestions: string[];
-  stopConditions: StopCondition[];
-  progress: { answered: number; required: number };
-  unsupportedRequests: string[];
-  // Present only when a turn created a fact_edit or price_edit approval. This
-  // builder does not create approvals yet (the approval engine is Arsh's), so
-  // it is never set today. See the B-16 report.
-  proposedChange?: { approvalId: string; bundleType: 'fact_edit' | 'price_edit' };
-}
+// The package's BuilderTurnResponse. `proposedChange` is present only when a
+// turn created a fact_edit or price_edit approval. This builder does not create
+// approvals yet (the approval engine is Arsh's), so it is never set today.
+export type BuilderTurnResponse = ContractBuilderTurnResponse & { stopConditions: BuilderStopCondition[] };
 
 export interface BuilderSessionDeps {
   sessions: BuilderSessionStore;
@@ -49,7 +49,7 @@ export class BuilderSessionService {
 
   async create(input: { businessId: string; ownerId: string; agentId?: string }): Promise<BuilderSessionView> {
     const context = await this.context(input.businessId);
-    let draftSpec: Partial<AgentSpec> = {};
+    let draftSpec: DraftAgentSpec = {};
     if (input.agentId) {
       const agent = await this.deps.agents.get(input.businessId, input.agentId);
       if (!agent) throw apiError('NOT_FOUND', 'Agent not found.');
@@ -174,7 +174,7 @@ export class BuilderSessionService {
     if (!session.agentId) return;
     const agent = await this.deps.agents.get(session.businessId, session.agentId);
     if (!agent) return;
-    const full = AgentSpecSchema.safeParse({ ...agent.draftSpec, ...session.draftSpec, id: agent.id, businessId: agent.businessId });
+    const full = BuilderAgentSpecSchema.safeParse({ ...agent.draftSpec, ...session.draftSpec, id: agent.id, businessId: agent.businessId });
     if (!full.success) return;
     agent.draftSpec = full.data;
     agent.name = full.data.name;
@@ -227,13 +227,13 @@ export class BuilderSessionService {
 // registry, never from the model. Returns the next draft and the fields that
 // changed (BuilderMessage.specPatch).
 export function mergeSpec(
-  current: Partial<AgentSpec>,
+  current: DraftAgentSpec,
   out: BuilderTurnOutput,
   allowedCapabilities: AgentSpec['capabilities'],
   context: BusinessContext,
-): { spec: Partial<AgentSpec>; patch: Partial<AgentSpec>; dropped: CapabilitySetFit['dropped'] } {
-  const spec: Partial<AgentSpec> = structuredClone(current);
-  const patch: Partial<AgentSpec> = {};
+): { spec: DraftAgentSpec; patch: DraftAgentSpec; dropped: CapabilitySetFit['dropped'] } {
+  const spec: DraftAgentSpec = structuredClone(current);
+  const patch: DraftAgentSpec = {};
   const set = <K extends keyof AgentSpec>(key: K, value: AgentSpec[K]) => {
     if (JSON.stringify(spec[key]) !== JSON.stringify(value)) {
       spec[key] = value;
@@ -296,7 +296,9 @@ export function composeReply(
   status: FieldStatus,
   dropped: CapabilitySetFit['dropped'] = [],
 ): string {
-  const parts = [modelReply.trim().slice(0, LIMITS.reply)];
+  // The reply is shown as plain text and may be read aloud (voice input), so
+  // any Markdown the model wrote is removed before the builder adds its own lines.
+  const parts = [toPlainSpokenText(modelReply).slice(0, LIMITS.reply)];
   if (unsupported.length > 0) {
     parts.push(`Not available, so it is not part of this agent: ${unsupported.join('; ')}.`);
   }

@@ -1,4 +1,4 @@
-import type { GuardrailRule, ToolName } from '../pending-contracts';
+import type { GuardrailRule, ToolName } from '@abos/contracts';
 
 // A fixed check on each caller message before the model sees it. It is a
 // second layer: the model's instructions say the same things, and the tools

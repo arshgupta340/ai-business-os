@@ -4,7 +4,7 @@ import { parseCsv } from './csv';
 import { checkUpload, cleanFileName } from './file-check';
 import { inspectXlsxZip, SpreadsheetError } from './spreadsheet';
 import { HOURS_CSV, jpeg, pdf, PIZZA_MENU_TEXT, png, webp, xlsx } from './test-samples';
-import { MAX_UPLOAD_BYTES, XLSX_MIME } from './types';
+import { MAX_UPLOAD_BYTES, XLSX_MIME } from './file-check';
 
 async function refusal(input: Parameters<typeof checkUpload>[0]) {
   const error = await checkUpload(input).then(
