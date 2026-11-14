@@ -11,7 +11,7 @@ import { executionsOrderFulfilled } from './executions';
 import { factConflicts, menuFile, menuPriceConflictResolved, pizzaFacts } from './facts';
 import { integrationHealth, checkoutPaymentPending, pizzaActivityPage, telemetry } from './operations';
 import { orderCancelled, orderPaymentPending, orders } from './orders';
-import { businessSummaries, DEMO_PHONE_NUMBER, OWNER_USER_ID, pizzaBusiness } from './world';
+import { businessSummaries, DEMO_PHONE_NUMBER, OWNER_USER_ID, ownerUser, pizzaBusiness } from './world';
 
 type FixtureResponses = { [N in EndpointName]: EndpointResponse<N> };
 
@@ -130,7 +130,7 @@ export const fixtureResponses = {
   putLiveAgent: liveAgentBarber,
   listApprovals: { items: pendingApprovals },
   getApproval: approvalOrderPending,
-  decideApproval: { approval: { id: approvalOrderPending.id, state: 'APPROVED', decidedBy: OWNER_USER_ID, decidedAt: '2026-11-14T20:31:00Z' } },
+  decideApproval: { approval: { id: approvalOrderPending.id, state: 'APPROVED', decidedBy: OWNER_USER_ID, decidedByName: ownerUser.displayName, decidedAt: '2026-11-14T20:31:00Z' } },
   listOrders: { items: orders, nextCursor: 'eyJvIjoib3JkX2RlbW9fMDEifQ' },
   getOrder: orderPaymentPending,
   getOrderCheckout: checkoutPaymentPending,

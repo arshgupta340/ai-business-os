@@ -12,6 +12,9 @@ export interface CatalogLookupPort {
     subjectId: PriceEditApprovalPayload['subjectId'];
     squareItemId: string;
     variationId: string;
+    /** Catalog cache names for display on the approval (issue #108). Never part of the payload. */
+    itemName?: string;
+    variationName?: string;
   } | null>;
 }
 export interface ApprovalPort {

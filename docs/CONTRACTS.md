@@ -218,6 +218,8 @@ type ApprovalRequest = {
   payload: OrderApprovalPayload | BookingApprovalPayload | FactEditApprovalPayload | PriceEditApprovalPayload;
   payloadHash: string;
   state: ApprovalState; expiresAt: string; decidedBy?: string /* usr_ */; decidedAt?: string; createdAt: string;
+  decidedByName?: string;      // display only (section 12): the decider's display name, read when the approval is served
+  itemName?: string; variationName?: string; // price_edit only, display only (section 12): the catalog names of the cat_ row in subjectId
 };
 type ApprovalDecision = { decision: "approve" | "reject"; payloadHash: string; reason?: string }; // Idempotency-Key header accepted
 
@@ -319,7 +321,7 @@ type GuardrailRule = "no_fact_changes" | "no_secret_reveal" | "no_approval_bypas
 
 `payloadHash(payload, bundleType?)` accepts an optional bundle type. When supplied, it validates the whole payload with that bundle's strict schema before hashing and throws on a mismatch or extra field. Omitting it preserves the existing bundle inference and material-field projection.
 
-The server builds `payload` from stored rows, never from model output. The payload holds exactly the material fields below and nothing else. `payloadHash` is the SHA-256 of the canonical JSON of the whole payload, so the stored hash is the hash of the stored payload. The payload schemas are strict: an extra field, such as `callId` or `messageConsent`, is refused.
+The server builds `payload` from stored rows, never from model output. The payload holds exactly the material fields below and nothing else. `payloadHash` is the SHA-256 of the canonical JSON of the whole payload, so the stored hash is the hash of the stored payload. The payload schemas are strict: an extra field, such as `callId` or `messageConsent`, is refused. The display fields of section 12 (`decidedByName`, `itemName`, `variationName`) sit on the approval request beside `payload`. They are not material, not hashed and not stored on the approval, and a payload that carries one is refused like any other extra field.
 
 | bundleType | Payload fields (all required unless marked) |
 |---|---|
@@ -562,7 +564,7 @@ Task S-03 creates these in `packages/contracts/fixtures/`. Every file validates 
 | `conflict.pizza.json` | One open required `FactConflict`: an uploaded menu says Large Margherita 2100, Square says 2000 (AC-02) |
 | `agents.json` | Two `AgentSpec`s: `restaurant_order_taker` for pizza, `appointment_booker` for barber, both `draft` |
 | `quote.pizza.json` | The quote used in the pizza timeline |
-| `approvals.json` | One approval per `bundleType`, with `payloadHash` computed by the section 4 recipe in the test |
+| `approvals.json` | One approval per `bundleType`, with `payloadHash` computed by the section 4 recipe in the test. Decided approvals carry `decidedByName`; the price edits carry `itemName` and `variationName` (section 12). No payload and no stored hash changed when these were added |
 | `timeline.pizza-order.jsonl` | One `ActivityEvent` per line, `call.started` to `payment.verified`, including every `order.status_changed` |
 | `timeline.booking.jsonl` | One `ActivityEvent` per line, `proposal.created` to `booking.verified` |
 
@@ -592,7 +594,7 @@ The pizza cart behind these events: one Large Margherita with Mushrooms (2150) a
 
 ## 10. Change rule
 
-Until hour 2 either lead may change this file. After hour 2 the contracts are additive only: new optional fields, new enum values, new event types, new capabilities. Nothing is renamed or removed and no optional field becomes required. Every change is a pull request labelled `contract` that updates this file, the Zod schemas and the fixtures together, and passes typecheck in CI. Saina reviews every `contract` pull request.
+Until hour 2 either lead may change this file. After hour 2 the contracts are additive only: new optional fields, new enum values, new event types, new capabilities. Nothing is renamed or removed and no optional field becomes required. Every change is a pull request labelled `contract` that updates this file, the Zod schemas and the fixtures together, and passes typecheck in CI. Saina reviews every `contract` pull request. Section 12 lists the additions made after the freeze.
 
 ## 11. Names added by this doc
 
@@ -606,7 +608,37 @@ Until hour 2 either lead may change this file. After hour 2 the contracts are ad
 - Approval payload fields `fromVersion`, `before`, `after`, and all `price_edit` fields. `ApprovalDecision.reason`.
 - Event payload fields in section 7, including `subjectType`, `sandbox`, `nextStatus`, `final`, `alternatives`, `previousAgentId`, `rolledBackFrom`, and the `sync.*` target `catalog` with `jobId`.
 - Fixture prices, the Toppings list and `conflict.pizza.json`.
+- The section 12 fields: `StopCondition.path` and `conflictIds`, `decidedByName`, `createdByName`, `itemName` and `variationName` on a price edit approval, and `resolvesConflictId` on the price proposal body.
 
 **Still open:**
 1. The cap on Square idempotency key length for `CreatePayment` (45 characters assumed) still needs spike B-02.
 2. The transitions an owner starts after approval (cancel an order, abandon a `NEEDS_REVIEW` step, retry a `RETRY_REQUIRED` booking, mark an `UNKNOWN` dispatch failed) have no endpoint in API.md. Each needs an endpoint or a ruling that it stays out of this build.
+
+## 12. Additions after the freeze
+
+Every entry is an optional field. A value without it is still valid, and no approval payload, hash or fixture ID changed.
+
+### Issue #108 (2026-11-14)
+
+```ts
+type StopCondition = {
+  code: string;            // the builder's codes: missing_timezone, open_conflict, missing_message_consent_policy, empty_catalog, missing_required_fact
+  path?: string;           // on missing_required_fact: the missing field, named as in missingFields ("hours.mon", "policy.pickup_window", "services")
+  conflictIds?: string[];  // on open_conflict: the cfl_ id of every open required conflict
+};
+```
+
+| Field | Schema, in `packages/contracts/src` | Sent by | Meaning |
+|---|---|---|---|
+| `path?` | `StopConditionSchema` (`api.ts`) | Builder turn | One `missing_required_fact` entry per missing fact. `path` tells them apart |
+| `conflictIds?` | `StopConditionSchema` (`api.ts`) | Builder turn | On `open_conflict`. Each ID is a `FactConflict.id` from `GET /api/businesses/:id/facts` |
+| `decidedByName?` | every `ApprovalRequest` variant (`schemas/approvals.ts`) and `DecisionResponseSchema` (`api.ts`) | `GET /api/approvals`, `GET /api/approvals/:id`, `POST /api/approvals/:id/decision` | The display name of the user in `decidedBy`. Absent when there is no decider (`PENDING`, `EXPIRED`) or the user has no display name. The UI keeps its own wording for that case |
+| `createdByName?` | `AgentVersionSchema` (`schemas/agents.ts`) | Not sent yet | The display name of the user in `createdBy`. The builder builds the version view and does not fill this field yet |
+| `itemName?`, `variationName?` | `PriceEditApprovalRequestSchema` (`schemas/approvals.ts`) | The approval routes above and `POST /api/businesses/:id/catalog/prices/propose` | The catalog names of the `cat_` row in `subjectId` |
+| `resolvesConflictId?` | `ProposePriceBodySchema` (`api.ts`) | Request field of `prices/propose` | The open price conflict the change is meant to settle. The server does not act on it yet (below) |
+
+**Display fields are not approval material.** `decidedByName`, `createdByName`, `itemName` and `variationName` are read from the `users` and `catalog_items` rows when the response is built. They are not stored on the approval or the version, not hashed, and not in any event or log. The owner approves the payload and its hash. A name beside it is a label for that payload's `subjectId` and nothing more.
+
+**The price edit names are the names now, not the names at proposal time.** The catalog cache keeps a row when its item leaves Square (it is marked unavailable), so a price edit for a removed item still shows its name. A renamed item shows its new name. Keeping the names as they were when the edit was proposed needs a place to store them, which is a database change: either new material fields in the payload (the strict payload schema, the hash, and the material field list in the database routine `private.material`, migration 0004), or a display column on `approval_requests` filled by the routine that creates the approval. Neither is done here.
+
+**`resolvesConflictId` on a price proposal is a name only, for now.** The `price_edit` payload does not carry it, and no column links an approval to a conflict, so an approved price edit could not resolve the conflict when it runs. The server therefore still answers a price proposal that carries it with `VALIDATION_FAILED` and the instruction to change the price, sync, then keep the current value on the conflict (API section 3.1). Making it work needs the same kind of database change as above.

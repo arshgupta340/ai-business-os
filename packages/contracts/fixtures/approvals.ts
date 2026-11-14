@@ -32,13 +32,13 @@ import {
   orderQrOnly,
 } from './orders';
 import { bookingAwaitingApproval, bookingSlotConflict, bookingVerified, bookingRejected, bookingExpired, bookingRetryRequired, bookingMessageUnknown } from './bookings';
-import { OWNER_USER_ID, addMs, shiftIsoTimes } from './world';
+import { OWNER_USER_ID, addMs, ownerUser, shiftIsoTimes } from './world';
 
 type Decision = { state: ApprovalState; decidedAt?: string };
 
-/** `decidedBy` only for APPROVED or REJECTED; `decidedAt` for every state except PENDING (EXPIRED: the expiry time). */
-function decisionFields(d: Decision, expiresAt: string): { state: ApprovalState; decidedBy?: string; decidedAt?: string } {
-  if (d.state === 'APPROVED' || d.state === 'REJECTED') return { state: d.state, decidedBy: OWNER_USER_ID, decidedAt: d.decidedAt ?? expiresAt };
+/** `decidedBy` and `decidedByName` only for APPROVED or REJECTED; `decidedAt` for every state except PENDING (EXPIRED: the expiry time). */
+function decisionFields(d: Decision, expiresAt: string): { state: ApprovalState; decidedBy?: string; decidedByName?: string; decidedAt?: string } {
+  if (d.state === 'APPROVED' || d.state === 'REJECTED') return { state: d.state, decidedBy: OWNER_USER_ID, decidedByName: ownerUser.displayName, decidedAt: d.decidedAt ?? expiresAt };
   if (d.state === 'EXPIRED') return { state: d.state, decidedAt: d.decidedAt ?? expiresAt };
   return { state: d.state };
 }
@@ -185,6 +185,9 @@ export const approvalPriceEditPending = {
     expiresAt: PRICE_EDIT_EXPIRES_AT,
   },
   payloadHash: storedHash('payload:apv_demo_p01'),
+  // Display names from the catalog row (issue #108). Outside the payload, so the stored hash is unchanged.
+  itemName: largePepperoniRow?.itemName ?? 'Pepperoni',
+  variationName: largePepperoniRow?.variationName ?? 'Large',
   state: 'PENDING',
   expiresAt: PRICE_EDIT_EXPIRES_AT,
   createdAt: PRICE_EDIT_CREATED_AT,
@@ -203,7 +206,7 @@ export const approvalFactEditApproved = decidedFactEdit('apv_demo_f88a', 'APPROV
 export const approvalFactEditRejected = decidedFactEdit('apv_demo_f88r', 'REJECTED');
 export const approvalFactEditExpired = decidedFactEdit('apv_demo_f88e', 'EXPIRED');
 const pastPriceEdit = shiftIsoTimes(approvalPriceEditPending, -60 * 60 * 1000);
-export const approvalPriceEditRejected: PriceEditApprovalRequest = { ...pastPriceEdit, id: 'apv_demo_p88r', state: 'REJECTED', decidedBy: OWNER_USER_ID, decidedAt: addMs(pastPriceEdit.createdAt, 60000), payloadHash: storedHash('payload:apv_demo_p88r') };
+export const approvalPriceEditRejected: PriceEditApprovalRequest = { ...pastPriceEdit, id: 'apv_demo_p88r', state: 'REJECTED', decidedBy: OWNER_USER_ID, decidedByName: ownerUser.displayName, decidedAt: addMs(pastPriceEdit.createdAt, 60000), payloadHash: storedHash('payload:apv_demo_p88r') };
 
 export const approvals: ApprovalRequest[] = [
   approvalBookingRejected, approvalBookingExpired, approvalBookingRetry, approvalBookingUnknown,
