@@ -233,7 +233,7 @@ describe('decision trigger details under direct service DML', () => {
   });
   it('deletion remains forbidden after approval with no executions', async () => {
     const a = await createApproval(db, owner); await approve(a.id);
-    await expect(service(() => db.query(`delete from public.approval_requests where id = $1`, [a.id]))).rejects.toThrow(/cannot be deleted/);
+    await expect(service(() => db.query(`delete from public.approval_requests where id = $1`, [a.id]))).rejects.toMatchObject({ code: '42501' });
   });
 });
 
