@@ -41,11 +41,11 @@ export type OrderOptions = { consent?: boolean; recipient?: string; cart?: Cart;
 export type Proposed = { callId: string; orderId: string; approvalId: string };
 
 /**
- * A pizza order on a simulated call: read the catalog and quote through the real toolset, then propose.
- * Without consent the toolset itself proposes (qr_only). With consent the proposal is stored through the
- * engine on the same live call, as the end-to-end tests do: the deployed toolset proposes every order as
- * qr_only until server-owned consent evidence exists (voice NOTES 3), so this is the only way to reach the
- * message path. Either way the result is a PENDING approval that only the owner can decide.
+ * A pizza order through a simulated call: read the catalog and quote through the real toolset.
+ * Without consent the toolset proposes (qr_only). With consent the proposal is stored through the
+ * composed engine on the same live call, as test/e2e/flows.test.ts does: since B-15 the deployed
+ * toolset proposes every order as qr_only until server-owned consent evidence exists (voice NOTES 3).
+ * (Adapted after the merge: the suite was written when the toolset still took consent with a read-back.)
  */
 export async function pizzaOrder(w: World, o: OrderOptions = {}): Promise<Proposed> {
   const consent = o.consent ?? true;
@@ -61,21 +61,21 @@ export async function pizzaOrder(w: World, o: OrderOptions = {}): Promise<Propos
       quote = r.quote;
       return 'quoted';
     },
-    consent ? async () => 'Thanks, the shop will review it.' : async ({ executeTool }) =>
+    consent ? async () => 'Thanks, the owner will review it.' : async ({ executeTool }) =>
       JSON.stringify(await executeTool('propose_order', { cart, contact: { name, messageConsent: false }, fulfillment, quoteId: quote!.quoteId })),
   );
   const first = await sim(w, 'agt_pizza_01', PIZZA, { message: 'What pizzas do you have?' });
   expect(first.status).toBe(200);
   const callId = first.body.callId;
   await sim(w, 'agt_pizza_01', PIZZA, { callId, message: 'Two large pepperoni' });
-  if (!quote) throw new Error('quote_order did not return a quote');
+  expect(quote).toBeDefined();
   let ids: { orderId: string; approvalId: string } | undefined;
   if (consent) {
     const call = (await w.t.db.query('select agent_version_id from calls where id = $1', [callId])).rows[0] as { agent_version_id: string };
-    const { order: stored, approval } = await w.app.composed.engine.createOrderProposal({ businessId: PIZZA, callId, agentVersionId: call.agent_version_id, cart, quote,
-      contact: { name, messageRecipient: o.recipient ?? RECIPIENT, messageConsent: true, consentAt: new Date().toISOString() }, fulfillment,
-      messageChannel: w.app.composed.providers.messageChannel });
-    ids = { orderId: stored.id, approvalId: approval.id };
+    const { order, approval } = await w.app.composed.engine.createOrderProposal({ businessId: PIZZA, callId, agentVersionId: call.agent_version_id,
+      cart, quote: quote!, contact: { name, messageRecipient: o.recipient ?? RECIPIENT, messageConsent: true, consentAt: new Date().toISOString() },
+      fulfillment, messageChannel: w.app.composed.providers.messageChannel });
+    ids = { orderId: order.id, approvalId: approval.id };
   }
   const proposed = await sim(w, 'agt_pizza_01', PIZZA, { callId, message: 'Sam, pickup at six', end: true });
   if (ids) return { callId, ...ids };
@@ -86,31 +86,32 @@ export async function pizzaOrder(w: World, o: OrderOptions = {}): Promise<Propos
 
 export type Booked = { callId: string; bookingId: string; approvalId: string; startUtc: string };
 
+let bookingOps = 0;
 /**
- * A haircut booking on a simulated call: availability through the real toolset, then a proposal with
- * consent through the composed proposal port on the live call (the toolset proposes qr_only, see above).
- * `startUtc` proposes that exact slot instead of the first free one.
+ * A haircut booking through a simulated call: availability through the real toolset, then the
+ * proposal with consent through the composed proposal port on the live call (the toolset proposes
+ * qr_only since B-15), as test/e2e/flows.test.ts does. Adapted after the merge, as pizzaOrder.
  */
-export async function bookingProposal(w: World, o: { recipient?: string; minDays?: number; startUtc?: string; name?: string } = {}): Promise<Booked> {
+export async function bookingProposal(w: World, o: { recipient?: string; minDays?: number } = {}): Promise<Booked> {
   const date = nextLocalDate([3, 4], o.minDays ?? 1); // Wednesday or Thursday, open 09:00 to 18:00
-  let slot = o.startUtc ?? '';
+  let slot = '';
   w.model.push(
     async ({ executeTool }) => {
       const r = await executeTool('read_calendar_availability', { serviceId: 'svc_haircut', date }) as ToolResult<'read_calendar_availability'>;
       if (!r.ok) return `no slots ${r.reason}`;
-      slot ||= r.slots[0]!.startUtc;
+      slot = r.slots[0]!.startUtc;
       return 'slots';
     },
-    async () => 'Thanks, the shop will confirm.',
+    async () => 'Thanks, the owner will confirm.',
   );
   const first = await sim(w, 'agt_barber_01', BARBER, { message: 'Can I get a haircut?' });
   expect(first.status).toBe(200);
+  expect(slot).not.toBe('');
   const callId = first.body.callId;
-  if (!slot) throw new Error('read_calendar_availability returned no slot');
   const call = (await w.t.db.query('select agent_version_id from calls where id = $1', [callId])).rows[0] as { agent_version_id: string };
-  const made = await w.app.composed.toolsetPorts.proposals.createBookingProposal({ businessId: BARBER, agentVersionId: call.agent_version_id, callId, correlationId: callId,
-    operationId: `op-${callId}`, signal: new AbortController().signal, serviceId: 'svc_haircut', startUtc: slot,
-    customer: { name: o.name ?? 'Ana', messageRecipient: o.recipient ?? '+15555550124', messageConsent: true }, messageChannel: w.app.composed.providers.messageChannel });
+  const made = await w.app.composed.toolsetPorts.proposals.createBookingProposal({ businessId: BARBER, agentVersionId: call.agent_version_id, callId,
+    correlationId: callId, operationId: `op-adversarial-booking-${++bookingOps}`, signal: new AbortController().signal, serviceId: 'svc_haircut', startUtc: slot,
+    customer: { name: 'Ana', messageRecipient: o.recipient ?? '+15555550124', messageConsent: true }, messageChannel: w.app.composed.providers.messageChannel });
   if (!made.ok) throw new Error(`booking proposal failed: ${made.reason}`);
   await sim(w, 'agt_barber_01', BARBER, { callId, message: 'The first one, I am Ana', end: true });
   return { callId, bookingId: made.bookingId, approvalId: made.approvalId, startUtc: slot };
@@ -221,21 +222,6 @@ export async function phoneCall(w: World, businessId: string, providerCallId: st
   const call = <N extends ToolName>(name: N, input: unknown) => toolset.handler.call(name, input as ToolInput[N], ctx);
   const businessName = ((await w.t.db.query('select name from businesses where id = $1', [businessId])).rows[0] as { name: string }).name;
   return { callId, providerCallId, businessId, businessName, agentId: agent.id, agentVersionId: agent.active_version_id, spec: agent.spec, facts, toolset, ctx, call, options: voice.options };
-}
-
-/**
- * Google returns from events.list only the events that carry the private property asked for. The
- * world's fake returns every event, which is right while a world holds one booking. Files that create
- * several bookings call this once so the fake filters as Google does.
- */
-export function filterCalendarListByProperty(w: World): void {
-  w.calendar.client.events.list = async (input) => {
-    const wanted = input.privateExtendedProperty.map((p) => { const at = p.indexOf('='); return [p.slice(0, at), p.slice(at + 1)] as const; });
-    const items = [...w.calendar.events.values()]
-      .filter((e) => wanted.every(([key, value]) => e.extendedProperties.private[key] === value))
-      .map((e) => ({ id: e.id, status: 'confirmed', htmlLink: `https://calendar.example.test/${e.id}` }));
-    return { data: { items } };
-  };
 }
 
 export type PhoneCall = Awaited<ReturnType<typeof phoneCall>>;

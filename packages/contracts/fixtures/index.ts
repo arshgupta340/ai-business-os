@@ -13,4 +13,5 @@ export * from './timelines';
 export * from './operations';
 export * from './responses';
 export * from './materialize';
+export { materializeBusyBlocks } from './wall-clock';
 export { storedHash, storedKey } from './hashes';

@@ -129,8 +129,7 @@ export function VoiceControl(props: VoiceControlProps) {
     );
   }
 
-  const retryIn = state.retryAt !== null ? Math.max(0, Math.ceil((state.retryAt - Date.now()) / 1000)) : null;
-  const message = state.failure ? failureSentence(state.failure, retryIn) : state.phase === 'ended' ? 'Voice is off.' : null;
+  const message = state.failure ? failureSentence(state.failure, voice.retryInSeconds) : state.phase === 'ended' ? 'Voice is off.' : null;
   return (
     <HStack gap={2} vAlign="center" wrap="wrap">
       {message ? (

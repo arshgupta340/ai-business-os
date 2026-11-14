@@ -105,7 +105,7 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
   await app.register(healthRoutes, { env, ...(composed.databaseProbe ? { database: composed.databaseProbe } : {}) });
   await app.register(withAuthPolicy('owner', apiRoutes), { db: composed.db, ports: composed.enginePorts, env, catalog: composed.catalogSync, providerStatus: composed.providers.status, health: composed.health });
   await app.register(withAuthPolicy('owner', async (scope) => {
-    registerSimCall(scope, { db: composed.db, calls: composed.calls, toolsetFor: composed.toolsetFor, model: composed.agentModel, now: composed.now, newId: composed.newId });
+    registerSimCall(scope, { db: composed.db, calls: composed.calls, toolsetFor: composed.toolsetFor, model: composed.agentModel, now: composed.now, newId: composed.newId, log: composed.log });
   }));
   // The builder authenticates its own routes through BuilderAuth (composed.builder.auth). Every builder
   // route declares config { auth: 'builder' } itself, which the default-deny guard reads.

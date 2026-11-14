@@ -122,10 +122,9 @@ describe('the simulated call', () => {
     expect(delta(w, before)).toEqual(NONE);
   });
 
-  // DEFECT (see the pull request): the phone relay records a refused unknown tool as a
-  // guardrail.refused event and a log line (name length only). The simulated call refuses it too,
-  // but leaves no event and no log line, so the attempt is invisible to the owner.
-  it.fails('a refused unknown tool is recorded (an event or a log line), without its arguments', async () => {
+  // Was DEFECT 6 in the pull request: the simulated call left no record of a refused unknown tool.
+  // Fixed after the merge: guardrail.refused and a log line by name length, as the phone relay does.
+  it('a refused unknown tool is recorded (an event or a log line), without its arguments', async () => {
     const events = await count(w, "activity_events where business_id = $1 and type = 'guardrail.refused'", [PIZZA]);
     const lines = logs.lines.length;
     w.model.push(async ({ executeTool }) => { await executeTool('approve_order', { marker: ARGS_MARKER }); return 'tried'; });

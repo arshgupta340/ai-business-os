@@ -63,7 +63,12 @@ export const bookingSlotConflict = booking({
   customerName: 'Chris', recipient: '+15555550142', createdAt: '2026-11-14T17:50:00Z', updatedAt: '2026-11-14T17:52:02Z',
 });
 
-export const bookings: Booking[] = [bookingAwaitingApproval, bookingSlotConflict, bookingVerified];
+export const bookingRejected: Booking = { ...bookingAwaitingApproval, id: 'bkg_demo_b88r', approvalId: 'apv_demo_b88r', status: 'REJECTED', startUtc: '2026-11-17T23:45:00Z', endUtc: '2026-11-18T00:30:00Z', createdAt: '2026-11-14T19:00:00Z', updatedAt: '2026-11-14T19:01:00Z' };
+export const bookingExpired: Booking = { ...bookingRejected, id: 'bkg_demo_b88e', approvalId: 'apv_demo_b88e', status: 'EXPIRED', startUtc: '2026-11-18T00:30:00Z', endUtc: '2026-11-18T01:15:00Z', updatedAt: '2026-11-14T19:10:00Z' };
+export const bookingRetryRequired: Booking = { ...bookingRejected, id: 'bkg_demo_b88t', approvalId: 'apv_demo_b88t', status: 'RETRY_REQUIRED', startUtc: '2026-11-18T01:15:00Z', endUtc: '2026-11-18T02:00:00Z' };
+export const bookingMessageUnknown: Booking = { ...bookingVerified, id: 'bkg_demo_b88u', approvalId: 'apv_demo_b88u', startUtc: '2026-11-18T00:00:00Z', endUtc: '2026-11-18T00:30:00Z', googleEventId: storedKey('idem:exe_demo_b88u_0') };
+
+export const bookings: Booking[] = [bookingAwaitingApproval, bookingSlotConflict, bookingVerified, bookingRejected, bookingExpired, bookingRetryRequired, bookingMessageUnknown];
 
 /** Free/busy blocks on the barbershop calendar (UTC). The verified booking is one of them. */
 export type BusyBlock = { calendarId: string; startUtc: string; endUtc: string; label: string };
@@ -71,5 +76,6 @@ export type BusyBlock = { calendarId: string; startUtc: string; endUtc: string; 
 export const barberBusyBlocks: BusyBlock[] = [
   { calendarId: BARBER_CALENDAR_ID, startUtc: '2026-11-17T17:00:00Z', endUtc: '2026-11-17T18:30:00Z', label: 'Existing appointments' },
   { calendarId: BARBER_CALENDAR_ID, startUtc: bookingVerified.startUtc, endUtc: bookingVerified.endUtc, label: 'Haircut (bkg_demo_b02)' },
+  { calendarId: BARBER_CALENDAR_ID, startUtc: bookingMessageUnknown.startUtc, endUtc: bookingMessageUnknown.endUtc, label: 'Haircut (bkg_demo_b88u)' },
   { calendarId: BARBER_CALENDAR_ID, startUtc: '2026-11-17T21:00:00Z', endUtc: '2026-11-17T22:00:00Z', label: 'Lunch' },
 ];

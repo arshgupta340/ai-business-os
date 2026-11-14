@@ -142,6 +142,12 @@ export class VoiceSession {
     return this.#state.phase === 'listening' || this.#state.phase === 'speaking';
   }
 
+  /** Milliseconds left on a rate limit, on the session's own clock (deps.now), or null when there is none. */
+  retryInMs(): number | null {
+    const {retryAt} = this.#state;
+    return retryAt === null ? null : Math.max(0, retryAt - this.#opts.deps.now());
+  }
+
   canStart(): boolean {
     if (this.#disposed || this.isActive) return false;
     const {failure, retryAt} = this.#state;

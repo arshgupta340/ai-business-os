@@ -10,6 +10,7 @@ import { fulfillOrder, markOrderPaid, markOrderPaymentFailed, isRetryableReceipt
 import type { FastifyPluginAsync } from 'fastify';
 import { verifyWebhookSignature } from '../adapters/square/index';
 import { unavailableDb, type QueryDb } from '../db/index';
+import { AppError } from '../errors';
 import { emitActivity } from '../policy/activity';
 import { pollPendingPayments } from '../reconcile/index';
 import { webhooksPlugin } from '../webhooks/plugin';
@@ -49,6 +50,25 @@ function failedReason(events: ActivityEvent[]): string {
   const failed = events.find((e) => e.type === 'payment.failed');
   const reason = String((failed?.payload as { reason?: unknown } | undefined)?.reason ?? 'FAILED').slice(0, 200);
   return reason || 'FAILED';
+}
+
+/**
+ * Codes for the reconcile failure log: a contract error code, a SQLSTATE with the routine's fixed reason
+ * when it is words only, or the error name and HTTP status. Never an ID, a provider body or a secret.
+ */
+export function reconcileErrorCodes(error: unknown): string[] {
+  const all = error instanceof AggregateError ? error.errors : [error];
+  return all.map((e) => {
+    if (!(e instanceof Error)) return 'unknown';
+    const x = e as Error & { code?: unknown; statusCode?: unknown };
+    if (e instanceof AppError) return e.code;
+    if (typeof x.code === 'string' && /^[0-9A-Z]{5}$/.test(x.code)) {
+      const reason = /^[A-Z_]+: [a-z ]+$/.test(e.message) ? e.message : /^([A-Z_]+):/.exec(e.message)?.[1];
+      return reason ? `${x.code} ${reason}` : x.code;
+    }
+    const name = /^[A-Za-z]+$/.test(e.name) ? e.name : 'Error';
+    return typeof x.statusCode === 'number' ? `${name} ${x.statusCode}` : name;
+  });
 }
 
 export type DbWebhooks = {
@@ -301,7 +321,7 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
 
   async function reconcileNow() {
     if (!providers.square) return;
-    await pollPendingPayments(deps13).catch(() => log.warn({ job: 'reconcile' }, 'payment reconciliation will retry'));
+    await pollPendingPayments(deps13).catch((error: unknown) => log.warn({ job: 'reconcile', codes: reconcileErrorCodes(error) }, 'payment reconciliation will retry'));
   }
 
   let timers: ReturnType<typeof setInterval>[] = [];
@@ -314,12 +334,17 @@ export function createDbWebhooks(deps: SeamDeps, fallback: FastifyPluginAsync, h
     plugin, enabled, missing, reconcileNow, recoverNow,
     idle: async () => { await flights; },
     start() {
-      if (!enabled || timers.length) return;
-      void recoverNow().catch(() => log.warn({ job: 'webhook-recovery' }, 'webhook recovery will retry'));
-      timers = [
-        setInterval(() => { if (!reconciling) reconciling = reconcileNow().finally(() => { reconciling = undefined; }); }, PAYMENT_POLL_INTERVAL_MS),
-        setInterval(() => { void recoverNow().catch(() => undefined); }, PAYMENT_POLL_INTERVAL_MS * 4),
-      ];
+      if (timers.length || db === unavailableDb) return;
+      // The payment poll is a Square read loop, independent of the webhook routes: without
+      // PUBLIC_SERVER_URL (local runs, a misregistered webhook) it is the only path to PAID_VERIFIED.
+      if (providers.square) {
+        timers.push(setInterval(() => { if (!reconciling) reconciling = reconcileNow().finally(() => { reconciling = undefined; }); }, PAYMENT_POLL_INTERVAL_MS));
+      }
+      // Stored-row recovery only has rows to re-run when the routes store verified events.
+      if (enabled) {
+        void recoverNow().catch(() => log.warn({ job: 'webhook-recovery' }, 'webhook recovery will retry'));
+        timers.push(setInterval(() => { void recoverNow().catch(() => undefined); }, PAYMENT_POLL_INTERVAL_MS * 4));
+      }
       for (const t of timers) t.unref?.();
     },
     async stop() {

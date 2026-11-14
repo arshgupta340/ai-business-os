@@ -10,7 +10,7 @@ import type { BuildAppOptions } from '../../src/app';
 import { currentRole } from '../support/db';
 import { OTHER, OTHER_AUTH, OWNER, OWNER_AUTH, PHONE, PUBLIC_URL, createWorld, type World } from '../e2e/world';
 import {
-  BARBER, OTHER_BIZ, PIZZA, approve, bookingProposal, count, decide, filterCalendarListByProperty, getApproval, order, paymentEvent, phoneCall, phoneRelay, pizzaOrder, signWith, sim,
+  BARBER, OTHER_BIZ, PIZZA, approve, bookingProposal, count, decide, getApproval, order, paymentEvent, phoneCall, phoneRelay, pizzaOrder, signWith, sim,
 } from './helpers';
 
 /** Marker values. None is a real credential. */
@@ -55,7 +55,6 @@ beforeAll(async () => {
     ...KEYS, TWILIO_ACCOUNT_SID: 'ACmarker', SQUARE_LOCATION_ID: 'LOC_E2E',
     DATABASE_URL: `postgres://abos_app:${DB_PASSWORD}@db.example.test:5432/postgres`, SUPABASE_URL: 'https://project.example.test',
   });
-  filterCalendarListByProperty(w);
   await w.app.ready();
   // Record every response the scenarios get, without changing it.
   const inject = w.app.inject.bind(w.app) as (o: unknown) => Promise<{ statusCode: number; body: string }>;
