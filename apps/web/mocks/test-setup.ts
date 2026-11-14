@@ -14,9 +14,9 @@ export function useMockServer(): void {
       requests.push(request.clone());
     });
   });
-  beforeEach(() => {
+  beforeEach(async () => {
     requests.length = 0;
-    resetDb();
+    await resetDb();
     configureApiClient({ baseUrl: TEST_BASE_URL, getAccessToken: async () => "test-token", fetch: (...a) => globalThis.fetch(...a) });
   });
   afterEach(async () => {

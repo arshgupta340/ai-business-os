@@ -50,7 +50,7 @@ function conflict(partial: Partial<FactConflict> & Pick<FactConflict, 'id'>): Fa
 }
 
 function event(type: ActivityEvent['type'], payload: Record<string, unknown>, id = `evt_${Math.random()}`): ActivityEvent {
-  return {id, businessId: 'biz_pizza_01', type, correlationId: 'x', actorType: 'system', occurredAt: at, payload};
+  return {id, businessId: 'biz_pizza_01', type, correlationId: 'x', actorType: 'system', occurredAt: at, payload} as ActivityEvent;
 }
 
 describe('checkUpload', () => {

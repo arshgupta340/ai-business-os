@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import * as api from "@/lib/api/client";
 import { subscribeMockActivity, subscribeMockReset } from "@/lib/api/mock-bridge";
-import type { ActivityEvent } from "@/lib/api/pending-contracts";
+import type { ActivityEvent } from "@abos/contracts";
 import {
   BUILDER_SESSIONS_STORAGE_KEY,
   getState,
@@ -60,7 +60,7 @@ describe("simulateCatalogSyncFailed", () => {
     mockControls.simulateCatalogSyncFailed?.();
     const { jobId } = await api.syncCatalog(PIZZA);
     await whenIdle();
-    const mine = events.filter((e) => e.payload.jobId === jobId).map((e) => e.type);
+    const mine = events.filter((e) => (e.payload as { jobId?: string }).jobId === jobId).map((e) => e.type);
     expect(mine).toEqual(["sync.queued", "sync.failed"]);
     const failed = events.find((e) => e.type === "sync.failed");
     expect(failed?.payload).toMatchObject({ target: "catalog", jobId, final: true });
@@ -69,7 +69,7 @@ describe("simulateCatalogSyncFailed", () => {
     const next = await api.syncCatalog(PIZZA);
     await whenIdle();
     stop();
-    expect(events.some((e) => e.type === "sync.succeeded" && e.payload.jobId === next.jobId)).toBe(true);
+    expect(events.some((e) => e.type === "sync.succeeded" && e.payload.target === "catalog" && e.payload.jobId === next.jobId)).toBe(true);
   });
 });
 
@@ -129,12 +129,12 @@ describe("price_edit", () => {
 });
 
 describe("reset", () => {
-  it("tells subscribers so the activity feed can drop its events", () => {
+  it("tells subscribers so the activity feed can drop its events", async () => {
     let calls = 0;
     const stop = subscribeMockReset(() => (calls += 1));
-    mockControls.reset();
+    await mockControls.reset();
     stop();
-    mockControls.reset();
+    await mockControls.reset();
     expect(calls).toBe(1);
   });
 });
@@ -154,14 +154,14 @@ describe("builder session persistence", () => {
 
       // A reload: fresh fixtures, then the stored sessions come back.
       const saved = store.data.get(BUILDER_SESSIONS_STORAGE_KEY)!;
-      resetDb();
+      await resetDb();
       store.data.set(BUILDER_SESSIONS_STORAGE_KEY, saved);
       restoreBuilderSessions();
       const resumed = await api.getBuilderSession(PIZZA, session.id);
       expect(resumed.id).toBe(session.id);
       expect(resumed.messages.length).toBe(session.messages.length);
 
-      mockControls.reset();
+      await mockControls.reset();
       expect(JSON.parse(store.data.get(BUILDER_SESSIONS_STORAGE_KEY)!)).toEqual([]);
     } finally {
       setBuilderSessionStore(null);

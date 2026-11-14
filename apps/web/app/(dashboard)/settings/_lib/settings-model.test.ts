@@ -166,7 +166,7 @@ describe('changeLogEntries', () => {
       actorType: 'system',
       occurredAt,
       payload,
-    });
+    }) as ActivityEvent;
     const entries = changeLogEntries(
       [
         event('e1', '2026-11-13T08:00:00.000Z', {factId: 'fri_v2', kind: 'hours', key: 'fri', fromVersion: 1, toVersion: 2, sourceType: 'owner_chat'}),
