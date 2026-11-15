@@ -1,6 +1,6 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import type {ApprovalRequest} from '@/lib/api';
-import {demoReducer, initialDemoState, isShowingResult, knownBeforeDemo, pickIncomingApproval, type DemoState} from './demo-machine';
+import {demoReducer, initialDemoState, isShowingResult, knownBeforeDemo, pickIncomingApproval, restoreDemoState, toSavedRun, type DemoState, type SavedDemoRun} from './demo-machine';
 import {STAGE_SHOPS} from '@abos/contracts/fixtures';
 import {DEMO_STEPS, runSchedule, stepsFor, totalDurationMs} from './demo-steps';
 
@@ -169,5 +169,87 @@ describe('the timed steps', () => {
     cancel();
     vi.advanceTimersByTime(totalDurationMs());
     expect(done).toEqual([0]);
+  });
+});
+
+describe('coming back to a saved run', () => {
+  const SENT = 1_000_000;
+  const saved = (extra: Partial<SavedDemoRun> = {}): SavedDemoRun => ({
+    run: 3,
+    shopKey: 'pizza',
+    message: {text: 'Build it', fileNames: [PIZZA.files.info]},
+    sentAt: SENT,
+    numberShownAt: null,
+    knownIds: null,
+    approvalId: null,
+    approvalKind: null,
+    ...extra,
+  });
+
+  it('keeps the time of sending, and saves only plain data with no decision', () => {
+    let s = demoReducer(initialDemoState(), {type: 'send', text: 'Build it', fileNames: [], shopKey: 'pizza', now: SENT});
+    expect(s.sentAt).toBe(SENT);
+    s = finishAll(s, SENT + 45_000);
+    s = demoReducer(s, {type: 'order_arrived', approvalId: 'apv_1', kind: 'order_bundle'});
+    s = demoReducer(s, {type: 'decided', approvalId: 'apv_1', state: 'APPROVED'});
+    const out = toSavedRun(s, {shownAt: SENT + 45_000, ids: new Set(['old'])})!;
+    expect(out).toMatchObject({shopKey: 'pizza', sentAt: SENT, numberShownAt: SENT + 45_000, knownIds: ['old'], approvalId: 'apv_1'});
+    expect(JSON.stringify(out)).not.toMatch(/APPROVED/);
+    expect(toSavedRun(initialDemoState(), null)).toBeNull();
+    // The orders known for an earlier moment are not carried over.
+    expect(toSavedRun(s, {shownAt: 1, ids: new Set(['old'])})!.knownIds).toBeNull();
+  });
+
+  it('resumes the steps where the clock says', () => {
+    const into = DEMO_STEPS[0]!.durationMs + DEMO_STEPS[1]!.durationMs + 100;
+    const s = restoreDemoState(saved(), {now: SENT + into});
+    expect(s.phase).toBe('progress');
+    expect(s.steps).toEqual(['done', 'done', 'running', 'pending', 'pending', 'pending']);
+    expect(s.message?.text).toBe('Build it');
+    expect(s.run).toBe(3);
+  });
+
+  it('shows the number, as of the moment it would have shown, when the build is over by now', () => {
+    const s = restoreDemoState(saved(), {now: SENT + 60_000});
+    expect(s).toMatchObject({phase: 'ready', numberShownAt: SENT + totalDurationMs()});
+    expect(s.steps.every((x) => x === 'done')).toBe(true);
+  });
+
+  it('waits again with the original moment the number was shown', () => {
+    const s = restoreDemoState(saved({numberShownAt: SENT + 45_000}), {now: SENT + 600_000});
+    expect(s).toMatchObject({phase: 'ready', numberShownAt: SENT + 45_000, approvalId: null});
+  });
+
+  it('brings back the same order or booking as waiting for its card, never as decided', () => {
+    const s = restoreDemoState(saved({numberShownAt: SENT + 45_000, approvalId: 'apv_b', approvalKind: 'booking_bundle'}), {now: SENT + 600_000});
+    expect(s).toMatchObject({phase: 'order', approvalId: 'apv_b', approvalKind: 'booking_bundle', decidedState: null});
+  });
+
+  it('restores only over the starting page', () => {
+    const restored = restoreDemoState(saved({numberShownAt: SENT}), {now: SENT});
+    expect(demoReducer(initialDemoState(), {type: 'restore', state: restored})).toBe(restored);
+    const running = sent();
+    expect(demoReducer(running, {type: 'restore', state: restored})).toBe(running);
+  });
+});
+
+describe('the timed steps, resumed', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('fire the steps already over at once and the running one when its time is up', () => {
+    vi.useFakeTimers();
+    const done: number[] = [];
+    const elapsed = DEMO_STEPS[0]!.durationMs + 1000;
+    runSchedule(DEMO_STEPS, (i) => done.push(i), 1, elapsed);
+    vi.advanceTimersByTime(0);
+    expect(done).toEqual([0]);
+    vi.advanceTimersByTime(DEMO_STEPS[1]!.durationMs - 1001);
+    expect(done).toEqual([0]);
+    vi.advanceTimersByTime(1);
+    expect(done).toEqual([0, 1]);
+    vi.advanceTimersByTime(totalDurationMs());
+    expect(done).toEqual([0, 1, 2, 3, 4, 5]);
   });
 });

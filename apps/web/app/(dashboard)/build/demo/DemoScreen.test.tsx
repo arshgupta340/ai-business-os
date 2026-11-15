@@ -6,6 +6,7 @@ import {useState} from 'react';
 import {QueryClientProvider} from '@tanstack/react-query';
 import {bookingVerified, STAGE_SHOPS, type StageShopKey} from '@abos/contracts/fixtures';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+import {renderToString} from 'react-dom/server';
 import {createApiQueryClient} from '@/lib/api/provider';
 import {BusinessProvider, useBusiness} from '@/lib/session';
 import {advanceMockClock, mockControls, server} from '@/mocks/server';
@@ -13,6 +14,7 @@ import {requests, TEST_BASE_URL, useMockServer} from '@/mocks/test-setup';
 import BuildPage from '../page';
 import {DemoScreen, SERVER_UNREACHABLE_TEXT} from './DemoScreen';
 import {addFiles} from './DemoChat';
+import {DEMO_RUN_STORAGE_KEY} from './demo-run-store';
 import {missingNumberText, NO_SHOP_TEXT, shopNotFoundText} from './stage-shop';
 
 vi.mock('next/navigation', () => ({
@@ -86,6 +88,7 @@ const decisionCalls = () => requests.filter((r) => r.method === 'POST' && new UR
 
 beforeEach(() => {
   window.localStorage.clear();
+  window.sessionStorage.clear();
   vi.stubEnv('NEXT_PUBLIC_DEMO_PHONE_NUMBER', '');
   vi.stubEnv('NEXT_PUBLIC_DEMO_PHONE_PIZZA', '+18055550123');
   vi.stubEnv('NEXT_PUBLIC_DEMO_PHONE_BARBER', '+18055550124');
@@ -501,5 +504,211 @@ describe('Demo run: the booking finale', {timeout: 30000}, () => {
     expect((await screen.findAllByText('Approved', undefined, {timeout: 3000})).length).toBeGreaterThan(0);
     expect(screen.getByText('The shop accepted this booking')).toBeTruthy();
     expect(decisionCalls()).toHaveLength(1);
+  });
+});
+
+/**
+ * The dashboard around the Build screen: the providers stay mounted while the
+ * presenter opens another tab, as on a client-side navigation.
+ */
+function DashboardHarness({stepScale}: {stepScale: number}) {
+  const [onBuild, setOnBuild] = useState(true);
+  const {setBusinessId} = useBusiness();
+  return (
+    <>
+      <button type="button" onClick={() => setOnBuild(false)}>
+        Open Activity
+      </button>
+      <button type="button" onClick={() => setOnBuild(true)}>
+        Open Build
+      </button>
+      <button type="button" onClick={() => setBusinessId(STAGE_SHOPS.pizza.businessId)}>
+        Select the pizza place
+      </button>
+      {onBuild ? <DemoScreen stepScale={stepScale} pollMs={POLL_MS} approveHoldMs={0} /> : <p>Activity tab</p>}
+    </>
+  );
+}
+
+function renderDashboard(stepScale = 0) {
+  return render(
+    <Providers>
+      <DashboardHarness stepScale={stepScale} />
+    </Providers>,
+  );
+}
+
+async function leaveBuild() {
+  await click(screen.getByRole('button', {name: 'Open Activity'}));
+  await screen.findByText('Activity tab');
+}
+
+async function backToBuild() {
+  await click(screen.getByRole('button', {name: 'Open Build'}));
+}
+
+const savedRun = () => window.sessionStorage.getItem(DEMO_RUN_STORAGE_KEY);
+
+describe('Demo run: leaving the Build screen and coming back', {timeout: 30000}, () => {
+  it('comes back to the same shop and number, still waiting, and still picks up the booking', async () => {
+    renderDashboard();
+    await reachNumber('barber');
+    await leaveBuild();
+    expect(screen.queryByText('Waiting for the call')).toBeNull();
+    // The presenter picked another business in the top bar meanwhile.
+    await click(screen.getByRole('button', {name: 'Select the pizza place'}));
+    await backToBuild();
+    expect(await screen.findByText('Waiting for the call')).toBeTruthy();
+    expect(screen.getByText(STAGE_SHOPS.barber.name)).toBeTruthy();
+    expect(screen.getByText('(805) 555-0124')).toBeTruthy();
+    expect(screen.getByText('Beard trim')).toBeTruthy();
+    expect(screen.queryByRole('button', {name: 'Use the suggested prompt'})).toBeNull();
+    // The top bar follows the run's shop again.
+    await waitFor(() => expect(selected()).toBe(STAGE_SHOPS.barber.businessId));
+    await act(async () => {
+      await mockControls.startBookingCall();
+    });
+    expect(await screen.findByText('New booking')).toBeTruthy();
+  });
+
+  it('shows an order that arrived while the presenter was on another tab', async () => {
+    renderDashboard();
+    await reachNumber();
+    // Let the first list after the number decide which orders were already there.
+    await new Promise((r) => setTimeout(r, POLL_MS * 3));
+    await leaveBuild();
+    await act(async () => {
+      await mockControls.startPizzaCall();
+    });
+    await backToBuild();
+    expect(await screen.findByText('New order')).toBeTruthy();
+    expect(await screen.findByText('1 x Large Margherita')).toBeTruthy();
+  });
+
+  it('keeps ignoring an order that was already waiting when the number was first shown', async () => {
+    await mockControls.startPizzaCall();
+    renderDashboard();
+    await reachNumber();
+    await new Promise((r) => setTimeout(r, POLL_MS * 3));
+    expect(JSON.parse(savedRun()!).knownIds.length).toBeGreaterThan(0);
+    await leaveBuild();
+    await backToBuild();
+    expect(await screen.findByText('Waiting for the call')).toBeTruthy();
+    await new Promise((r) => setTimeout(r, POLL_MS * 4));
+    expect(screen.getByText('Waiting for the call')).toBeTruthy();
+    expect(screen.queryByText('New order')).toBeNull();
+  });
+
+  it('comes back to the same order card, and shows Approved only from what the server reports', async () => {
+    renderDashboard();
+    await reachNumber();
+    let approvalId = '';
+    await act(async () => {
+      ({approvalId} = await mockControls.startPizzaCall());
+    });
+    await screen.findByText('1 x Large Margherita');
+    await leaveBuild();
+    await backToBuild();
+    expect(await screen.findByText('1 x Large Margherita')).toBeTruthy();
+    expect(screen.getByText('New order received')).toBeTruthy();
+    expect(screen.queryByText('Approved')).toBeNull();
+    requests.length = 0;
+    await clickButton('Approve');
+    expect((await screen.findAllByText('Approved', undefined, {timeout: 3000})).length).toBeGreaterThan(0);
+    expect(decisionCalls()).toHaveLength(1);
+    expect(new URL(decisionCalls()[0]!.url).pathname).toBe(`/api/approvals/${approvalId}/decision`);
+    // Only which approval is on screen is kept, never its decision.
+    expect(savedRun()).not.toMatch(/APPROVED/i);
+    await leaveBuild();
+    await backToBuild();
+    expect(await screen.findByText('1 x Large Margherita')).toBeTruthy();
+    expect((await screen.findAllByText('Approved', undefined, {timeout: 3000})).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', {name: 'Approve'})).toBeNull();
+    expect(decisionCalls()).toHaveLength(1);
+  });
+
+  it('never shows Approved from the saved run when the server says the order is still pending', async () => {
+    renderDashboard();
+    await reachNumber();
+    await act(async () => {
+      await mockControls.startPizzaCall();
+    });
+    await screen.findByText('1 x Large Margherita');
+    await leaveBuild();
+    // A saved run that claims a decision is ignored: only the approval id is read.
+    const saved = JSON.parse(savedRun()!);
+    window.sessionStorage.setItem(DEMO_RUN_STORAGE_KEY, JSON.stringify({...saved, phase: 'decided', decidedState: 'APPROVED'}));
+    await backToBuild();
+    expect(await screen.findByText('1 x Large Margherita')).toBeTruthy();
+    expect(await screen.findByRole('button', {name: 'Approve'})).toBeTruthy();
+    expect(screen.queryByText('Approved')).toBeNull();
+  });
+
+  it('comes back to the steps with the sent message while the build is still running', async () => {
+    renderDashboard(1);
+    await sendPrompt('pizza');
+    expect(await screen.findByText('Reading the menu')).toBeTruthy();
+    await leaveBuild();
+    await backToBuild();
+    expect(await screen.findByText(/Create a voice calling agent for this pizza place/)).toBeTruthy();
+    expect(screen.getByText(MENU_PDF)).toBeTruthy();
+    expect(screen.getByText('Reading the menu')).toBeTruthy();
+    expect(screen.queryByRole('button', {name: 'Use the suggested prompt'})).toBeNull();
+  });
+
+  it('jumps to the number when the build would have finished while the presenter was away', async () => {
+    renderDashboard(1);
+    await sendPrompt('pizza');
+    await screen.findByText('Reading the menu');
+    await leaveBuild();
+    // Move the send back by more than the 45 second build.
+    const saved = JSON.parse(savedRun()!);
+    window.sessionStorage.setItem(DEMO_RUN_STORAGE_KEY, JSON.stringify({...saved, sentAt: saved.sentAt - 60_000}));
+    await backToBuild();
+    expect(await screen.findByText('Waiting for the call')).toBeTruthy();
+    expect(screen.getByText('(805) 555-0123')).toBeTruthy();
+  });
+
+  it('comes back after the page is opened again in the same tab', async () => {
+    const first = renderDashboard();
+    await reachNumber('barber');
+    first.unmount();
+    renderDashboard();
+    expect(await screen.findByText('Waiting for the call')).toBeTruthy();
+    expect(screen.getByText('(805) 555-0124')).toBeTruthy();
+  });
+
+  it('after a full reload, hydrates the starting page like the server HTML, then restores the run', async () => {
+    const first = renderDashboard();
+    await reachNumber('barber');
+    first.unmount();
+    const tree = (
+      <Providers>
+        <DashboardHarness stepScale={0} />
+      </Providers>
+    );
+    const container = document.createElement('div');
+    container.innerHTML = renderToString(tree);
+    // The server has no saved run: its HTML is the starting page.
+    expect(container.textContent).toContain('Use the suggested prompt');
+    document.body.appendChild(container);
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    render(tree, {container, hydrate: true});
+    expect(await screen.findByText('Waiting for the call')).toBeTruthy();
+    expect(screen.getByText('(805) 555-0124')).toBeTruthy();
+    expect(errors.mock.calls.filter((c) => /hydrat/i.test(String(c[0])))).toEqual([]);
+    errors.mockRestore();
+  });
+
+  it('Start over clears the saved run, so coming back shows the starting page', async () => {
+    renderDashboard();
+    await reachNumber();
+    expect(savedRun()).not.toBeNull();
+    await clickButton('Start over');
+    expect(savedRun()).toBeNull();
+    await leaveBuild();
+    await backToBuild();
+    expect(await screen.findByRole('button', {name: 'Use the suggested prompt'})).toBeTruthy();
+    expect(screen.queryByText('Waiting for the call')).toBeNull();
   });
 });
