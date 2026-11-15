@@ -33,7 +33,7 @@ Lines in [brackets] are stage directions.
 
 **Saina:** "Answer my phone. Take pickup orders. Send every order to me before it is accepted."
 
-[The steps run for 30 seconds. Do not read them aloud. This is the time to talk.]
+[The steps run for 45 seconds. Do not read them aloud. This is the time to talk.]
 
 **Arsh:** "The builder reads the menu and the answers, then sets up a voice agent with its own phone number. The owner writes no code."
 

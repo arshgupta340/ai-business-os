@@ -11,6 +11,7 @@ import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {PageHeader} from '@/components/PageHeader';
 import {PENDING_APPROVALS_QUERY, useActivityFeed, useApprovals} from '@/lib/api';
+import {clearDemoAgentBuilt, markDemoAgentBuilt} from '@/lib/demo-stage';
 import {useBusiness} from '@/lib/session';
 import {
   APPROVE_HOLD_MS,
@@ -62,6 +63,12 @@ export function DemoScreen({stepScale = 1, pollMs = WAITING_POLL_MS, approveHold
     return runSchedule(DEMO_STEPS, (index) => dispatch({type: 'step_done', run, index, now: Date.now()}), stepScale);
   }, [phase, run, stepScale]);
 
+  // Overview and My Agents show the agent only once this run has reached the number.
+  useEffect(() => {
+    if (phase === 'progress') clearDemoAgentBuilt();
+    else if (phase !== 'compose') markDemoAgentBuilt();
+  }, [phase]);
+
   // The newest order that was not already waiting when the number was shown.
   // The first list after that moment says which orders to ignore, for this run only.
   const shownAt = state.numberShownAt;
@@ -92,7 +99,15 @@ export function DemoScreen({stepScale = 1, pollMs = WAITING_POLL_MS, approveHold
       actions={
         <>
           {SHOW_DEMO_BADGE ? <Badge label="Demo" variant="info" /> : null}
-          {phase !== 'compose' ? <Button label="Start over" onClick={() => dispatch({type: 'start_over'})} /> : null}
+          {phase !== 'compose' ? (
+            <Button
+              label="Start over"
+              onClick={() => {
+                clearDemoAgentBuilt();
+                dispatch({type: 'start_over'});
+              }}
+            />
+          ) : null}
         </>
       }
     />

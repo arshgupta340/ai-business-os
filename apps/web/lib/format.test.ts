@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {actorName, formatPhone, formatPhoneLocal} from './format';
+import {actorName, formatPhone, formatPhoneLocal, timeZoneAbbreviation} from './format';
 
 describe('actorName', () => {
   it('never shows a raw user ID', () => {
@@ -32,5 +32,16 @@ describe('formatPhoneLocal', () => {
   it('leaves any other number as formatPhone gives it', () => {
     expect(formatPhoneLocal('+442071838750')).toBe('+442071838750');
     expect(formatPhoneLocal('')).toBe('');
+  });
+});
+
+describe('timeZoneAbbreviation', () => {
+  it('gives the short name for the season', () => {
+    expect(timeZoneAbbreviation('America/Los_Angeles', new Date('2026-11-14T20:00:00Z'))).toBe('PST');
+    expect(timeZoneAbbreviation('America/Los_Angeles', new Date('2026-07-14T20:00:00Z'))).toBe('PDT');
+  });
+
+  it('falls back to the zone ID when the zone is unknown', () => {
+    expect(timeZoneAbbreviation('Not/AZone')).toBe('Not/AZone');
   });
 });

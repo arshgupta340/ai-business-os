@@ -13,6 +13,8 @@ import {EmptyState} from '@/components/EmptyState';
 import {PageHeader} from '@/components/PageHeader';
 import {RefreshFailedNotice} from '@/components/RefreshFailedNotice';
 import {useActivityFeed, type ActivityFeedStatus} from '@/lib/api';
+import {isDemoScript} from '@/lib/env';
+import {timeZoneAbbreviation} from '@/lib/format';
 import {useBusiness} from '@/lib/session';
 import {ActivitySection} from './ActivitySection';
 import {AgentsSection} from './AgentsSection';
@@ -47,7 +49,11 @@ export function OverviewScreen() {
 
   return (
     <VStack gap={6}>
-      <PageHeader title="Overview" description={`${business.name}, times in ${timeZone}`} />
+      {/* While the scripted demo is on, the business name is not shown here either (see TopBarContent). */}
+      <PageHeader
+        title="Overview"
+        description={isDemoScript() ? `Times in ${timeZoneAbbreviation(timeZone)}` : `${business.name}, times in ${timeZoneAbbreviation(timeZone)}`}
+      />
       <RefreshFailedNotice businessId={businessId} />
       {feedNote ? <Text type="supporting">{feed.source === 'mock' ? `${feedNote} Mock data.` : feedNote}</Text> : null}
 

@@ -4,9 +4,10 @@ import {http, HttpResponse} from 'msw';
 import {useState, type ReactNode} from 'react';
 import {QueryClient} from '@tanstack/react-query';
 import {QueryClientProvider} from '@tanstack/react-query';
-import {afterEach, beforeAll, describe, expect, it} from 'vitest';
+import {afterEach, beforeAll, describe, expect, it, vi} from 'vitest';
 import {ERROR_TEXT} from '@/lib/error-text';
 import {createApiQueryClient} from '@/lib/api';
+import {clearDemoAgentBuilt, markDemoAgentBuilt} from '@/lib/demo-stage';
 import {BusinessProvider} from '@/lib/session';
 import {BUSINESS_STORAGE_KEY} from '@/lib/session/business-selection';
 import {mockControls, server} from '@/mocks/server';
@@ -22,6 +23,8 @@ beforeAll(() => {
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
+  window.sessionStorage.clear();
+  vi.unstubAllEnvs();
 });
 
 let lastClient: QueryClient | null = null;
@@ -109,5 +112,24 @@ describe('AgentsListScreen', {timeout: 20_000}, () => {
     });
     await waitFor(() => expect(screen.queryByText('Could not refresh. Showing the last data we have.')).toBeNull());
     expect(screen.getByRole('link', {name: /Pizza FAQ Line/})).toBeTruthy();
+  });
+});
+
+describe('AgentsListScreen while the scripted demo is on', {timeout: 20_000}, () => {
+  it('shows no agent until the demo build has reached the number, then lists them', async () => {
+    vi.stubEnv('NEXT_PUBLIC_DEMO_SCRIPT', '1');
+    clearDemoAgentBuilt();
+    renderList();
+    expect(await screen.findByText('No agents yet')).toBeTruthy();
+    expect(screen.queryByRole('link', {name: /Pizza FAQ Line/})).toBeNull();
+    act(() => markDemoAgentBuilt());
+    expect(await screen.findByRole('link', {name: /Pizza FAQ Line/})).toBeTruthy();
+    expect(screen.queryByText('No agents yet')).toBeNull();
+  });
+
+  it('lists the agents as usual when the demo flag is off, built or not', async () => {
+    clearDemoAgentBuilt();
+    renderList();
+    expect(await screen.findByRole('link', {name: /Pizza FAQ Line/})).toBeTruthy();
   });
 });

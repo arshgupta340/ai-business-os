@@ -16,12 +16,12 @@ export type DemoStepDefinition = {
   durationMs: number;
 };
 
-export const MENU_STEP_MS = 5500;
-export const FAQ_STEP_MS = 5000;
-export const HOURS_STEP_MS = 4500;
-export const PAYMENTS_STEP_MS = 4500;
-export const AGENT_STEP_MS = 5500;
-export const PHONE_STEP_MS = 5000;
+export const MENU_STEP_MS = 8000;
+export const FAQ_STEP_MS = 7500;
+export const HOURS_STEP_MS = 7000;
+export const PAYMENTS_STEP_MS = 7000;
+export const AGENT_STEP_MS = 8000;
+export const PHONE_STEP_MS = 7500;
 
 export const DEMO_STEPS: readonly DemoStepDefinition[] = [
   {id: 'menu', label: 'Reading the menu', durationMs: MENU_STEP_MS},
@@ -32,7 +32,7 @@ export const DEMO_STEPS: readonly DemoStepDefinition[] = [
   {id: 'phone', label: 'Getting a phone number', durationMs: PHONE_STEP_MS},
 ];
 
-/** The whole sequence, 30 seconds: time for the presenters to talk while it runs. */
+/** The whole sequence, 45 seconds: time for the presenters to talk while it runs. */
 export function totalDurationMs(steps: readonly DemoStepDefinition[] = DEMO_STEPS): number {
   return steps.reduce((sum, s) => sum + s.durationMs, 0);
 }
