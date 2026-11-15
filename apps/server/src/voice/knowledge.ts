@@ -86,7 +86,9 @@ function hoursLine(facts: FactsSnapshot): string | undefined {
     const fact = facts.facts.find((f) => f.kind === 'hours' && f.key === key);
     const parsed = fact === undefined ? undefined : HoursValueSchema.safeParse(fact.value);
     if (parsed === undefined || !parsed.success) continue;
-    days.push('closed' in parsed.data ? `${label} closed` : `${label} ${clock(parsed.data.open)} to ${clock(parsed.data.close)}`);
+    // 00:00 to 23:59 is how a full day is stored.
+    const allDay = !('closed' in parsed.data) && parsed.data.open === '00:00' && parsed.data.close === '23:59';
+    days.push('closed' in parsed.data ? `${label} closed` : allDay ? `${label} open 24 hours` : `${label} ${clock(parsed.data.open)} to ${clock(parsed.data.close)}`);
   }
   // Every day must be readable. With a day missing, the agent keeps reading hours from the tool.
   return days.length === DAYS.length ? `Opening hours: ${days.join('. ')}.` : undefined;

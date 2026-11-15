@@ -545,7 +545,7 @@ The real toolset (`apps/server/src/tools/real`) calls the capability handlers of
     "parameters": {"type":"object","properties":{"orderId":{"type":"string","pattern":"^ord_[A-Za-z0-9_]+$"}},"required":["orderId"],"additionalProperties":false} },
   { "type": "function", "name": "read_calendar_availability",
     "description": "List free appointment slots for one service on one date.",
-    "parameters": {"type":"object","properties":{"serviceId":{"type":"string","pattern":"^svc_[A-Za-z0-9_]+$"},"date":{"type":"string","format":"date"},"maxSlots":{"type":"integer","minimum":1,"maximum":5}},"required":["serviceId","date"],"additionalProperties":false} },
+    "parameters": {"type":"object","properties":{"serviceId":{"type":"string","pattern":"^svc_[A-Za-z0-9_]+$"},"date":{"type":"string","format":"date"},"maxSlots":{"type":"integer","minimum":1,"maximum":5},"near":{"type":"string","pattern":"^([01]\\d|2[0-3]):[0-5]\\d$"}},"required":["serviceId","date"],"additionalProperties":false} },
   { "type": "function", "name": "propose_booking",
     "description": "Send the confirmed appointment to the owner for approval. Call only after the caller confirmed service, time and contact.",
     "parameters": {"type":"object","properties":{"serviceId":{"type":"string","pattern":"^svc_[A-Za-z0-9_]+$"},"startUtc":{"type":"string","format":"date-time"},"customer":{"type":"object","properties":{"name":{"type":"string","minLength":1},"messageRecipient":{"type":"string","pattern":"^\\+[1-9][0-9]{6,14}$"},"messageConsent":{"type":"boolean"}},"required":["name","messageConsent"]}},"required":["serviceId","startUtc","customer"],"additionalProperties":false} },
@@ -564,7 +564,7 @@ This is `TOOL_DEFINITIONS` from `packages/contracts/src/tools.ts`, exactly as ge
 | `quote_order` | `{ quote: Quote }`; `reason: "ITEM_UNAVAILABLE"` names the line in `message` |
 | `propose_order` | `{ proposalId, quote, missingFields, approvalId }`. `proposalId` is the `ord_` id. If `missingFields` is not empty, `proposalId` and `approvalId` are absent and nothing is stored. A `quoteId` past `expiresAt` or with a different `cartHash` gets `reason: "QUOTE_EXPIRED"` with a fresh `quote` to read back. A pickup time outside verified hours gets `VALIDATION_FAILED` |
 | `get_order_status` | `{ orderId, status, paid, checkoutLinkSent }` |
-| `read_calendar_availability` | `{ slots: AvailabilitySlot[], timezone }` |
+| `read_calendar_availability` | `{ slots: AvailabilitySlot[], timezone }`. With `near` (a local "HH:MM") the free slots nearest to that time are returned, in time order; without it, the earliest of the day |
 | `propose_booking` | `{ proposalId, approvalId, missingFields, slot }`. `proposalId` is the `bkg_` id; same absent rule; a taken slot gets `reason: "SLOT_CONFLICT"` with up to 3 `alternatives` |
 | `propose_menu_message` | `{ sent, message? }`. D-13 demo mode only. `sent` is true only when the server sent the menu to the listed caller on this call; otherwise `message` says to read the menu out |
 

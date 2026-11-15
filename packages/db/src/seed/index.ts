@@ -8,4 +8,5 @@ export * from './seed';
 export * from './reset';
 export * from './square';
 export * from './demo-shop';
+export * from './demo-stage';
 export { supabaseAuthAdmin, squareSandboxCatalogClient } from './providers';

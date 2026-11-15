@@ -4,7 +4,6 @@
 // gets them. The greeting, the closing line after a stored proposal and the line for a later stray turn
 // come from the server, never from the model, so the AI disclosure and the hangup do not depend on its words.
 import type { AgentSpec } from '@abos/contracts';
-import { bookingWaitScript } from '../../voice/prompt';
 
 /** The disclosure the greeting must carry. An override without it is not used. */
 export const GREETING_DISCLOSURE = 'This is an AI assistant.';
@@ -80,14 +79,15 @@ function withName(line: string, name: string | undefined): string {
  * for the shop and claims nothing more (not placed, not paid). The Twilio path keeps orderWaitScript.
  */
 export const ORDER_CLOSING_WAIT = "Thanks, {name}. Your order is awaiting the shop's confirmation.";
+/** The booking wait line on this path, as short as the order's. It claims nothing more: the appointment is not booked yet. */
+export const BOOKING_CLOSING_WAIT = "Thanks, {name}. Your booking is awaiting the shop's confirmation.";
 
 /**
  * The reply of the turn whose proposal was stored: the wait line, then a short goodbye. The webhook answer
- * carries hangup with it. A booking keeps the wait script with no message channel (the `.declined` script,
- * as no message is sent on this path).
+ * carries hangup with it.
  */
 export function closingLine(template: AgentSpec['template'], businessName: string, name: string | undefined): string {
-  const wait = template === 'appointment_booker' ? bookingWaitScript('qr_only').declined : ORDER_CLOSING_WAIT;
+  const wait = template === 'appointment_booker' ? BOOKING_CLOSING_WAIT : ORDER_CLOSING_WAIT;
   return `${withName(wait, name)} Thanks for calling ${nameSentence(businessName)} Goodbye.`;
 }
 
@@ -96,8 +96,8 @@ export function closingLine(template: AgentSpec['template'], businessName: strin
  * (a call continued after a restart). Otherwise the call repeats its closing line (voice.ts).
  */
 export function afterProposalLine(template: AgentSpec['template'], businessName?: string | undefined): string {
-  if (template === 'appointment_booker') return 'Your request is with the shop for approval. Goodbye.';
-  return `Your order is awaiting the shop's confirmation.${businessName ? ` Thanks for calling ${nameSentence(businessName)}` : ''} Goodbye.`;
+  const what = template === 'appointment_booker' ? 'booking' : 'order';
+  return `Your ${what} is awaiting the shop's confirmation.${businessName ? ` Thanks for calling ${nameSentence(businessName)}` : ''} Goodbye.`;
 }
 
 /** The call reached its cap on tool calls (issue #95 item 8): the call ends. */

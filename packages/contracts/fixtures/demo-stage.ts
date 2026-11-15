@@ -89,7 +89,9 @@ export const stagePizzaCatalog: CatalogItem[] = STAGE_PIZZAS.map(([slug, name, d
   syncedAt: CATALOG_SYNCED_AT,
 }));
 
-const pizzaHours = everyDay('11:00', '23:59');
+// Open around the clock: a pickup order "as soon as possible" must work at whatever hour the demo runs.
+// 00:00 to 23:59 is how a full day is stored (an hours fact cannot cross midnight).
+const pizzaHours = everyDay('00:00', '23:59');
 
 const pizzaShop: StageShop = {
   key: 'pizza',
@@ -101,7 +103,7 @@ const pizzaShop: StageShop = {
   callerAction: 'Call to order a pizza for pickup',
   address: '123 Main Street, San Luis Obispo, CA 93401',
   hours: pizzaHours,
-  hoursText: 'Open every day, 11 AM to midnight',
+  hoursText: 'Open 24 hours, every day',
   agent: {
     id: 'agt_pizza_01',
     businessId: PIZZA_BUSINESS_ID,
@@ -128,7 +130,7 @@ const pizzaShop: StageShop = {
     { kind: 'contact', key: 'address', value: { address: '123 Main Street, San Luis Obispo, CA 93401' } },
     { kind: 'policy', key: 'pickup_only', value: { pickupOnly: true, text: 'This phone line takes pickup orders only.' } },
     { kind: 'policy', key: 'special_requests', value: { allowed: false, text: 'Phone orders are for the pizzas as they are listed on the menu. For changes to toppings, crust or sauce, please ask at the counter.' } },
-    faq('hours', 'When are you open?', 'Every day, 11 AM to midnight.'),
+    faq('hours', 'When are you open?', 'We are open 24 hours, every day.'),
     faq('sizes', 'What sizes do the pizzas come in?', 'Three sizes: Small is 10 inch, Medium is 12 inch and Large is 14 inch.'),
     faq('price', 'How much is a pizza?', 'Every pizza costs the same. A Small is $15, a Medium is $25 and a Large is $35, before tax.'),
     faq('no_meat', 'Which pizzas have no meat?', 'Cheese, Margherita and Veggie.'),

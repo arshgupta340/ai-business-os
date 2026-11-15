@@ -12,8 +12,8 @@
 // answers, not how AgentPhone's speech engine reads it aloud.
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { REALTIME_MODEL, type ToolName } from '@abos/contracts';
-import { DEMO_SHOP_NAME, demoShopCatalog, demoShopFacts, pizzaCatalog, pizzaSpecV2, pizzaVerifiedFacts } from '@abos/contracts/fixtures';
+import { REALTIME_MODEL, type AgentSpec, type ToolName } from '@abos/contracts';
+import { STAGE_SHOPS, pizzaCatalog, pizzaSpecV2, pizzaVerifiedFacts, type StageShopKey } from '@abos/contracts/fixtures';
 import { createMockToolset } from '../../apps/server/src/tools/mock/index';
 import { buildInstructions } from '../../apps/server/src/voice/prompt';
 import { checkSessionCapabilities, createWsOpenAISocketFactory } from '../../apps/server/src/voice/relay';
@@ -30,14 +30,18 @@ if (!apiKey) throw new Error('OPENAI_API_KEY is not set');
 const DEFAULT_LINES = ['What time do you close tonight?', 'How much is a large pepperoni?', 'One large pepperoni please.', 'That is all. The name is Sam.', 'Six thirty tonight.', 'Yes.'];
 const callerLines = process.argv.length > 2 ? process.argv.slice(2) : DEFAULT_LINES;
 
-// DEMO_SHOP=1 runs the call on the demo shop's menu and facts (issue #161) in place of the two-pizza fixture.
-const demoShop = process.env.DEMO_SHOP === '1';
-const businessName = demoShop ? DEMO_SHOP_NAME : 'Demo Pizza Co.';
-const spec = pizzaSpecV2;
-const menu = demoShop ? demoShopCatalog : pizzaCatalog;
+// STAGE=pizza|barber|salon runs the call as one of the three stage shops (fixtures/demo-stage.ts), with the
+// mock toolset reading that shop's facts. Without it the call runs on the two-pizza fixture.
+const stageKey = process.env.STAGE as StageShopKey | undefined;
+const stage = stageKey ? STAGE_SHOPS[stageKey] : undefined;
+if (stageKey && !stage) throw new Error('STAGE must be pizza, barber or salon');
+const stageFactList = stage ? [...stage.facts, ...stage.services.map((x) => ({ kind: 'service' as const, key: x.id, value: { ...x } }))] : [];
+const businessName = stage ? stage.name : 'Demo Pizza Co.';
+const spec: AgentSpec = stage ? { ...stage.agent, version: 1 } : pizzaSpecV2;
+const menu = stage ? (stage.catalog.length > 0 ? stage.catalog : undefined) : pizzaCatalog;
 const facts: FactsSnapshot = {
-  facts: demoShop
-    ? [...demoShopFacts.map((f) => ({ kind: f.kind, key: f.key, value: f.value, version: 2 })), { kind: 'policy' as const, key: 'pickup_window', value: { minutes: 20 }, version: 1 }]
+  facts: stage
+    ? (stageFactList.map((f) => ({ kind: f.kind, key: f.key, value: f.value, version: 1 })) as FactsSnapshot['facts'])
     : pizzaVerifiedFacts.flatMap((f) => (f.kind === 'menu_item' || f.status !== 'verified' ? [] : [{ kind: f.kind, key: f.key, value: f.value, version: f.version }])),
   timezone: 'America/Los_Angeles',
 };
@@ -45,7 +49,8 @@ const now = new Date();
 const check = checkSessionCapabilities(spec);
 if (!check.ok) throw new Error('the fixture spec has a capability that is not allowed');
 const tools: readonly ToolName[] = check.tools;
-const toolset = createMockToolset({ businessId: spec.businessId, now: () => now, ...(demoShop ? { catalog: demoShopCatalog } : {}) });
+const toolset = createMockToolset({ businessId: spec.businessId, now: () => now,
+  ...(stage ? { catalog: stage.catalog, facts: stageFactList.map((f) => ({ ...f, businessId: stage.businessId, status: 'verified' })) as never } : {}) });
 const greeting = agentPhoneGreeting(businessName, spec.template, process.env.AGENTPHONE_GREETING);
 const instructions = `${buildInstructions(spec, { businessName, messageChannel: 'qr_only', facts, menu, nowMs: now.getTime() })}\n${agentPhoneChannelLines(greeting, businessName)}`;
 const words = (t: string) => t.split(/\s+/).filter(Boolean).length;
@@ -69,8 +74,8 @@ for (const line of callerLines) {
   const ms = Date.now() - t0;
   times.push(ms);
   const proposal = r.tools.find((e) => (e.tool === 'propose_order' || e.tool === 'propose_booking') && isStoredProposal(e.result));
-  const args = proposal?.args as { contact?: { name?: unknown } } | undefined;
-  const reply = proposal ? closingLine(spec.template, businessName, sayableName(args?.contact?.name)) : r.kind === 'tool_limit' ? '(tool limit reached)' : r.text;
+  const args = proposal?.args as { contact?: { name?: unknown }; customer?: { name?: unknown } } | undefined;
+  const reply = proposal ? closingLine(spec.template, businessName, sayableName(args?.contact?.name ?? args?.customer?.name)) : r.kind === 'tool_limit' ? '(tool limit reached)' : r.text;
   console.log(`AGENT (${words(reply)} words, ${ms} ms, ${r.toolCalls} tool calls${proposal ? ', server closing line' : ''}): ${reply}`);
   if (proposal || r.kind === 'tool_limit') { hangup = true; break; }
 }
