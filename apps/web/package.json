@@ -6,6 +6,7 @@
     "dev": "next dev",
     "dev:mock": "NEXT_PUBLIC_MOCK=1 next dev",
     "build": "next build",
+    "build:pages": "STATIC_EXPORT=1 NEXT_PUBLIC_MOCK=1 NEXT_PUBLIC_BASE_PATH=/ai-business-os next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

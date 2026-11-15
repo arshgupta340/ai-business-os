@@ -9,6 +9,7 @@
  * Nothing here is ever marked sent, paid or booked unless the scripted
  * provider step that confirms it has run. All payment data is sandbox.
  */
+import { nextDraftAgentId, resetDraftAgentIds } from "./agent-ids";
 import {
   ACTION_TYPE_CAPABILITY,
   AgentSpecSchema,
@@ -308,6 +309,7 @@ export async function resetDb(now: number = Date.now()): Promise<void> {
   emptyBusinesses.clear();
   requestFailures.length = 0;
   clockOffsetMs = 0;
+  resetDraftAgentIds();
   seeding = buildSeed(now).then((seed) => {
     state = seed;
     saveBuilderSessions();
@@ -857,7 +859,7 @@ export function createAgent(businessId: string, body: { builderSessionId?: strin
   }
   const at = nowIso();
   const agent: AgentRecord = {
-    id: newId("agt_"),
+    id: nextDraftAgentId(),
     businessId,
     name: spec.name!,
     template: spec.template!,

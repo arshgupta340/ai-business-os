@@ -14,6 +14,16 @@ const SECURITY_HEADERS = [
   {key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin'},
 ];
 
+// STATIC_EXPORT=1 builds the public click-through for GitHub Pages: plain files in
+// `out/`, served under NEXT_PUBLIC_BASE_PATH (the repo path, /ai-business-os). It is
+// mock mode only, because a static site has no server to call. GitHub Pages cannot
+// send the security headers, so they are left out of that build.
+const STATIC_EXPORT = process.env.STATIC_EXPORT === '1';
+if (STATIC_EXPORT && process.env.NEXT_PUBLIC_MOCK !== '1') {
+  throw new Error('STATIC_EXPORT=1 needs NEXT_PUBLIC_MOCK=1: the static site has no server to call.');
+}
+const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
+
 // This app has no API routes. It calls the server at NEXT_PUBLIC_API_URL.
 const nextConfig: NextConfig = {
   reactStrictMode: true,
@@ -23,9 +33,13 @@ const nextConfig: NextConfig = {
   transpilePackages: ['@abos/contracts'],
   // The repo root, so Next does not pick up a lockfile outside the repo.
   outputFileTracingRoot: path.join(__dirname, '..', '..'),
-  async headers() {
-    return [{source: '/:path*', headers: SECURITY_HEADERS}];
-  },
+  ...(STATIC_EXPORT
+    ? {output: 'export' as const, trailingSlash: true, basePath: BASE_PATH || undefined, images: {unoptimized: true}}
+    : {
+        async headers() {
+          return [{source: '/:path*', headers: SECURITY_HEADERS}];
+        },
+      }),
 };
 
 export default nextConfig;

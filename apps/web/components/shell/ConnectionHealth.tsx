@@ -2,7 +2,7 @@
 
 import {HStack} from '@astryxdesign/core/HStack';
 import {Link} from '@astryxdesign/core/Link';
-import {isDemoScript, isMockMode} from '@/lib/env';
+import {isDemoScript, isMockMode, withBasePath} from '@/lib/env';
 import {hideEverythingUntil} from '@/lib/demo-reset';
 import {clearDemoAgentBuilt} from '@/lib/demo-stage';
 import {clearDemoRun} from '@/app/(dashboard)/build/demo/demo-run-store';
@@ -99,7 +99,7 @@ export function resetDemo(now: number = Date.now(), go: (url: string) => void = 
   // Overview and My Agents show no agent again until the next build reaches its number.
   clearDemoAgentBuilt();
   hideEverythingUntil(now);
-  go('/build');
+  go(withBasePath('/build'));
 }
 
 const RESET_BUTTON_STYLE = {all: 'unset', cursor: 'pointer', display: 'inline-flex'} as const;

@@ -5,6 +5,7 @@
 import { getResponse } from "msw";
 import { setupWorker } from "msw/browser";
 import { registerMockControls } from "@/lib/api/mock-bridge";
+import { withBasePath } from "@/lib/env";
 import { handlers } from "./handlers";
 import { ready, sweepExpired } from "./db";
 import { mockControls } from "./timeline";
@@ -65,7 +66,7 @@ export function startMockWorker(): Promise<void> {
   if (!started) {
     const worker = setupWorker(...handlers);
     started = worker
-      .start({ onUnhandledRequest: "bypass", serviceWorker: { url: "/mockServiceWorker.js" }, quiet: true })
+      .start({ onUnhandledRequest: "bypass", serviceWorker: { url: withBasePath("/mockServiceWorker.js") }, quiet: true })
       .then(async () => {
         const controlled = await waitForControl(navigator.serviceWorker, CONTROL_TIMEOUT_MS);
         if (!controlled) {
