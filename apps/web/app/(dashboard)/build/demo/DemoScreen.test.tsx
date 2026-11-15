@@ -34,10 +34,10 @@ function Providers({children}: {children: ReactNode}) {
   );
 }
 
-function renderDemo(stepScale = 0) {
+function renderDemo(stepScale = 0, approveHoldMs = 0) {
   return render(
     <Providers>
-      <DemoScreen stepScale={stepScale} pollMs={POLL_MS} />
+      <DemoScreen stepScale={stepScale} pollMs={POLL_MS} approveHoldMs={approveHoldMs} />
     </Providers>,
   );
 }
@@ -151,10 +151,10 @@ describe('Demo run: the build step', {timeout: 30000}, () => {
     expect(screen.getByText('Reading the menu')).toBeTruthy();
     expect(screen.getByText('Getting a phone number')).toBeTruthy();
     expect(requests).toHaveLength(0);
-    await screen.findByText('Call this number to order');
+    await screen.findByText('Call to order');
     // The only reads are the finale's pending approvals, after the number shows.
     expect(requests.every((r) => new URL(r.url).pathname === '/api/approvals')).toBe(true);
-    expect(screen.getByText('+1 (805) 555 0123')).toBeTruthy();
+    expect(screen.getByText('(805) 555-0123')).toBeTruthy();
     expect(screen.getByText('$15.00')).toBeTruthy();
     expect(screen.getByText('$35.00')).toBeTruthy();
     expect(screen.getByText("Woody's Waui")).toBeTruthy();
@@ -165,7 +165,7 @@ describe('Demo run: the build step', {timeout: 30000}, () => {
     server.use(http.all(`${A}/*`, () => HttpResponse.json({error: {code: 'INTERNAL', message: 'down'}}, {status: 500})));
     renderDemo();
     await reachNumber();
-    expect(screen.getByText('+1 (805) 555 0123')).toBeTruthy();
+    expect(screen.getByText('(805) 555-0123')).toBeTruthy();
     expect(screen.getByText('Waiting for the call')).toBeTruthy();
   });
 
@@ -182,7 +182,7 @@ describe('Demo run: the build step', {timeout: 30000}, () => {
     vi.stubEnv('NEXT_PUBLIC_MOCK', '1');
     renderDemo();
     await reachNumber();
-    expect(screen.getByText('+1 (555) 555 0199')).toBeTruthy();
+    expect(screen.getByText('(555) 555-0199')).toBeTruthy();
   });
 });
 
@@ -232,8 +232,8 @@ describe('Demo run: the finale', {timeout: 30000}, () => {
     expect(await screen.findByText('New order')).toBeTruthy();
   });
 
-  async function orderOnScreen() {
-    renderDemo();
+  async function orderOnScreen(approveHoldMs = 0) {
+    renderDemo(0, approveHoldMs);
     await reachNumber();
     let approvalId = '';
     await act(async () => {
@@ -277,6 +277,19 @@ describe('Demo run: the finale', {timeout: 30000}, () => {
     expect(await screen.findByText('Now:')).toBeTruthy();
   });
 
+  it('shows Approving for the hold time, and Approved only after the server answered and the hold is over', async () => {
+    await orderOnScreen(500);
+    await clickButton('Approve');
+    expect(await screen.findByText('Approving the order')).toBeTruthy();
+    expect(screen.queryByText('Approved')).toBeNull();
+    expect(screen.queryByRole('button', {name: 'Approve'})).toBeNull();
+    await waitFor(() => expect(decisionCalls()).toHaveLength(1));
+    expect((await screen.findAllByText('Approved', undefined, {timeout: 3000})).length).toBeGreaterThan(0);
+    expect(screen.queryByText('Approving the order')).toBeNull();
+    expect(screen.getByText('The shop accepted this order')).toBeTruthy();
+    expect(decisionCalls()).toHaveLength(1);
+  });
+
   it('says the order expired and never shows Approved', async () => {
     await orderOnScreen();
     advanceMockClock(11 * 60_000);
@@ -299,6 +312,6 @@ describe('Demo run: the finale', {timeout: 30000}, () => {
     await reachNumber();
     await clickButton('Start over');
     expect(await screen.findByRole('button', {name: 'Use the suggested prompt'})).toBeTruthy();
-    expect(screen.queryByText('Call this number to order')).toBeNull();
+    expect(screen.queryByText('Call to order')).toBeNull();
   });
 });

@@ -9,7 +9,7 @@ import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {SandboxBadge} from '@/components/SandboxBadge';
 import {getDemoPhoneNumber, isMockMode} from '@/lib/env';
-import {formatMoney, formatPhone} from '@/lib/format';
+import {formatMoney, formatPhoneLocal} from '@/lib/format';
 import {groupByPrice, WOODSTOCKS_MENU, type PriceRow, type WoodstocksMenu} from './woodstocks-menu';
 
 /**
@@ -24,10 +24,11 @@ export function demoPhoneNumber(): string | undefined {
 export const MISSING_NUMBER_TEXT = 'The demo phone number is not set. Set NEXT_PUBLIC_DEMO_PHONE_NUMBER and build the app again.';
 
 // Bigger than display-1, from the type scale tokens, so the number reads from the back of a room.
-const NUMBER_STYLE = {fontSize: 'calc(var(--font-size-5xl) * 1.4)', lineHeight: 1.1} as const;
-// The number card is as wide as the number (capped, so the long missing-number
-// text cannot take the row); the menu takes the rest. The two stack on a narrow screen.
-const NUMBER_COLUMN = {flex: '0 1 auto', minWidth: 0, maxWidth: '40rem'} as const;
+// It stays on one line, and shrinks with the window before it could overflow its card.
+const NUMBER_STYLE = {fontSize: 'min(calc(var(--font-size-5xl) * 1.4), 4.2vw)', lineHeight: 1.1, whiteSpace: 'nowrap'} as const;
+// Two cards of the same height. The number sits in the middle of its card, the menu takes the other half.
+// The two stack on a narrow screen.
+const NUMBER_COLUMN = {flex: '1 1 30rem', minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center'} as const;
 const MENU_COLUMN = {flex: '1 1 32rem', minWidth: 0} as const;
 
 /** One block per price row: the prices once, large, then the pizzas they apply to. */
@@ -69,14 +70,16 @@ export function ResultPanel({phoneNumber, menu = WOODSTOCKS_MENU}: {phoneNumber:
     <HStack gap={4} wrap="wrap" vAlign="stretch">
       <Card variant="muted" style={NUMBER_COLUMN}>
         {phoneNumber ? (
-          <VStack gap={2}>
-            <Text type="label" color="secondary">
-              Phone number
+          <VStack gap={3} hAlign="center">
+            <Text type="display-3" color="secondary">
+              Call to order
             </Text>
-            <Text type="display-1" weight="semibold" hasTabularNumbers textWrap="balance" style={NUMBER_STYLE} as="p">
-              {formatPhone(phoneNumber)}
+            <Text type="display-1" weight="semibold" hasTabularNumbers style={NUMBER_STYLE} as="p">
+              {formatPhoneLocal(phoneNumber)}
             </Text>
-            <Text type="display-3">Call this number to order</Text>
+            <Text type="large" weight="normal" color="secondary">
+              Pick any pizza and a size. Pickup only.
+            </Text>
           </VStack>
         ) : (
           <VStack gap={2}>

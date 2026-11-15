@@ -13,6 +13,7 @@ import {PageHeader} from '@/components/PageHeader';
 import {PENDING_APPROVALS_QUERY, useActivityFeed, useApprovals} from '@/lib/api';
 import {useBusiness} from '@/lib/session';
 import {
+  APPROVE_HOLD_MS,
   DEMO_BADGE_TEXT,
   demoReducer,
   initialDemoState,
@@ -39,9 +40,11 @@ export type DemoScreenProps = {
   stepScale?: number;
   /** How often pending approvals and the order are read again. */
   pollMs?: number;
+  /** The least time the order card shows "Approving" after the click. Tests pass 0. */
+  approveHoldMs?: number;
 };
 
-export function DemoScreen({stepScale = 1, pollMs = WAITING_POLL_MS}: DemoScreenProps) {
+export function DemoScreen({stepScale = 1, pollMs = WAITING_POLL_MS, approveHoldMs = APPROVE_HOLD_MS}: DemoScreenProps) {
   const {businessId, business} = useBusiness();
   const timeZone = business?.timezone ?? 'UTC';
   const [state, dispatch] = useReducer(demoReducer, undefined, () => initialDemoState());
@@ -128,6 +131,7 @@ export function DemoScreen({stepScale = 1, pollMs = WAITING_POLL_MS}: DemoScreen
           approvalId={state.approvalId}
           timeZone={timeZone}
           pollMs={pollMs}
+          approveHoldMs={approveHoldMs}
           onDecided={(approvalId, decided) => dispatch({type: 'decided', approvalId, state: decided})}
         />
       ) : (

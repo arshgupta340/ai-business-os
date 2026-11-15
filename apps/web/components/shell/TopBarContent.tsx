@@ -3,6 +3,7 @@
 import {HStack} from '@astryxdesign/core/HStack';
 import {VStack} from '@astryxdesign/core/VStack';
 import {useTopNavRenderMode} from '@astryxdesign/core/TopNav';
+import {isDemoScript} from '@/lib/env';
 import {BusinessSelector} from './BusinessSelector';
 import {ConnectionHealth} from './ConnectionHealth';
 import {OwnerControls} from './OwnerControls';
@@ -20,13 +21,15 @@ export function TopBarStartContent() {
   if (mode === 'drawer') {
     return (
       <VStack gap={3} hAlign="stretch">
-        <BusinessSelector width="100%" />
+        {isDemoScript() ? null : <BusinessSelector width="100%" />}
         <ConnectionHealth />
         <OwnerControls />
       </VStack>
     );
   }
-  return <BusinessSelector />;
+  // While the scripted demo is on, the business name stays off the top bar: on stage the shop is
+  // being set up in front of the room, so its name should not already be there.
+  return isDemoScript() ? null : <BusinessSelector />;
 }
 
 /**
