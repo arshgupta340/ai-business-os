@@ -10,6 +10,23 @@ export function isMockMode(): boolean {
   return process.env.NEXT_PUBLIC_MOCK === '1';
 }
 
+/**
+ * True when the Build screen runs the short scripted demo path
+ * (NEXT_PUBLIC_DEMO_SCRIPT=1). Off by default: the real builder is untouched.
+ */
+export function isDemoScript(): boolean {
+  return process.env.NEXT_PUBLIC_DEMO_SCRIPT === '1';
+}
+
+/**
+ * The phone number the demo result panel shows (NEXT_PUBLIC_DEMO_PHONE_NUMBER),
+ * fixed before the demo. Undefined when it is missing or empty.
+ */
+export function getDemoPhoneNumber(): string | undefined {
+  const value = process.env.NEXT_PUBLIC_DEMO_PHONE_NUMBER;
+  return value && value.trim() ? value.trim() : undefined;
+}
+
 export type PublicSupabaseConfig = {url: string; anonKey: string};
 
 /** Returns null when either Supabase value is missing or empty. */
