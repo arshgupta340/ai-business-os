@@ -6,6 +6,7 @@
 // propose_order checks every ID, the quote and the opening hours on the server. The block is
 // labelled as data, every string in it is flattened and cut, and the whole block has a size cap.
 import { HoursValueSchema, ServiceOfferingSchema, type CatalogItem, type HoursKey } from '@abos/contracts';
+import { insideWindow, localDay, localToEpoch, closesNextMorning, shiftLocalDate, weekdayOfLocalDate } from '../tools/real/time';
 import type { FactsSnapshot } from './types';
 
 export type Knowledge = {
@@ -75,6 +76,45 @@ export function nowLine(nowMs: number, timeZone: string): string | undefined {
     const offset = raw === '' ? '+00:00' : raw;
     const date = `${part('year')}-${part('month')}-${part('day')}`;
     return `Now: ${spoken}, shop time (${timeZone}). Today is ${date}. Give tools a time in this form: ${date}T18:30:00${offset}. That offset is for today; when a tool returns a slot time, copy it exactly.`;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A day's opening window, or undefined when the day is closed or its hours are not readable. */
+function windowOn(facts: FactsSnapshot, key: HoursKey): { open: string; close: string } | undefined {
+  const fact = facts.facts.find((f) => f.kind === 'hours' && f.key === key);
+  const parsed = fact === undefined ? undefined : HoursValueSchema.safeParse(fact.value);
+  if (parsed === undefined || !parsed.success || 'closed' in parsed.data) return undefined;
+  return { open: parsed.data.open, close: parsed.data.close };
+}
+
+/**
+ * Whether the shop is open at this instant, worked out here so the model never has to. After midnight a
+ * shop that closes the next morning (11:00 to 02:00) is still inside the window that opened the day before;
+ * on 2026-11-15 at 1:24 AM the agent read "Sunday 11 AM to 2 AM" and told a caller the shop was closed.
+ */
+export function openNowLine(facts: FactsSnapshot, nowMs: number): string | undefined {
+  try {
+    const tz = facts.timezone;
+    const today = localDay(nowMs, tz).date;
+    for (const date of [shiftLocalDate(today, -1), today]) {
+      const w = windowOn(facts, weekdayOfLocalDate(date));
+      if (w === undefined) continue;
+      if (date !== today && !closesNextMorning(w)) continue;
+      // 00:00 to 23:59 is how a full day is stored.
+      const allDay = w.open === '00:00' && w.close === '23:59';
+      if (!(allDay && date === today) && !insideWindow(date, w, tz, nowMs, nowMs)) continue;
+      return allDay ? 'Right now the shop is open.' : `Right now the shop is open, until ${clock(w.close)}. A pickup or visit before then is inside opening hours.`;
+    }
+    for (let ahead = 0; ahead <= 7; ahead += 1) {
+      const date = shiftLocalDate(today, ahead);
+      const w = windowOn(facts, weekdayOfLocalDate(date));
+      if (w === undefined || localToEpoch(date, w.open, tz) <= nowMs) continue;
+      const day = ahead === 0 ? 'today' : ahead === 1 ? 'tomorrow' : `on ${DAYS.find(([k]) => k === weekdayOfLocalDate(date))?.[1] ?? 'a later day'}`;
+      return `Right now the shop is closed. It opens next ${day} at ${clock(w.open)}.`;
+    }
+    return undefined;
   } catch {
     return undefined;
   }
@@ -215,8 +255,9 @@ export function buildKnowledge(args: { facts?: FactsSnapshot | undefined; menu?:
   if (facts === undefined) return undefined;
   const now = nowMs === undefined ? undefined : nowLine(nowMs, facts.timezone);
   const hours = hoursLine(facts);
+  const openNow = nowMs === undefined ? undefined : openNowLine(facts, nowMs);
   const services = serviceLines(facts);
-  const head = [now, hours, ...contactLines(facts), ...policyLines(facts)].filter((l): l is string => l !== undefined);
+  const head = [now, openNow, hours, ...contactLines(facts), ...policyLines(facts)].filter((l): l is string => l !== undefined);
   const servicesBlock = services.length > 0 ? ['Services:', ...services] : [];
   const faqs = faqLines(facts);
   const menuBlock = menu === undefined ? [] : menuLines(menu);
