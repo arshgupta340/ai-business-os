@@ -1,12 +1,13 @@
 /**
  * The phases of the demo run on the Build screen, as a pure reducer.
  *
- * compose  -> the presenter pastes the menu and sends one message
+ * compose  -> the judge picks a shop, the presenter attaches its two files and sends one message
  * progress -> the timed steps show one after the other (no request)
- * ready    -> the number and the menu are shown; the screen waits for an order
- * order    -> a new order from the server is waiting for approval
+ * ready    -> the shop's number and its menu or services are shown; the screen waits for the call
+ * order    -> a new order or booking from the server is waiting for approval
  * decided  -> the server answered the decision
  */
+import type {StageShopKey} from '@abos/contracts/fixtures';
 import type {ApprovalRequest, ApprovalState} from '@/lib/api';
 import {DEMO_STEPS} from './demo-steps';
 
@@ -26,10 +27,6 @@ export const SHOW_DEMO_BADGE = false;
 
 export const DEMO_BADGE_TEXT = 'Demo run. This agent was set up before the demo.';
 
-/** The prompt from the demo script (issue #152), offered as a one-click suggestion. */
-export const DEMO_PROMPT =
-  'Create a voice calling agent for this pizza shop using the attached menu and FAQs. It should answer customer questions, take pickup orders, confirm the details with the customer, and submit each order for my approval.';
-
 export type DemoPhase = 'compose' | 'progress' | 'ready' | 'order' | 'decided';
 
 export type StepStatus = 'pending' | 'running' | 'done';
@@ -39,24 +36,30 @@ export type DemoState = {
   /** Goes up on every send and start over, so a timer from an earlier run is ignored. */
   run: number;
   message: {text: string; fileNames: string[]} | null;
+  /** The stage shop the attached files chose. Set on send, cleared on start over. */
+  shopKey: StageShopKey | null;
   steps: StepStatus[];
   /** When the number was shown (ms). Only orders created after it count. */
   numberShownAt: number | null;
   approvalId: string | null;
+  /** What the waiting approval is: an order (pizza place) or a booking (barbershop, salon). */
+  approvalKind: ApprovalKind | null;
   decidedState: ApprovalState | null;
 };
 
+export type ApprovalKind = 'order_bundle' | 'booking_bundle';
+
 export type DemoAction =
-  | {type: 'send'; text: string; fileNames: string[]}
+  | {type: 'send'; text: string; fileNames: string[]; shopKey: StageShopKey}
   | {type: 'step_done'; run: number; index: number; now: number}
-  | {type: 'order_arrived'; approvalId: string}
+  | {type: 'order_arrived'; approvalId: string; kind: ApprovalKind}
   | {type: 'decided'; approvalId: string; state: ApprovalState}
   | {type: 'start_over'};
 
 const allPending = (): StepStatus[] => DEMO_STEPS.map(() => 'pending');
 
 export function initialDemoState(run = 0): DemoState {
-  return {phase: 'compose', run, message: null, steps: allPending(), numberShownAt: null, approvalId: null, decidedState: null};
+  return {phase: 'compose', run, message: null, shopKey: null, steps: allPending(), numberShownAt: null, approvalId: null, approvalKind: null, decidedState: null};
 }
 
 export function demoReducer(state: DemoState, action: DemoAction): DemoState {
@@ -64,13 +67,14 @@ export function demoReducer(state: DemoState, action: DemoAction): DemoState {
     case 'send': {
       if (state.phase !== 'compose') return state;
       const text = action.text.trim();
-      if (!text) return state;
+      if (!text || !action.shopKey) return state;
       const steps = allPending();
       steps[0] = 'running';
       return {
         ...initialDemoState(state.run + 1),
         phase: 'progress',
         message: {text, fileNames: [...action.fileNames]},
+        shopKey: action.shopKey,
         steps,
       };
     }
@@ -85,7 +89,7 @@ export function demoReducer(state: DemoState, action: DemoAction): DemoState {
     }
     case 'order_arrived': {
       if (state.phase !== 'ready') return state;
-      return {...state, phase: 'order', approvalId: action.approvalId};
+      return {...state, phase: 'order', approvalId: action.approvalId, approvalKind: action.kind};
     }
     case 'decided': {
       if (state.phase !== 'order' || action.approvalId !== state.approvalId) return state;
@@ -101,8 +105,9 @@ export function isShowingResult(state: DemoState): boolean {
   return state.phase === 'ready' || state.phase === 'order' || state.phase === 'decided';
 }
 
+/** A pending order (pizza place) or booking (barbershop, salon): what a caller's call produces. */
 function isPendingOrder(a: ApprovalRequest): boolean {
-  return a.bundleType === 'order_bundle' && a.state === 'PENDING';
+  return (a.bundleType === 'order_bundle' || a.bundleType === 'booking_bundle') && a.state === 'PENDING';
 }
 
 /**
@@ -119,7 +124,7 @@ export function knownBeforeDemo(items: readonly ApprovalRequest[], since: number
   return new Set(items.filter((a) => isPendingOrder(a) && !(Date.parse(a.createdAt) > since)).map((a) => a.id));
 }
 
-/** The newest pending order that was not already waiting when the number was shown. */
+/** The newest pending order or booking that was not already waiting when the number was shown. */
 export function pickIncomingApproval(items: readonly ApprovalRequest[], known: ReadonlySet<string>): ApprovalRequest | null {
   let newest: ApprovalRequest | null = null;
   for (const a of items) {

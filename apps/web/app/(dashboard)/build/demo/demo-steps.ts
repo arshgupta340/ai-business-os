@@ -3,8 +3,7 @@
  *
  * The sequence is a fixed, timed animation decided by both leads for the
  * hackathon demo (issue #152). It makes no request: the agent, its facts, its
- * menu and the phone line were set up before the demo, and the page header
- * says so with the Demo badge. Tune the durations here during rehearsal.
+ * menu or services and the phone line were set up before the demo. Tune the durations here during rehearsal.
  */
 
 export type DemoStepId = 'menu' | 'faq' | 'hours' | 'payments' | 'agent' | 'phone';
@@ -31,6 +30,16 @@ export const DEMO_STEPS: readonly DemoStepDefinition[] = [
   {id: 'agent', label: 'Setting up the voice agent', durationMs: AGENT_STEP_MS},
   {id: 'phone', label: 'Getting a phone number', durationMs: PHONE_STEP_MS},
 ];
+
+/**
+ * The steps for one stage shop. Only the first label changes: "Reading the
+ * menu" for the pizza place, "Reading the services" for the barbershop and the
+ * salon. The timings stay the same for every shop.
+ */
+export function stepsFor(infoTitle: string): readonly DemoStepDefinition[] {
+  const label = `Reading the ${infoTitle.toLowerCase()}`;
+  return DEMO_STEPS.map((s) => (s.id === 'menu' ? {...s, label} : s));
+}
 
 /** The whole sequence, 45 seconds: time for the presenters to talk while it runs. */
 export function totalDurationMs(steps: readonly DemoStepDefinition[] = DEMO_STEPS): number {

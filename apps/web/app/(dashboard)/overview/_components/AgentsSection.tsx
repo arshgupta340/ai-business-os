@@ -72,7 +72,7 @@ export function AgentsSection({businessId}: {businessId: string}) {
   const agents = useAgents(businessId);
   const liveAgent = useLiveAgent();
   // The scripted demo shows no agent until its build step has reached the phone number.
-  const hidden = useDemoHidesAgents();
+  const hidden = useDemoHidesAgents(businessId);
 
   let body;
   if (agents.isPending) {

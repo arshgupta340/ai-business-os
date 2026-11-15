@@ -23,8 +23,31 @@ export function isDemoScript(): boolean {
  * fixed before the demo. Undefined when it is missing or empty.
  */
 export function getDemoPhoneNumber(): string | undefined {
-  const value = process.env.NEXT_PUBLIC_DEMO_PHONE_NUMBER;
+  return clean(process.env.NEXT_PUBLIC_DEMO_PHONE_NUMBER);
+}
+
+function clean(value: string | undefined): string | undefined {
   return value && value.trim() ? value.trim() : undefined;
+}
+
+/** The three stage shops of the demo, by key. */
+export type DemoPhoneKey = 'pizza' | 'barber' | 'salon';
+
+/**
+ * The phone number of one stage shop, fixed before the demo:
+ * NEXT_PUBLIC_DEMO_PHONE_PIZZA (else NEXT_PUBLIC_DEMO_PHONE_NUMBER),
+ * NEXT_PUBLIC_DEMO_PHONE_BARBER, NEXT_PUBLIC_DEMO_PHONE_SALON.
+ * Undefined when it is missing or empty. Each read is a literal so Next inlines it.
+ */
+export function getDemoPhoneNumberFor(key: DemoPhoneKey): string | undefined {
+  switch (key) {
+    case 'pizza':
+      return clean(process.env.NEXT_PUBLIC_DEMO_PHONE_PIZZA) ?? clean(process.env.NEXT_PUBLIC_DEMO_PHONE_NUMBER);
+    case 'barber':
+      return clean(process.env.NEXT_PUBLIC_DEMO_PHONE_BARBER);
+    case 'salon':
+      return clean(process.env.NEXT_PUBLIC_DEMO_PHONE_SALON);
+  }
 }
 
 export type PublicSupabaseConfig = {url: string; anonKey: string};
