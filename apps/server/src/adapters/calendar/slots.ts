@@ -7,7 +7,7 @@
 //   2. start to start + duration + buffer overlaps no busy block (the buffer
 //      comes after the service only and may run past closing),
 //   3. start is at least the minimum notice after now.
-// At most 5 slots are returned, earliest first. The slot covers the service
+// At most 5 slots are returned unless more are asked for (up to a day of them), earliest first. The slot covers the service
 // only, never the buffer.
 //
 // Daylight saving: the code walks real instants one minute apart and reads the
@@ -22,6 +22,13 @@ import {
   type HoursKey,
 } from '@abos/contracts';
 import type { AvailabilityQuery, BusyBlock } from './types';
+
+/**
+ * The most slots one request may ask for: every grid start of a day. The default stays
+ * AVAILABILITY_MAX_SLOTS. A caller that looks for the slots nearest a wanted time (the `near`
+ * input of read_calendar_availability) asks for the whole day and picks from it.
+ */
+export const AVAILABILITY_DAY_SLOTS = (24 * 60) / AVAILABILITY_GRID_MINUTES;
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -92,8 +99,8 @@ export function validateQuery(q: AvailabilityQuery): void {
   ] as const) {
     if (!Number.isSafeInteger(value) || value < minimum) throw new Error(`${name} must be an integer of at least ${minimum}`);
   }
-  if (q.maxSlots !== undefined && (!Number.isSafeInteger(q.maxSlots) || q.maxSlots < 1 || q.maxSlots > AVAILABILITY_MAX_SLOTS)) {
-    throw new Error(`maxSlots must be 1 to ${AVAILABILITY_MAX_SLOTS}`);
+  if (q.maxSlots !== undefined && (!Number.isSafeInteger(q.maxSlots) || q.maxSlots < 1 || q.maxSlots > AVAILABILITY_DAY_SLOTS)) {
+    throw new Error(`maxSlots must be 1 to ${AVAILABILITY_DAY_SLOTS}`);
   }
   assertDate(q.date);
   formatter(q.timezone);
