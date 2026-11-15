@@ -23,11 +23,11 @@ import {
   useAgent,
   useBuilderSession,
   useFacts,
-  useLiveAgent,
   usePreviewAgent,
   type Agent,
   type PublishResponse,
 } from '@/lib/api';
+import {useShopLiveAgent} from '@/lib/demo-shop-line';
 import {errorText} from '@/lib/error-text';
 import {useBusiness} from '@/lib/session';
 import {rememberedSession} from '../../../../build/_lib/memory';
@@ -55,7 +55,7 @@ function useBuilderHref(businessId: string, agentId: string): string | null {
 /** Who answers the phone number now. The other agent is read with its own business, which the owner also owns (P-06). */
 function useLiveRoute(agent: Agent): LiveRoute {
   const {businesses} = useBusiness();
-  const live = useLiveAgent();
+  const live = useShopLiveAgent();
   const otherId = live.data?.agentId && live.data.agentId !== agent.id ? live.data.agentId : null;
   const other = useAgent(otherId ? live.data!.businessId : null, otherId);
   if (!live.data) return {answeredBy: agent.isLiveAgent ? 'this' : 'unknown'};

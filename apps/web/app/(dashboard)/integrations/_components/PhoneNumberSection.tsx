@@ -8,7 +8,8 @@ import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {EmptyState} from '@/components/EmptyState';
 import {LoadingState} from '@/components/LoadingState';
-import {useAgent, useLiveAgent} from '@/lib/api';
+import {useAgent} from '@/lib/api';
+import {useShopLiveAgent} from '@/lib/demo-shop-line';
 import {formatRelative} from '@/lib/format';
 import {useBusiness} from '@/lib/session';
 import {SectionError} from './SectionError';
@@ -19,7 +20,7 @@ import {SectionError} from './SectionError';
  */
 export function PhoneNumberSection({businessId, timeZone}: {businessId: string; timeZone: string}) {
   const {businesses} = useBusiness();
-  const live = useLiveAgent();
+  const live = useShopLiveAgent();
   const agentId = live.data?.agentId;
   // The live agent can belong to the other business; read it from its own business.
   const agent = useAgent(live.data?.businessId, agentId);

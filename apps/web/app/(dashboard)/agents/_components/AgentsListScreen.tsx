@@ -15,7 +15,8 @@ import {LoadingState} from '@/components/LoadingState';
 import {PageHeader} from '@/components/PageHeader';
 import {RefreshFailedNotice} from '@/components/RefreshFailedNotice';
 import {StatusBadge} from '@/components/StatusBadge';
-import {useActivityFeed, useAgents, useLiveAgent, type Agent, type LiveAgent} from '@/lib/api';
+import {useActivityFeed, useAgents, type Agent, type LiveAgent} from '@/lib/api';
+import {useShopLiveAgent} from '@/lib/demo-shop-line';
 import {useDemoHidesAgents} from '@/lib/demo-stage';
 import {formatRelative} from '@/lib/format';
 import {useBusiness} from '@/lib/session';
@@ -57,7 +58,7 @@ export function AgentsListScreen() {
   // Each agent or live agent event refetches the queries below.
   useActivityFeed(businessId);
   const agents = useAgents(businessId);
-  const liveAgent = useLiveAgent();
+  const liveAgent = useShopLiveAgent();
   // The scripted demo shows no agent until its build step has reached the phone number.
   const hidden = useDemoHidesAgents(businessId);
 

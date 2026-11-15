@@ -19,7 +19,8 @@ import {EmptyState} from '@/components/EmptyState';
 import {LoadingState} from '@/components/LoadingState';
 import {PageHeader} from '@/components/PageHeader';
 import {StatusBadge} from '@/components/StatusBadge';
-import {isApiError, useActivityFeed, useAgent, useCalls, useLiveAgent, type Agent} from '@/lib/api';
+import {isApiError, useActivityFeed, useAgent, useCalls, type Agent} from '@/lib/api';
+import {useShopLiveAgent} from '@/lib/demo-shop-line';
 import {formatDateTime, formatRelative} from '@/lib/format';
 import {useBusiness} from '@/lib/session';
 import {statusView} from '@/lib/status';
@@ -124,7 +125,7 @@ export function AgentDetailScreen({agentId}: {agentId: string}) {
   const {business, businessId} = useBusiness();
   useActivityFeed(businessId);
   const agent = useAgent(businessId, agentId);
-  const liveAgent = useLiveAgent();
+  const liveAgent = useShopLiveAgent();
 
   if (!business || !businessId) {
     return <EmptyState title="No business selected" description="Choose a business in the top bar." headingLevel={1} />;
