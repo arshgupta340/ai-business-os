@@ -93,6 +93,44 @@ Index of the docs: https://docs.agentphone.ai/llms.txt
 | It handles A2P 10DLC registration itself | Partly. AgentPhone runs the registration, but the owner still submits the business, use case, samples and opt-in proof, pays 25 or 70 dollars, and waits for carrier review with no stated time. Until approved, outbound SMS to US numbers is blocked. So switching to AgentPhone does not by itself make texting work today. |
 | `AGENTPHONE_API_KEY` and `AGENTPHONE_WEBHOOK_SECRET` | `AGENTPHONE_API_KEY` is the name the MCP server uses. The webhook secret is returned by `POST /v1/webhooks` and changes every time the webhook is set. We also need the number's ID and its E.164 number (`AGENTPHONE_NUMBER_ID`, `AGENTPHONE_PHONE_NUMBER`). |
 
+## Agent and webhook fields read on 2026-11-14 for the demo path
+
+- `PATCH /v1/agents/{agent_id}` takes `UpdateAgentRequest`; every field is optional. It includes `voiceMode` (`webhook` or `hosted`), `beginMessage`, `interruptionSensitivity` (0 to 1), `enableBackchannel`, `systemPrompt`, `voice`, `voiceSpeed` and `maxSilenceMs`. It has no webhook URL or timeout field. Source: https://docs.agentphone.ai/openapi.json (schema `UpdateAgentRequest`).
+- `GET /v1/agents/{agent_id}` returns `AgentResponse` with the same fields; the defaults it lists are `interruptionSensitivity` 0.8 and `enableBackchannel` true. Source: https://docs.agentphone.ai/openapi.json (schema `AgentResponse`).
+- `POST /v1/webhooks` takes `WebhookCreateRequest`: `url` (required), `contextLimit` and `timeout`. The response `WebhookResponse` always carries `timeout`. Source: https://docs.agentphone.ai/openapi.json.
+- The AgentPhone connector's own schema calls `begin_message` "hosted mode only". The connector can set `voice_mode`, `interruption_sensitivity` and `enable_backchannel` (update_agent) and the webhook `url` and `timeout` (set_webhook), but it cannot read or rotate the signing secret. Source: the coordinator's check of the connector on 2026-11-14, not a vendor page.
+- The account's agent on 2026-11-14 was in hosted mode with `interruptionSensitivity` 0.8 and backchannel on, and no webhook was set at project or agent level. Source: the same check.
+
+## The turn engine (`AGENTPHONE_TURN_ENGINE`)
+
+The AgentPhone path answers each caller turn with one of two engines.
+
+- `realtime` (the default). One OpenAI Realtime session per call, in text mode (`apps/server/src/telephony/agentphone/realtime.ts`). It opens on the call's first event and closes at the call end, at a hangup, after about 3 minutes with no turn, or on an error. It gets the phone prompt (`buildInstructions`) with the fact snapshot pinned and the cached menu read once at call start, as the Twilio webhook does, the current time, and the phone tool definitions for the spec's allowed tools. Then come this channel's lines (`speech.ts`): the reply is read aloud by a speech engine, so plain short sentences with numbers and prices written as words; no server status messages; the greeting already spoken; and the ending rule. Each caller turn is a user text item. Function calls run through the call's one toolset, with the Twilio relay's guards: the session capability check, at most 40 tool calls and 3 proposals per call, a deadline on every tool call, and only read and propose tools. If the session cannot open, or fails during the call, that call moves to the builder runner, and the log says so.
+- `builder`. Each turn runs the shared sim-call runner (`runAgentTurn`) on `OPENAI_BUILDER_MODEL`. It took about 4 to 9 seconds per turn when measured on 2026-11-14.
+
+Other settings:
+
+- `AGENTPHONE_GREETING` overrides the opening line. It is used only when it contains "AI assistant"; otherwise the default is used: "Thanks for calling {business}. This is an AI assistant. What can I get you?"
+- `AGENTPHONE_GREETING_MODE`: `first_reply` (the default) means the server speaks the greeting on the call's first event, alone when that event has no words, or before its first answer when it has. `begin_message` trusts AgentPhone to speak the agent's `beginMessage` and adds nothing. Either way the model is told the greeting was spoken, so it does not greet twice.
+- The turn bound is 9 seconds on the realtime engine, under the 10 second webhook timeout the registration script sets.
+
+On a call with the realtime engine selected:
+
+- When `propose_order` or `propose_booking` stores a proposal (the tool result has a proposal ID and an approval ID), the server replaces that turn's reply with the wait line and a goodbye, and answers `hangup: true`. The wait line is `orderWaitScript(...).declined` (or the booking one), since no message is sent on this path. A later turn on that call hears one short line and `hangup: true`.
+- A repeated delivery of a turn (the same `X-Webhook-ID`) runs nothing and hears the same reply. The same signed bytes under another ID still get an empty answer.
+- Log lines: `agentphone: turn` with the engine, the turn time in milliseconds and the tool call count, and `agentphone: call ended` with the turn times. They never carry the caller's words, the reply or a phone number.
+
+To try the engine against the real model without a call: `npx tsx scripts/live/agentphone-turn-trial.ts`. It needs `OPENAI_API_KEY` and costs a few cents.
+
+### Still unproven on a real call
+
+- Whether AgentPhone sends an event when the call starts, before the caller speaks. If it sends a voice `agent.message` with an empty transcript, the caller hears the greeting at once. If it sends nothing, the greeting comes with the first answer, so the caller speaks first. An event of another type is stored and ignored.
+- Whether `beginMessage` is spoken in webhook mode. The connector says hosted mode only, so the server speaks the greeting itself. If a real call shows AgentPhone does speak it, set `AGENTPHONE_GREETING_MODE=begin_message`.
+- How AgentPhone's speech engine reads prices and times. The prompt asks for words, not digits.
+- Whether the 10 second webhook timeout covers the whole NDJSON answer or only its first chunk, and what the caller hears when it passes.
+- Whether `interruptionSensitivity` 0.3 is low enough, or too low to let a caller correct the agent.
+- Whether `hangup: true` on the final chunk ends the call after the speech, as the docs say.
+
 ## Not confirmed in the docs
 
 - Whether the `timestamp` field inside the JSON body equals `X-Webhook-Timestamp`. We use the header only.
@@ -105,7 +143,7 @@ Index of the docs: https://docs.agentphone.ai/llms.txt
 - What `GET /v1/webhooks` answers when no webhook is set. The webhooks guide says it "Returns `null`"; the registration script accepts that and a 404.
 - The API key format. `docs/SETUP-ACCOUNTS.md` says `sk_live_`; no page read for these notes states it.
 - Whether `X-Webhook-ID` is unique per event or per delivery attempt across retries for every event type (the docs say a retried delivery keeps it).
-- Whether a voice `agent.message` is sent for the very start of a call (before the caller speaks), and whether the agent's `beginMessage` is spoken in webhook mode. We do not depend on either.
+- Whether a voice `agent.message` is sent for the very start of a call (before the caller speaks), and whether the agent's `beginMessage` is spoken in webhook mode. We do not depend on either: see "Still unproven on a real call" above.
 - What happens if our NDJSON stream closes without a final chunk.
 - Whether AgentPhone sends a webhook for outbound message delivery status. The docs say no receipt event exists; we poll.
 - How long message history keeps a sent message, so how long polling for a receipt can work.

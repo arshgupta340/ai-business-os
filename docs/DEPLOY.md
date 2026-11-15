@@ -135,6 +135,7 @@ Set these by name in the host's variable settings. Values come from your `.env.l
 | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` | Twilio Console, Account Info, and Phone Numbers |
 | `TELEPHONY_PROVIDER` | `twilio` (the default when unset) or `agentphone` (D-12). See "Switching the telephony provider" below. |
 | `AGENTPHONE_API_KEY`, `AGENTPHONE_WEBHOOK_SECRET`, `AGENTPHONE_NUMBER_ID`, `AGENTPHONE_PHONE_NUMBER` | AgentPhone dashboard and `npm run register-webhooks -- --agentphone-only --apply` (docs/SETUP-ACCOUNTS.md 4b) |
+| `AGENTPHONE_TURN_ENGINE`, `AGENTPHONE_GREETING`, `AGENTPHONE_GREETING_MODE` | Optional. Defaults: `realtime`, the built-in greeting, `first_reply` (docs/notes-agentphone.md, "The turn engine") |
 | `MESSAGE_CHANNEL` and that channel's keys | Spike B-04 result. `qr_only` needs no keys. `surge` needs `SURGE_API_KEY`. `android_gateway` needs `ANDROID_GATEWAY_URL` and `ANDROID_GATEWAY_API_KEY`. `whatsapp_sandbox` needs `TWILIO_WHATSAPP_FROM`. |
 | `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_CALENDAR_ID`, `GOOGLE_SHEET_ID` | Google Cloud service account key, the demo calendar and the demo sheet |
 | `PUBLIC_SERVER_URL` | The host's own address, after the first deploy |
@@ -282,18 +283,29 @@ These are application code changes, not part of B-09. They are listed so the own
 `TELEPHONY_PROVIDER` picks who answers calls. Only one answers at a time, and the server never falls back from one to the other.
 
 - **`twilio` (default).** Unchanged: `/webhooks/twilio/voice` and `/ws/phone` answer calls through the Realtime relay. `/webhooks/agentphone` answers 503 and reads nothing.
-- **`agentphone`.** `/webhooks/agentphone` answers each caller turn with our agent (the same model and read and propose tools as sim-call, so it needs `OPENAI_API_KEY` and `OPENAI_BUILDER_MODEL`). `/webhooks/twilio/voice` answers 503. If an AgentPhone variable is missing, `/webhooks/agentphone` also answers 503, and the phone-line entry in integration health says `telephony provider agentphone: missing ...`.
+- **`agentphone`.** `/webhooks/agentphone` answers each caller turn with our agent and the same read and propose tools. With `AGENTPHONE_TURN_ENGINE=realtime` (the default) each call gets one OpenAI Realtime session in text mode, which needs `OPENAI_API_KEY`; with `builder` each turn runs the sim-call runner, which also needs `OPENAI_BUILDER_MODEL` (docs/notes-agentphone.md, "The turn engine"). `/webhooks/twilio/voice` answers 503. If an AgentPhone variable is missing, `/webhooks/agentphone` also answers 503, and the phone-line entry in integration health says `telephony provider agentphone: missing ...`. While `AGENTPHONE_WEBHOOK_SECRET` is empty the route answers 503 and reads nothing.
 
 Before either AgentPhone setting (`TELEPHONY_PROVIDER=agentphone` or `MESSAGE_CHANNEL=agentphone`) is turned on, apply migration `0007_agentphone_channel.sql`. Run `npm run migrate -w @abos/db` with `DATABASE_URL` set to the owner (admin) database connection, not the runtime role's connection. Migration 0007 lets the database accept the `agentphone` value: it widens the channel check on message dispatches and the source check on webhook events, and lets an order or booking approval name `agentphone` as its message channel. If it is skipped, every AgentPhone webhook insert fails a check constraint. With `MESSAGE_CHANNEL=agentphone`, every `propose_order` and `propose_booking` also fails, so Twilio calls break too.
 
-To switch to AgentPhone:
-1. Apply migration 0007 as described above. Do this first.
-2. Set the four `AGENTPHONE_*` variables and `TELEPHONY_PROVIDER=agentphone` on the host, then redeploy.
-3. Run `npm run register-webhooks -- --agentphone-only --apply`, copy the new `AGENTPHONE_WEBHOOK_SECRET` to the host, and redeploy again. Setting the webhook rotates the secret, so run it only when the address changes.
-4. Publish the agent again from the dashboard. Publish binds the live agent to the selected provider's number (`AGENTPHONE_PHONE_NUMBER`); until then a call to the AgentPhone number hears "this number is not taking calls".
-5. Check `GET /api/integrations/health?refresh=1`: the phone-line entry should say `agentphone number readable`.
+### Switch the phone line to AgentPhone on Render, in order
 
-To switch back: set `TELEPHONY_PROVIDER=twilio` (or remove it), redeploy and publish again so the live agent points at `TWILIO_PHONE_NUMBER`. The Twilio console settings were never touched, so nothing needs re-registering on Twilio.
+1. Apply migration 0007 as described above. Do this first.
+2. Attach the live agent to the AgentPhone number. The `live_agent` table has one row per number, and a call resolves the agent from the row for the number it dialed. Today the only row is for the Twilio number. Run this once in the Supabase SQL editor, with both numbers in E.164 form. It copies the Twilio row, so the AgentPhone number answers with the same agent and the same published version, and it is safe to run again:
+   ```sql
+   insert into public.live_agent (phone_number, business_id, agent_id, agent_version_id)
+   select '<AGENTPHONE_PHONE_NUMBER>', business_id, agent_id, agent_version_id
+   from public.live_agent where phone_number = '<TWILIO_PHONE_NUMBER>'
+   on conflict (phone_number) do update set business_id = excluded.business_id, agent_id = excluded.agent_id,
+     agent_version_id = excluded.agent_version_id, updated_at = now();
+   ```
+   Other ways to get the same row: publish the pizza agent again from the dashboard after step 4 (publish binds the live agent to the selected provider's number), or run `npm run seed` with `TELEPHONY_PROVIDER=agentphone` and `AGENTPHONE_PHONE_NUMBER` set, which upserts the seeded pizza agent on both numbers. No migration is needed.
+3. In Render, Environment, set: `AGENTPHONE_API_KEY`, `AGENTPHONE_NUMBER_ID`, `AGENTPHONE_PHONE_NUMBER`. Leave `AGENTPHONE_TURN_ENGINE` unset (it means `realtime`) and leave `AGENTPHONE_GREETING_MODE` unset (it means `first_reply`: the server speaks the greeting). `OPENAI_API_KEY` must already be set. Optional: `AGENTPHONE_GREETING` (it must contain "AI assistant").
+4. Register from a laptop whose `.env.local` has `AGENTPHONE_API_KEY`, `AGENTPHONE_NUMBER_ID` and `PUBLIC_SERVER_URL` (the Render address): first `npm run register-webhooks -- --agentphone-only` to see the changes, then the same with `--apply`. It sets the project webhook to `<PUBLIC_SERVER_URL>/webhooks/agentphone` with a 10 second timeout, then sets the agent to `voiceMode` `webhook`, the short greeting as `beginMessage`, `interruptionSensitivity` 0.3 (`AGENTPHONE_INTERRUPTION_SENSITIVITY` overrides it) and `enableBackchannel` off. Setting the webhook rotates its signing secret.
+5. In Render set `AGENTPHONE_WEBHOOK_SECRET` to the secret for that webhook: the one the script wrote to `.env.local`, or, if it printed that AgentPhone returned none, the one in the AgentPhone dashboard. Then set `TELEPHONY_PROVIDER=agentphone` and save, which redeploys.
+6. Check `GET /api/integrations/health?refresh=1`: the phone-line entry should say `agentphone number readable`. The server log shows `agentphone: voice turn engine` with `engine: realtime`.
+7. Call the AgentPhone number. Expect the greeting with the AI disclosure, then answers within about a second. After you say yes to the read-back you hear the closing line and the call ends; the order is in the dashboard as a pending approval.
+
+To switch back to Twilio: in Render set `TELEPHONY_PROVIDER=twilio` (or remove it) and save. The Twilio row in `live_agent` was never changed, and the Twilio console settings were never touched, so nothing needs re-registering. To keep AgentPhone but use the old turn runner, set `AGENTPHONE_TURN_ENGINE=builder` (it needs `OPENAI_BUILDER_MODEL`).
 
 Texting is separate: apply migration 0007 first (see above), then `MESSAGE_CHANNEL=agentphone` sends the approved checkout or booking message through AgentPhone with either telephony provider, once AgentPhone's 10DLC registration is approved. Its delivery status is read from AgentPhone's message history every minute; there is no receipt webhook. Integration health shows the message channel as connected only when AgentPhone reports outbound SMS `enabled` on the number; until then publish refuses an agent that sends messages.
 
@@ -317,7 +329,7 @@ What `--apply` changes:
 - **Square sandbox.** If a subscription already points at `<PUBLIC_SERVER_URL>/webhooks/square`, its events are set to `payment.created` and `payment.updated` and it is enabled. Otherwise it creates one named "AI Business OS sandbox" with those events. It refuses to run unless `SQUARE_ENVIRONMENT` is `sandbox`.
 - **`.env.local`.** It writes `SQUARE_WEBHOOK_SIGNATURE_KEY` and `SQUARE_WEBHOOK_URL`, replacing those two lines and leaving every other line as it was. The signature key is never printed.
 
-Other options: `--twilio-only`, `--square-only`, `--agentphone-only` (D-12; only the AgentPhone project webhook, see above), and `--base <url>` to use an address other than `PUBLIC_SERVER_URL`. The address must be `https`, must not be localhost and must have no path.
+Other options: `--twilio-only`, `--square-only`, `--agentphone-only` (D-12; only AgentPhone: the project webhook and the agent's voice settings, see above; `--business "Name"` sets the business name in the greeting), and `--base <url>` to use an address other than `PUBLIC_SERVER_URL`. The address must be `https`, must not be localhost and must have no path.
 
 **Undo the Twilio change.** The output shows each value before and after, and after `--apply` it prints the previous voice URL and status callback. To go back, enter those values on the number in the Twilio Console (Phone Numbers, Manage, Active numbers).
 
