@@ -174,7 +174,7 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
     const check = checkSessionCapabilities(s.spec);
     if (!check.ok) { s.engine = 'builder'; return; }
     const tools = check.tools;
-    const instructions = `${buildInstructions(s.spec, { businessName: s.businessName, messageChannel: 'qr_only', facts: s.facts, menu: s.menu, nowMs: deps.now().getTime() })}\n${agentPhoneChannelLines(s.greeting)}`;
+    const instructions = `${buildInstructions(s.spec, { businessName: s.businessName, messageChannel: 'qr_only', facts: s.facts, menu: s.menu, nowMs: deps.now().getTime() })}\n${agentPhoneChannelLines(s.greeting, s.businessName)}`;
     s.rt = openRealtimeCall({
       socketFactory: rto.socketFactory, model: rto.model ?? REALTIME_MODEL, instructions, tools, handler: s.toolset.handler,
       ctx: { businessId: s.businessId, agentVersionId: s.agentVersionId, callId: s.callId, correlationId: s.callId },
@@ -316,7 +316,7 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
     if (!deps.model) throw new Error('no builder model');
     s.fallbackTurns += 1;
     const r = await runAgentTurn({ ...deps, model: deps.model }, { spec: s.spec, businessName: s.businessName, businessId: s.businessId, agentVersionId: s.agentVersionId, callId: s.callId,
-      message: text, session: s, abandoned: hooks.abandoned, onToolCall: hooks.onToolCall, extraInstructions: agentPhoneChannelLines(s.greeting) });
+      message: text, session: s, abandoned: hooks.abandoned, onToolCall: hooks.onToolCall, extraInstructions: agentPhoneChannelLines(s.greeting, s.businessName) });
     s.toolCalls += r.toolTrace.length;
     const proposal = r.toolTrace.find((e) => isPropose(e.tool) && isStoredProposal(e.output));
     if (proposal || (stageBefore !== 'CUSTOMER_CONFIRMED' && s.stage === 'CUSTOMER_CONFIRMED')) {
@@ -334,7 +334,10 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
     /** The engine that will answer the call's next turn (tests). */
     engineOf(providerCallId: string): TurnEngine | undefined { return sessions.get(providerCallId)?.engine; },
 
-    /** `signal`: the provider's request was dropped, so nobody will hear this turn; it is abandoned. */
+    /**
+     * `signal`: when it aborts the turn is abandoned, as nobody will hear it. The AgentPhone webhook does not
+     * pass one: a request AgentPhone drops is sent again and still heard (plugin.ts says what a call showed).
+     */
     async turn(input: { providerCallId: string; to: string; callerLast4?: string | undefined; text: string; signal?: AbortSignal | undefined }): Promise<TurnOutcome> {
       const id = input.providerCallId;
       const startedMs = deps.now().getTime();

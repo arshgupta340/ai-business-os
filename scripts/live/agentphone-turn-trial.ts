@@ -42,7 +42,7 @@ if (!check.ok) throw new Error('the fixture spec has a capability that is not al
 const tools: readonly ToolName[] = check.tools;
 const toolset = createMockToolset({ businessId: spec.businessId, now: () => now });
 const greeting = agentPhoneGreeting(businessName, spec.template, process.env.AGENTPHONE_GREETING);
-const instructions = `${buildInstructions(spec, { businessName, messageChannel: 'qr_only', facts, menu: pizzaCatalog, nowMs: now.getTime() })}\n${agentPhoneChannelLines(greeting)}`;
+const instructions = `${buildInstructions(spec, { businessName, messageChannel: 'qr_only', facts, menu: pizzaCatalog, nowMs: now.getTime() })}\n${agentPhoneChannelLines(greeting, businessName)}`;
 const words = (t: string) => t.split(/\s+/).filter(Boolean).length;
 
 const opened = Date.now();

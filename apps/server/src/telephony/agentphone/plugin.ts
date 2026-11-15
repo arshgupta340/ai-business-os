@@ -163,12 +163,13 @@ export const agentPhoneWebhookPlugin: FastifyPluginAsync<AgentPhoneWebhookDeps> 
       let final: TurnReply = { text: SPEECH.trouble };
       let settle!: (r: TurnReply) => void;
       remember(verified.deliveryId, new Promise<TurnReply>((resolve) => { settle = resolve; }));
-      // If the provider drops the request before the reply (a barge-in or its own timeout; whether it does is
-      // not documented), nobody hears this turn: it is abandoned like a turn past its bound.
-      const gone = new AbortController();
-      reply.raw.once('close', () => { if (!finished) gone.abort(); });
+      // A request the provider drops does NOT mean nobody is listening. On a call on 2026-11-14 AgentPhone
+      // dropped a request 0.7 seconds into a turn and at once sent the same delivery again; the repeat hears
+      // this turn's remembered reply (above). Abandoning the turn at the drop skipped its quote_order, and the
+      // agent then told the caller the ordering system was down. The turn runs to its end; only its time
+      // bound (voice.ts) abandons it.
       try {
-        final = (await deps.voice.turn({ providerCallId: event.providerCallId, to: event.to, callerLast4: event.callerLast4, text: event.text, signal: gone.signal })).reply;
+        final = (await deps.voice.turn({ providerCallId: event.providerCallId, to: event.to, callerLast4: event.callerLast4, text: event.text })).reply;
       } catch {
         deps.log.warn({ job: 'agentphone-webhook', webhookId: stored.id }, 'voice turn failed');
       } finally {
