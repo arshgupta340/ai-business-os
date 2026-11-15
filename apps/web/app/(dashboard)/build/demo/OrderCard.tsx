@@ -2,9 +2,7 @@
 
 import {useEffect} from 'react';
 import {Card} from '@astryxdesign/core/Card';
-import {Grid} from '@astryxdesign/core/Grid';
 import {Heading} from '@astryxdesign/core/Heading';
-import {HStack} from '@astryxdesign/core/HStack';
 import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {LoadingState} from '@/components/LoadingState';
@@ -126,78 +124,70 @@ export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs =
   const approvalView = statusView('approval', flow.working ? 'PENDING' : (flow.shownState ?? 'PENDING'));
   const orderView = order.data ? statusView('order', order.data.status) : null;
 
+  // Green on the badge only once the server has answered this decision, the same rule as the Approved block.
+  const isApproved = flow.confirmed && flow.shownState === 'APPROVED' && !flow.working;
+
   return (
-    <Card elevation="low">
-      <Grid columns={{minWidth: 320, max: 2}} gap={5}>
-        <VStack gap={3}>
-          <HStack gap={2} vAlign="center" wrap="wrap">
-            <Heading level={2}>New order</Heading>
-            <StatusBadge label={approvalView.label} tone={approvalView.tone} />
-            {flow.state === 'PENDING' && !flow.confirmed && !flow.working ? (
-              <Text type="large" hasTabularNumbers color="secondary">
-                {`Expires in ${formatCountdown(secondsUntil(approval.expiresAt, flow.now))}`}
-              </Text>
-            ) : null}
-          </HStack>
-          {order.data ? (
-            <>
-              <VStack gap={0.5}>
-                <Text type="display-3" weight="semibold">
-                  {order.data.contact.name}
-                </Text>
-                <Text type="display-3">{`Pickup at ${formatTime(payload.pickupAt, timeZone)}`}</Text>
-              </VStack>
-              <VStack gap={2}>
-                {order.data.quote.lines.map((line, i) => {
-                  const toppings = toppingsText(line);
-                  const title = lineTitle(line, lineSizeName(line, catalog.data?.items));
-                  return (
-                    <HStack key={`${line.variationId}-${i}`} gap={3} justify="between" vAlign="start">
-                      <VStack gap={0}>
-                        <Text type="display-3">{`${line.quantity} x ${title}`}</Text>
-                        {toppings ? (
-                          <Text type="large" weight="normal" color="secondary">
-                            {`Toppings: ${toppings}`}
-                          </Text>
-                        ) : null}
-                      </VStack>
-                      <Text type="large" hasTabularNumbers>
-                        {formatMoney(line.lineTotalMinor, order.data!.quote.currency)}
-                      </Text>
-                    </HStack>
-                  );
-                })}
-              </VStack>
-            </>
-          ) : (
-            <LoadingState label="Loading the order lines" />
-          )}
-          {unreachable ? <Text type="supporting">The server could not be reached. Still trying.</Text> : null}
-        </VStack>
+    <div className="abos-arrive">
+      <Card elevation="low">
+        <div className="abos-card">
+          <div>
+            <div className="abos-card-head">
+              <Heading level={2}>New order</Heading>
+              <StatusBadge label={approvalView.label} tone={isApproved ? 'success' : approvalView.tone} />
+              {flow.state === 'PENDING' && !flow.confirmed && !flow.working ? (
+                <span className="abos-card-expires">{`Expires in ${formatCountdown(secondsUntil(approval.expiresAt, flow.now))}`}</span>
+              ) : null}
+            </div>
+            {order.data ? (
+              <>
+                <div className="abos-who">{order.data.contact.name}</div>
+                <div className="abos-when">{`Pickup at ${formatTime(payload.pickupAt, timeZone)}`}</div>
+                <div className="abos-lines">
+                  {order.data.quote.lines.map((line, i) => {
+                    const toppings = toppingsText(line);
+                    const title = lineTitle(line, lineSizeName(line, catalog.data?.items));
+                    return (
+                      <div key={`${line.variationId}-${i}`} className="abos-line">
+                        <div>
+                          <div>{`${line.quantity} x ${title}`}</div>
+                          {toppings ? <div className="abos-line-note">{`Toppings: ${toppings}`}</div> : null}
+                        </div>
+                        <span className="abos-line-side">{formatMoney(line.lineTotalMinor, order.data!.quote.currency)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              <LoadingState label="Loading the order lines" />
+            )}
+            {unreachable ? <Text type="supporting">The server could not be reached. Still trying.</Text> : null}
+          </div>
 
-        <VStack gap={4} vAlign="center">
-          <VStack gap={1}>
-            <HStack gap={2} vAlign="center">
-              <Text type="label" color="secondary">
-                Total
-              </Text>
-              <SandboxBadge />
-            </HStack>
-            <Text type="display-1" weight="semibold" hasTabularNumbers>
-              {formatMoney(payload.totalMinor, payload.currency)}
-            </Text>
-          </VStack>
+          <div className="abos-card-side">
+            <div>
+              <div className="abos-total-label">
+                <span>Total</span>
+                <SandboxBadge />
+              </div>
+              <div className="abos-total">{formatMoney(payload.totalMinor, payload.currency)}</div>
+            </div>
 
-          <Decision flow={flow} wording={ORDER_WORDING} notice={decisionNotice(flow, ORDER_WORDING, approval.id, mismatch)} />
+            <Decision flow={flow} wording={ORDER_WORDING} notice={decisionNotice(flow, ORDER_WORDING, approval.id, mismatch)} />
 
-          {flow.confirmed && orderView && !flow.working ? (
-            <HStack gap={2} vAlign="center" wrap="wrap">
-              <Text type="large">Now:</Text>
-              <StatusBadge label={orderView.label} tone={orderView.tone} />
-            </HStack>
-          ) : null}
-        </VStack>
-      </Grid>
-    </Card>
+            {/* The row keeps its height before there is anything to say, so the card does not move. */}
+            <div className="abos-now">
+              {flow.confirmed && orderView && !flow.working ? (
+                <>
+                  <span>Now:</span>
+                  <StatusBadge label={orderView.label} tone={orderView.tone} />
+                </>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </Card>
+    </div>
   );
 }

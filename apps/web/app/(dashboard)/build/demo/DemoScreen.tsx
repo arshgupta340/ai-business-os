@@ -6,10 +6,9 @@ import {Badge} from '@astryxdesign/core/Badge';
 import {Button} from '@astryxdesign/core/Button';
 import {Card} from '@astryxdesign/core/Card';
 import {Grid} from '@astryxdesign/core/Grid';
-import {HStack} from '@astryxdesign/core/HStack';
-import {Spinner} from '@astryxdesign/core/Spinner';
 import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
+import {Phone} from 'lucide-react';
 import {PageHeader} from '@/components/PageHeader';
 import {PENDING_APPROVALS_QUERY, useActivityFeed, useApprovals} from '@/lib/api';
 import {clearDemoAgentBuilt, markDemoAgentBuilt} from '@/lib/demo-stage';
@@ -148,7 +147,7 @@ export function DemoScreen({stepScale = 1, pollMs = WAITING_POLL_MS, approveHold
     return (
       <VStack gap={4}>
         {header}
-        <Grid columns={{minWidth: 360, max: 2}} gap={4} align="start">
+        <Grid columns={{minWidth: 360, max: 2}} gap={4} align="stretch">
           <DemoChat message={state.message} onSend={() => undefined} />
           <ProgressSteps steps={state.steps} definitions={steps} />
         </Grid>
@@ -163,7 +162,19 @@ export function DemoScreen({stepScale = 1, pollMs = WAITING_POLL_MS, approveHold
   return (
     <VStack gap={4}>
       {header}
-      <ResultPanel shop={shop} phoneNumber={demoPhoneNumberFor(shop.key)} />
+      {/* Once the order or booking is on screen, the number steps aside and a short pop-up says it came in. */}
+      <ResultPanel shop={shop} phoneNumber={demoPhoneNumberFor(shop.key)} isCompact={!!state.approvalId} />
+      {state.approvalId ? (
+        <div key={`arrived-${state.approvalId}`} className="abos-toast" role="status">
+          <span className="abos-phone-badge">
+            <Phone aria-hidden />
+          </span>
+          <span>
+            <span className="abos-toast-title">{`New ${noun} received`}</span>
+            <span className="abos-toast-note">Waiting for your approval</span>
+          </span>
+        </div>
+      ) : null}
       {state.approvalId && businessId ? (
         <FinaleCard
           key={state.approvalId}
@@ -175,19 +186,24 @@ export function DemoScreen({stepScale = 1, pollMs = WAITING_POLL_MS, approveHold
           onDecided={(approvalId, decided) => dispatch({type: 'decided', approvalId, state: decided})}
         />
       ) : (
-        <Card variant="muted">
-          <VStack gap={2}>
-            <HStack gap={3} vAlign="center">
-              <Spinner size="xl" aria-label="Waiting" />
-              <Text type="display-3" weight="semibold">
-                Waiting for the call
-              </Text>
-            </HStack>
-            <Text type="large" weight="normal" color="secondary">
-              {feedOff
-                ? `Live updates are off, so this screen checks for a new ${noun} every few seconds.`
-                : `The ${noun} shows here by itself once the caller has placed it.`}
-            </Text>
+        <Card>
+          <VStack gap={3}>
+            <div className="abos-waiting">
+              <span className="abos-eq" role="img" aria-label="Waiting">
+                <i />
+                <i />
+                <i />
+                <i />
+              </span>
+              <div>
+                <div className="abos-waiting-title">Waiting for the call</div>
+                <Text type="large" weight="normal" color="secondary">
+                  {feedOff
+                    ? `Live updates are off, so this screen checks for a new ${noun} every few seconds.`
+                    : `The ${noun} shows here by itself once the caller has placed it.`}
+                </Text>
+              </div>
+            </div>
             {pending.error ? <Text type="supporting">{SERVER_UNREACHABLE_TEXT}</Text> : null}
             {PracticeCallButton ? (
               <Suspense fallback={null}>

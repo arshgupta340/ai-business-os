@@ -21,6 +21,17 @@ import {TopBarEndContent, TopBarStartContent} from './TopBarContent';
 
 export const APP_NAME = 'AI Business OS';
 
+/** The mark beside the app name: three bars, a voice level. Drawn in CSS (`.abos-mark` in app/globals.css). */
+function BrandMark() {
+  return (
+    <span className="abos-mark" aria-hidden>
+      <i />
+      <i />
+      <i />
+    </span>
+  );
+}
+
 function ShellFrame({children}: {children: ReactNode}) {
   const {status} = useAuth();
   const {pendingApprovalsCount} = useShellBadges();
@@ -43,7 +54,7 @@ function ShellFrame({children}: {children: ReactNode}) {
       topNav={
         <TopNav
           label="Main navigation"
-          heading={<TopNavHeading heading={APP_NAME} headingHref="/overview" />}
+          heading={<TopNavHeading logo={<BrandMark />} heading={APP_NAME} headingHref="/overview" />}
           // Below the md breakpoint the bar shows the app name and the menu
           // toggle; the selector, health and sign out move into the menu.
           startContent={<TopBarStartContent />}

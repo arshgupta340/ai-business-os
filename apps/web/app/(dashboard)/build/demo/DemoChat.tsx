@@ -60,8 +60,9 @@ export function DemoChat({message, onSend, error}: DemoChatProps) {
     onSend(text, files.map((f) => f.name), shop.key);
   };
 
+  // As tall as its content: no empty card above the prompt. Beside the build steps it stretches to their height.
   return (
-    <Card padding={0} height="min(48rem, 72dvh)" minHeight="22rem" style={{overflow: 'hidden', display: 'flex', flexDirection: 'column'}}>
+    <Card padding={0} height="100%" minHeight="16rem" style={{overflow: 'hidden', display: 'flex', flexDirection: 'column'}}>
       <ChatLayout
         density="balanced"
         style={{flex: 1, minHeight: 0}}

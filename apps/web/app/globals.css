@@ -11,25 +11,829 @@ body {
   background-color: var(--color-background-body);
 }
 
-/* The demo order card: the Approved block grows in once the server confirms the decision. */
-@keyframes abos-approved-in {
+/*
+ * The "Signal" look (Arsh, 2026-11-15): the Astryx Neutral theme with one blue accent, the theme's own
+ * blue. Blue marks what is live or clickable. Green stays reserved for what the server has confirmed.
+ * The theme sets its tokens in a cascade layer, so these unlayered values win.
+ */
+[data-astryx-theme='neutral'] {
+  --color-accent: light-dark(#0074e2, #6d9cfe);
+  --color-text-accent: light-dark(#0067ce, #a1caff);
+  --color-icon-accent: light-dark(#0074e2, #a1caff);
+}
+
+:root {
+  --abos-tint: light-dark(#edf4fe, #88bcff1f);
+  --abos-tint-strong: light-dark(#e3eefc, #88bcff33);
+  --abos-tint-line: light-dark(#cfe1fa, #88bcff3d);
+  --abos-number-ink: light-dark(#0a2a4f, #dbe9ff);
+  --abos-accent-deep: light-dark(#00529f, #4f86e8);
+  --abos-spring: cubic-bezier(0.3, 1.6, 0.5, 1);
+}
+
+.abos-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Shell: the mark beside the app name. */
+.abos-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2.5px;
+  width: 1.625rem;
+  height: 1.625rem;
+  border-radius: 0.5rem;
+  background: var(--color-accent);
+}
+.abos-mark i {
+  display: block;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--color-on-accent);
+}
+.abos-mark i:nth-child(1) {
+  height: 8px;
+}
+.abos-mark i:nth-child(2) {
+  height: 14px;
+}
+.abos-mark i:nth-child(3) {
+  height: 10px;
+}
+
+/* "Sandbox" next to payment data: always there (AGENTS.md rule 4), as a quiet outlined chip. */
+.abos-sandbox {
+  display: inline-flex;
+  align-items: center;
+  height: 1.25rem;
+  padding: 0 0.4375rem;
+  border: 1px solid var(--color-border-emphasized);
+  border-radius: 0.375rem;
+  color: var(--color-text-secondary);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* Build steps. */
+.abos-steps-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.abos-steps-title {
+  font-size: 1.3125rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.abos-steps-count {
+  margin-left: auto;
+  color: var(--color-text-secondary);
+  font-size: 0.9375rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.abos-ring {
+  flex: none;
+  width: 1.875rem;
+  height: 1.875rem;
+  transform: rotate(-90deg);
+}
+.abos-ring circle {
+  fill: none;
+  stroke-width: 3;
+}
+.abos-ring .abos-ring-track {
+  stroke: var(--abos-tint-line);
+}
+.abos-ring .abos-ring-fill {
+  stroke: var(--color-accent);
+  stroke-linecap: round;
+  stroke-dasharray: 62.83;
+  transition: stroke-dashoffset var(--duration-slow) var(--ease-standard);
+}
+.abos-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.abos-step {
+  display: grid;
+  grid-template-columns: 1.75rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.875rem;
+  min-height: clamp(3.25rem, 7.4vh, 4.5rem);
+  padding: 0 0.75rem;
+  border-top: 1px solid var(--color-border);
+  font-size: clamp(1.0625rem, 1.5vw, 1.3125rem);
+  transition: color var(--duration-medium) var(--ease-standard);
+}
+.abos-step:first-child {
+  border-top-color: transparent;
+}
+.abos-step-status {
+  color: var(--color-text-secondary);
+  font-size: 0.9375rem;
+  font-weight: 500;
+}
+.abos-step-icon {
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 50%;
+}
+.abos-step-icon svg {
+  width: 0.9375rem;
+  height: 0.9375rem;
+}
+.abos-step[data-status='pending'] {
+  color: var(--color-text-disabled);
+}
+.abos-step[data-status='pending'] .abos-step-status {
+  color: var(--color-text-disabled);
+}
+.abos-step[data-status='pending'] .abos-step-icon {
+  border: 1.5px solid var(--color-border-emphasized);
+}
+.abos-step[data-status='running'] {
+  border-top-color: transparent;
+  border-radius: 0.75rem;
+  background: linear-gradient(100deg, transparent 30%, color-mix(in srgb, var(--color-accent) 11%, transparent) 50%, transparent 70%) 0 0 / 250% 100% no-repeat;
+  font-weight: 650;
+  animation: abos-shimmer 1.6s linear infinite;
+}
+.abos-step[data-status='running'] + .abos-step {
+  border-top-color: transparent;
+}
+.abos-step[data-status='running'] .abos-step-icon {
+  border: 2.5px solid var(--abos-tint-line);
+  border-top-color: var(--color-accent);
+  animation: abos-spin 0.8s linear infinite;
+}
+.abos-step[data-status='done'] .abos-step-icon {
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  animation: abos-pop 0.4s var(--abos-spring) both;
+}
+
+/* The number, once the build is over. */
+.abos-hero {
+  padding: clamp(1.25rem, 2.2vw, 2rem) clamp(1.25rem, 2.4vw, 2.125rem);
+  border: 1px solid var(--abos-tint-line);
+  border-radius: 1.125rem;
+  background: var(--abos-tint);
+  overflow: hidden;
+}
+.abos-hero-inner {
+  container-type: inline-size;
+}
+.abos-hero-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.5rem;
+  padding-left: 0.5rem;
+}
+.abos-hero-name {
+  font-size: clamp(1.125rem, 1.55vw, 1.375rem);
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+.abos-hero-action {
+  color: var(--color-text-secondary);
+  font-size: clamp(0.9375rem, 1.2vw, 1.0625rem);
+}
+.abos-hero-hours {
+  margin-left: auto;
+  color: var(--color-text-secondary);
+  font-size: 1rem;
+  font-weight: 500;
+}
+.abos-phone-badge {
+  position: relative;
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 3.125rem;
+  height: 3.125rem;
+  border-radius: 50%;
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+.abos-phone-badge svg {
+  width: 44%;
+  height: 44%;
+}
+.abos-phone-badge[data-live]::before,
+.abos-phone-badge[data-live]::after {
+  position: absolute;
+  inset: 0;
+  border: 1.5px solid var(--color-accent);
+  border-radius: 50%;
+  content: '';
+  animation: abos-ring-out 2.4s ease-out infinite;
+}
+.abos-phone-badge[data-live]::after {
+  animation-delay: 1.2s;
+}
+.abos-number {
+  display: flex;
+  align-items: center;
+  height: 1.06em;
+  margin: clamp(0.75rem, 1.6vw, 1.5rem) 0 0;
+  color: var(--abos-number-ink);
+  font-size: clamp(2.5rem, 12.2cqw, 9.5rem);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: -0.025em;
+  white-space: nowrap;
+}
+.abos-number span {
+  display: inline-flex;
+  height: 1em;
+  line-height: 1;
+}
+.abos-number .abos-gap {
+  width: 0.26em;
+}
+.abos-number .abos-digit {
+  overflow: hidden;
+}
+.abos-number .abos-digit i {
+  display: flex;
+  flex-direction: column;
+  font-style: normal;
+  animation: abos-roll 1s cubic-bezier(0.16, 0.84, 0.24, 1) both;
+  animation-delay: calc(0.15s + var(--i) * 70ms);
+}
+.abos-number .abos-digit b {
+  display: block;
+  height: 1em;
+  font-weight: inherit;
+  line-height: 1;
+}
+.abos-menu {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem 2rem;
+  animation: abos-fade-up 0.45s 0.5s both;
+}
+.abos-menu-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+.abos-sizes {
+  display: grid;
+  grid-template-columns: repeat(3, auto);
+  gap: 1.75rem;
+  padding: 0 2rem;
+  border-inline: 1px solid var(--color-border);
+}
+.abos-sizes > div,
+.abos-services > div {
+  display: flex;
+  flex-direction: column;
+}
+.abos-size-name {
+  font-size: 1rem;
+  font-weight: 650;
+}
+.abos-size-note {
+  color: var(--color-text-secondary);
+  font-size: 0.84375rem;
+}
+.abos-price {
+  font-size: clamp(1.5rem, 2.3vw, 2.125rem);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+.abos-items-block {
+  display: flex;
+  flex: 1 1 20rem;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+.abos-items {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  gap: 0.375rem 1.5rem;
+  font-size: clamp(1rem, 1.25vw, 1.09375rem);
+}
+.abos-menu-note {
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+}
+.abos-services {
+  display: grid;
+  flex: 1 1 28rem;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 1rem 0;
+  border-left: 1px solid var(--color-border);
+}
+.abos-services > div {
+  padding: 0 1.625rem;
+  border-right: 1px solid var(--color-border);
+}
+.abos-services > div:last-child {
+  border-right: 0;
+}
+.abos-service-name {
+  font-size: 1.125rem;
+  font-weight: 650;
+}
+.abos-waiting {
+  display: flex;
+  align-items: center;
+  gap: 1.125rem;
+  animation: abos-fade-up 0.45s 0.7s both;
+}
+.abos-waiting-title {
+  font-size: clamp(1.1875rem, 1.6vw, 1.4375rem);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.abos-eq {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 3rem;
+  height: 3rem;
+}
+.abos-eq i {
+  width: 4px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--color-accent);
+  animation: abos-eq 1s ease-in-out infinite;
+}
+.abos-eq i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.abos-eq i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+.abos-eq i:nth-child(4) {
+  animation-delay: 0.45s;
+}
+
+/* Once the order or booking is on screen, the number steps aside into one strip. */
+.abos-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  padding: 1rem 1.5rem;
+  border: 1px solid var(--abos-tint-line);
+  border-radius: 1rem;
+  background: var(--abos-tint);
+  animation: abos-fade-in 0.35s both;
+}
+.abos-strip .abos-phone-badge {
+  width: 2.5rem;
+  height: 2.5rem;
+}
+.abos-strip-name {
+  font-size: 1.125rem;
+  font-weight: 650;
+}
+.abos-strip-number {
+  margin: 0 0 0 0.375rem;
+  color: var(--abos-number-ink);
+  font-size: clamp(1.5rem, 2.2vw, 2rem);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+/* The order or booking card. */
+.abos-arrive {
+  border-radius: var(--radius-container);
+  animation:
+    abos-spring-in 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) both,
+    abos-glow 1.1s 0.55s ease-out 2;
+}
+.abos-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 1.5rem clamp(1.5rem, 3.6vw, 3.25rem);
+  padding: clamp(0.5rem, 1.6vw, 1.5rem);
+}
+@media (max-width: 56rem) {
+  .abos-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.abos-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin-bottom: clamp(0.75rem, 1.4vw, 1.25rem);
+}
+.abos-card-expires {
+  margin-left: auto;
+  color: var(--color-text-secondary);
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+.abos-who {
+  font-size: clamp(1.75rem, 2.8vw, 2.5rem);
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+}
+.abos-when {
+  margin-top: 0.25rem;
+  font-size: clamp(1.25rem, 1.9vw, 1.6875rem);
+}
+.abos-lines {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: clamp(1rem, 1.7vw, 1.5rem);
+  padding-top: clamp(0.875rem, 1.5vw, 1.375rem);
+  border-top: 1px solid var(--color-border);
+}
+.abos-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: clamp(1.25rem, 1.9vw, 1.6875rem);
+  font-variant-numeric: tabular-nums;
+}
+.abos-line-side {
+  color: var(--color-text-secondary);
+}
+.abos-line-note {
+  color: var(--color-text-secondary);
+  font-size: clamp(0.9375rem, 1.2vw, 1.0625rem);
+}
+.abos-card-side {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: clamp(0.75rem, 1.4vw, 1.25rem);
+}
+.abos-total-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.abos-total {
+  margin-top: 0.375rem;
+  font-size: clamp(3rem, 6.4vw, 5.75rem);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: -0.025em;
+}
+
+/* One slot for Approve, "Approving" and "Approved", so nothing on the card moves between them. */
+.abos-decision {
+  position: relative;
+  height: clamp(4.5rem, 7.2vw, 6.5rem);
+}
+.abos-approve,
+.abos-approving,
+.abos-approved {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  border: 0;
+  border-radius: 1.125rem;
+  font: inherit;
+  font-size: clamp(1.375rem, 2.1vw, 1.875rem);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.abos-approve {
+  width: 100%;
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  cursor: pointer;
+  transition:
+    filter var(--duration-fast) var(--ease-standard),
+    transform var(--duration-fast) var(--ease-standard);
+}
+.abos-approve:hover {
+  filter: brightness(1.1);
+}
+.abos-approve:active {
+  transform: scale(0.985);
+}
+.abos-approve:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+  outline-offset: 3px;
+}
+.abos-approve[aria-disabled='true'] {
+  background: var(--color-accent-muted);
+  color: var(--color-text-disabled);
+  cursor: not-allowed;
+  filter: none;
+  transform: none;
+}
+.abos-approving {
+  overflow: hidden;
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+.abos-approving::before {
+  position: absolute;
+  inset: 0;
+  background: var(--abos-accent-deep);
+  content: '';
+  transform-origin: left;
+  animation: abos-sweep var(--abos-hold, 2s) linear both;
+}
+.abos-approving > * {
+  position: relative;
+}
+.abos-spinner {
+  width: 1.75rem;
+  height: 1.75rem;
+  border: 3.5px solid color-mix(in srgb, currentColor 35%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: abos-spin 0.75s linear infinite;
+}
+/* Green: only ever rendered from the server's answer to the decision (see approve-flow.tsx). */
+.abos-approved {
+  gap: 0.875rem;
+  background: var(--color-success);
+  color: var(--color-on-success);
+  text-align: left;
+  animation: abos-ok-in 0.3s both;
+}
+.abos-approved::after {
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--color-success);
+  border-radius: inherit;
+  content: '';
+  pointer-events: none;
+  animation: abos-ripple 0.8s 0.05s ease-out both;
+}
+.abos-approved-check {
+  flex: none;
+  width: 3rem;
+  height: 3rem;
+}
+.abos-approved-check circle {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-dasharray: 63;
+  stroke-dashoffset: 63;
+  animation: abos-draw 0.45s 0.1s ease-out forwards;
+}
+.abos-approved-check path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 16;
+  stroke-dashoffset: 16;
+  animation: abos-draw 0.3s 0.45s ease-out forwards;
+}
+.abos-approved-title {
+  display: block;
+  font-size: clamp(1.5rem, 2.2vw, 2rem);
+  font-weight: 700;
+  line-height: 1.1;
+}
+.abos-approved-note {
+  display: block;
+  font-size: clamp(0.875rem, 1.15vw, 1.03125rem);
+  font-weight: 500;
+  letter-spacing: 0;
+}
+.abos-now {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 1.75rem;
+  font-size: 1.0625rem;
+}
+.abos-now > * {
+  animation: abos-fade-up 0.4s 0.7s both;
+}
+
+/* The pop-up when the order or booking arrives. It leaves by itself. */
+.abos-toast {
+  position: fixed;
+  top: 4.25rem;
+  right: 1.5rem;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+  padding: 0.875rem 1.25rem 0.875rem 0.875rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.875rem;
+  background: var(--color-background-popover);
+  box-shadow: var(--shadow-high);
+  pointer-events: none;
+  animation: abos-toast 5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+.abos-toast .abos-phone-badge {
+  width: 2.5rem;
+  height: 2.5rem;
+}
+.abos-toast-title {
+  display: block;
+  font-size: 1rem;
+  font-weight: 650;
+}
+.abos-toast-note {
+  display: block;
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+}
+
+@keyframes abos-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes abos-pop {
   from {
-    transform: scale(0.9);
+    opacity: 0;
+    transform: scale(0);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes abos-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes abos-fade-in {
+  from {
     opacity: 0;
   }
   to {
-    transform: scale(1);
     opacity: 1;
+  }
+}
+@keyframes abos-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes abos-shimmer {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
+}
+@keyframes abos-ring-out {
+  from {
+    opacity: 0.5;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.9);
+  }
+}
+@keyframes abos-eq {
+  0%,
+  100% {
+    height: 8px;
+  }
+  50% {
+    height: 26px;
+  }
+}
+@keyframes abos-roll {
+  from {
+    transform: translateY(calc((var(--d) + 10) * -1em));
+  }
+  to {
+    transform: translateY(calc(var(--d) * -1em));
+  }
+}
+@keyframes abos-spring-in {
+  0% {
+    opacity: 0;
+    transform: translateY(30px) scale(0.965);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(-5px) scale(1.004);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes abos-glow {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 42%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 14px color-mix(in srgb, var(--color-accent) 0%, transparent);
+  }
+}
+@keyframes abos-sweep {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+@keyframes abos-ok-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes abos-ripple {
+  from {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.14, 1.7);
+  }
+}
+@keyframes abos-toast {
+  0% {
+    opacity: 0;
+    transform: translateX(30px) scale(0.96);
+  }
+  9% {
+    opacity: 1;
+    transform: none;
+  }
+  88% {
+    opacity: 1;
+    transform: none;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(12px);
+    visibility: hidden;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  @keyframes abos-approved-in {
-    from {
-      opacity: 1;
-    }
-    to {
-      opacity: 1;
-    }
+  [class^='abos-'],
+  [class^='abos-']::before,
+  [class^='abos-']::after,
+  [class^='abos-'] * {
+    animation-duration: 0.01s !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01s !important;
+  }
+  .abos-toast {
+    animation-duration: 5s !important;
   }
 }
