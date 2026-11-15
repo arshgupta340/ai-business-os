@@ -16,8 +16,14 @@ export type Knowledge = {
   hasServices: boolean;
 };
 
-/** The whole block stays under this, so the session setup stays fast. */
-export const MAX_KNOWLEDGE_CHARS = 6000;
+/**
+ * The whole block stays under this, so the session setup stays fast. Raised from 6000 for the demo shop
+ * (issue #161): 16 pizzas with their IDs and toppings plus 10 FAQs come to about 5500 characters, and a
+ * block over the cap loses its menu first.
+ */
+export const MAX_KNOWLEDGE_CHARS = 9000;
+/** A menu of at least this many items, all with the same sizes and prices and no options, is written in the short form. */
+export const UNIFORM_MENU_MIN_ITEMS = 6;
 const MAX_FIELD_CHARS = 200;
 const MAX_FAQS = 20;
 const MAX_POLICIES = 20;
@@ -44,8 +50,9 @@ export function dollars(minor: number): string {
   return `$${(minor / 100).toFixed(2)}`;
 }
 
-/** "11:00" to "11 AM", "21:30" to "9:30 PM". */
+/** "11:00" to "11 AM", "21:30" to "9:30 PM". "23:59" is how a midnight close is stored, and is said as "midnight". */
 export function clock(hhmm: string): string {
+  if (hhmm === '23:59') return 'midnight';
   const [h, m] = hhmm.split(':').map(Number);
   if (h === undefined || m === undefined || Number.isNaN(h) || Number.isNaN(m)) return hhmm;
   const hour = h % 12 === 0 ? 12 : h % 12;
@@ -136,8 +143,38 @@ function serviceLines(facts: FactsSnapshot): string[] {
   return out.slice(0, MAX_SERVICES);
 }
 
+const safeItem = (item: CatalogItem) => SAFE_ID.test(item.squareItemId) && item.variations.every((v) => SAFE_ID.test(v.id));
+
+/** The sizes and prices every item shares, when the menu is long, has no options and all items cost the same. */
+function uniformSizes(menu: readonly CatalogItem[]): { name: string; priceMinor: number }[] | undefined {
+  const sold = menu.filter((i) => i.available && i.variations.length > 0 && clean(i.name, 80) !== '' && safeItem(i));
+  if (sold.length < UNIFORM_MENU_MIN_ITEMS || sold.some((i) => i.modifierLists.length > 0)) return undefined;
+  const signature = (i: CatalogItem) => i.variations.map((v) => `${v.name}|${v.priceMinor}`).join(',');
+  const first = signature(sold[0]!);
+  return sold.every((i) => signature(i) === first) ? sold[0]!.variations.map((v) => ({ name: v.name, priceMinor: v.priceMinor })) : undefined;
+}
+
+/**
+ * The short form for a long menu whose items all cost the same: the size prices once, then one line per
+ * item with its IDs and what is on it.
+ */
+function uniformMenuLines(menu: readonly CatalogItem[], sizes: { name: string; priceMinor: number }[]): string[] {
+  const items: string[] = [];
+  for (const item of menu) {
+    const name = clean(item.name, 80);
+    if (name === '' || item.variations.length === 0 || !safeItem(item)) continue;
+    if (!item.available) { items.push(`${name}: not available today.`); continue; }
+    const ids = item.variations.map((v) => `${clean(v.name, 40)} ${v.id}`).join(', ');
+    const on = clean(item.description);
+    items.push(`${name} (item id ${item.squareItemId}; variation ids: ${ids})${on === '' ? '.' : `: ${stop(on)}`}`);
+  }
+  return [`Menu, ${items.length} items, prices before tax. Every item costs the same: ${sizes.map((s) => `${clean(s.name, 40)} ${dollars(s.priceMinor)}`).join(', ')}.`, ...items];
+}
+
 /** The menu with the exact IDs a cart needs, so an order can be quoted without a search. */
 export function menuLines(menu: readonly CatalogItem[]): string[] {
+  const sizes = uniformSizes(menu);
+  if (sizes !== undefined) return uniformMenuLines(menu, sizes);
   const lists = new Map<string, string>();
   const items: string[] = [];
   for (const item of menu) {

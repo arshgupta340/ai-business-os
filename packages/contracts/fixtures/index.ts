@@ -2,6 +2,7 @@
 // Import with `import { ... } from '@abos/contracts/fixtures'`. Browser-safe: no Node-only module.
 export * from './world';
 export * from './catalog';
+export * from './demo-shop';
 export * from './facts';
 export * from './agents';
 export * from './calls';

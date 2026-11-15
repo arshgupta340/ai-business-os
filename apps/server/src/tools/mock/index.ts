@@ -52,6 +52,8 @@ export type MockToolsetOptions = {
   now?: () => Date;
   /** Catalog items (Square item IDs) to treat as sold out, for testing ITEM_UNAVAILABLE. */
   unavailableItemIds?: readonly string[];
+  /** Another menu in place of the pizza fixture (the demo shop, issue #161). Items of other businesses are ignored. */
+  catalog?: readonly CatalogItem[];
 };
 
 export type MockToolset = {
@@ -110,7 +112,7 @@ export function createMockToolset(options: MockToolsetOptions): MockToolset {
   const counters = { quote: 0, order: 0, booking: 0, approval: 0 };
   const nextId = (prefix: string, key: keyof typeof counters) => `${prefix}${String(++counters[key]).padStart(4, '0')}`;
 
-  const catalog: CatalogItem[] = pizzaCatalog.filter((i) => i.businessId === businessId);
+  const catalog: CatalogItem[] = (options.catalog ?? pizzaCatalog).filter((i) => i.businessId === businessId);
   const verifiedFacts: BusinessFact[] = allFacts.filter((f) => f.businessId === businessId && f.status === 'verified');
   const services: ServiceOffering[] = verifiedFacts
     .filter((f) => f.kind === 'service')

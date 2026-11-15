@@ -13,7 +13,7 @@
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { REALTIME_MODEL, type ToolName } from '@abos/contracts';
-import { pizzaCatalog, pizzaSpecV2, pizzaVerifiedFacts } from '@abos/contracts/fixtures';
+import { demoShopCatalog, demoShopFacts, pizzaCatalog, pizzaSpecV2, pizzaVerifiedFacts } from '@abos/contracts/fixtures';
 import { createMockToolset } from '../../apps/server/src/tools/mock/index';
 import { buildInstructions } from '../../apps/server/src/voice/prompt';
 import { checkSessionCapabilities, createWsOpenAISocketFactory } from '../../apps/server/src/voice/relay';
@@ -30,19 +30,24 @@ if (!apiKey) throw new Error('OPENAI_API_KEY is not set');
 const DEFAULT_LINES = ['What time do you close tonight?', 'How much is a large pepperoni?', 'One large pepperoni please.', 'That is all. The name is Sam.', 'Six thirty tonight.', 'Yes.'];
 const callerLines = process.argv.length > 2 ? process.argv.slice(2) : DEFAULT_LINES;
 
-const businessName = 'Demo Pizza Co.';
+// DEMO_SHOP=1 runs the call on the demo shop's menu and facts (issue #161) in place of the two-pizza fixture.
+const demoShop = process.env.DEMO_SHOP === '1';
+const businessName = demoShop ? 'Pizza Co.' : 'Demo Pizza Co.';
 const spec = pizzaSpecV2;
+const menu = demoShop ? demoShopCatalog : pizzaCatalog;
 const facts: FactsSnapshot = {
-  facts: pizzaVerifiedFacts.flatMap((f) => (f.kind === 'menu_item' || f.status !== 'verified' ? [] : [{ kind: f.kind, key: f.key, value: f.value, version: f.version }])),
+  facts: demoShop
+    ? [...demoShopFacts.map((f) => ({ kind: f.kind, key: f.key, value: f.value, version: 2 })), { kind: 'policy' as const, key: 'pickup_window', value: { minutes: 20 }, version: 1 }]
+    : pizzaVerifiedFacts.flatMap((f) => (f.kind === 'menu_item' || f.status !== 'verified' ? [] : [{ kind: f.kind, key: f.key, value: f.value, version: f.version }])),
   timezone: 'America/Los_Angeles',
 };
 const now = new Date();
 const check = checkSessionCapabilities(spec);
 if (!check.ok) throw new Error('the fixture spec has a capability that is not allowed');
 const tools: readonly ToolName[] = check.tools;
-const toolset = createMockToolset({ businessId: spec.businessId, now: () => now });
+const toolset = createMockToolset({ businessId: spec.businessId, now: () => now, ...(demoShop ? { catalog: demoShopCatalog } : {}) });
 const greeting = agentPhoneGreeting(businessName, spec.template, process.env.AGENTPHONE_GREETING);
-const instructions = `${buildInstructions(spec, { businessName, messageChannel: 'qr_only', facts, menu: pizzaCatalog, nowMs: now.getTime() })}\n${agentPhoneChannelLines(greeting, businessName)}`;
+const instructions = `${buildInstructions(spec, { businessName, messageChannel: 'qr_only', facts, menu, nowMs: now.getTime() })}\n${agentPhoneChannelLines(greeting, businessName)}`;
 const words = (t: string) => t.split(/\s+/).filter(Boolean).length;
 
 const opened = Date.now();

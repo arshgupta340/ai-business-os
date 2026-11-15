@@ -10,6 +10,7 @@ import { squareSandboxCatalogClient, supabaseAuthAdmin } from './providers';
 import { ResetRefusedError, formatResetSummary, runReset } from './reset';
 import { formatSeedSummary, formatTally, seedDatabase } from './seed';
 import { requireSquareSandboxEnv, seedSquareCatalog } from './square';
+import { seedDemoShop } from './demo-shop';
 
 const ADMIN_HINT = 'Put it in .env.local. Seed and reset use the owner connection, never DATABASE_URL.';
 
@@ -57,6 +58,21 @@ export async function seedMain(argv: string[]): Promise<void> {
   const summary = await withAdminDb(env, (db) =>
     seedDatabase(db, { env, auth, envFilePath: envFile, withDemoConflict: argv.includes('--with-demo-conflict') }));
   for (const line of formatSeedSummary(summary)) console.log(line);
+}
+
+/** npm run seed:demo-shop: the demo shop's menu (Square SANDBOX and catalog_items) and its verified facts. */
+export async function demoShopMain(): Promise<void> {
+  loadEnv();
+  const env: SeedEnv = process.env;
+  const { accessToken } = requireSquareSandboxEnv(env);
+  requireEnv(env, ['DATABASE_ADMIN_URL'], ADMIN_HINT);
+  const summary = await withAdminDb(env, (db) => seedDemoShop(db, { env, client: squareSandboxCatalogClient(accessToken) }));
+  console.log(summary.catalog.upserted
+    ? `Square SANDBOX catalog upserted: ${summary.catalog.created.length} created, ${summary.catalog.updated.length} updated in place.`
+    : 'Square SANDBOX catalog already matches the demo shop menu; no upsert sent.');
+  for (const line of formatTally(summary.catalog.tables)) console.log(line);
+  for (const line of formatTally(summary.facts)) console.log(line);
+  console.log(`Facts retired: ${summary.retired}.`);
 }
 
 export async function resetMain(argv: string[]): Promise<void> {

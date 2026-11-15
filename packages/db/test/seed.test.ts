@@ -11,9 +11,9 @@ import {
   AgentVersionSchema, BusinessFactSchema, BusinessSchema, CAPABILITY_LIST, CatalogModifierListSchema, FactConflictSchema,
   HoursValueSchema, LiveAgentSchema, ServiceOfferingSchema,
 } from '@abos/contracts';
-import { pizzaCatalogRows } from '@abos/contracts/fixtures';
+import { demoShopCatalog, demoShopFacts, pizzaCatalogRows } from '@abos/contracts/fixtures';
 import {
-  ALL_TABLES, ResetRefusedError, SEEDED_FACTS, TRUNCATED_TABLES, countRows, liveAgentNumberVars, runReset, seedDatabase, seedSquareCatalog,
+  ALL_TABLES, ResetRefusedError, SEEDED_FACTS, TRUNCATED_TABLES, countRows, liveAgentNumberVars, runReset, seedDatabase, seedDemoShop, seedSquareCatalog,
   type AuthAdmin, type SeedDb, type SeedEnv, type SquareCatalogClient, type SquareCatalogObject,
 } from '../src/seed';
 import { createApprovedApproval, createExecution, createMigratedDb, createOrder, insert, type Owner } from './helpers';
@@ -312,6 +312,66 @@ describe('seed:square', () => {
       .rejects.toThrow(/SQUARE_ACCESS_TOKEN/);
     await expect(seedSquareCatalog(sdb, { env: { ...BASE_ENV, SQUARE_ENVIRONMENT: 'production' }, client: fakeSquare() }))
       .rejects.toThrow(/sandbox/);
+  });
+});
+
+describe('seed:demo-shop (issue #161)', () => {
+  it('replaces the two-pizza menu with 16 pizzas in three sizes, with no toppings list, and is safe to run twice', async () => {
+    await seedDatabase(sdb, { env: BASE_ENV, auth: fakeAuth(db), envFilePath: undefined });
+    const square = fakeSquare();
+    const now = () => new Date('2026-11-14T09:00:00Z');
+    await seedSquareCatalog(sdb, { env: BASE_ENV, client: square, now });
+    const oldPepperoni = await db.query<{ square_variation_id: string }>("select square_variation_id from public.catalog_items where id = 'cat_pep_lg'");
+
+    const first = await seedDemoShop(sdb, { env: BASE_ENV, client: square, now });
+    expect(first.catalog.upserted).toBe(true);
+    const rows = (await db.query<Record<string, unknown>>("select * from public.catalog_items where business_id = 'biz_pizza_01' order by item_name, price_minor")).rows;
+    expect(rows).toHaveLength(48);
+    expect([...new Set(rows.map((r) => r.item_name))]).toEqual(demoShopCatalog.map((i) => i.name).sort());
+    expect(rows.some((r) => r.item_name === 'Margherita')).toBe(false);
+    for (const r of rows) {
+      expect(r.modifier_lists).toEqual([]);
+      expect([[`Small`, 1495], ['Medium', 2595], ['Large', 3445]]).toContainEqual([r.variation_name, r.price_minor]);
+      expect(String(r.square_variation_id)).toMatch(/^SQREAL/);
+    }
+    // The Pepperoni that was already in Square is updated in place: same variation ID, new price, no toppings.
+    const pepperoni = rows.find((r) => r.item_name === 'Pepperoni' && r.variation_name === 'Large')!;
+    expect(pepperoni.square_variation_id).toBe(oldPepperoni.rows[0]!.square_variation_id);
+    expect(pepperoni.price_minor).toBe(3445);
+    const squareItem = [...square.store.values()].find((o) => o.type === 'ITEM' && o.item_data?.name === 'Pepperoni')!;
+    expect(squareItem.item_data?.modifier_list_info).toEqual([]);
+
+    const sum = await checksum(db);
+    const second = await seedDemoShop(sdb, { env: BASE_ENV, client: square, now: () => new Date('2026-11-14T10:00:00Z') });
+    expect(second.catalog.upserted).toBe(false);
+    expect(second.facts.business_facts).toEqual({ created: 0, updated: 0, unchanged: demoShopFacts.length });
+    expect(second.retired).toBe(0);
+    expect(await checksum(db)).toEqual(sum);
+  });
+
+  it('versions the shop facts over the seeded ones and retires what does not hold', async () => {
+    await seedDatabase(sdb, { env: BASE_ENV, auth: fakeAuth(db), envFilePath: undefined });
+    await db.query("insert into public.business_facts (id, business_id, kind, key, value, source_type, status, verified_at) values ('fact_smoke_1', 'biz_pizza_01', 'faq', 'live_abc', '{\"question\":\"Is this a live check?\",\"answer\":\"Yes.\"}', 'owner_ui', 'verified', now())");
+    const summary = await seedDemoShop(sdb, { env: BASE_ENV, client: fakeSquare(), now: () => new Date('2026-11-14T09:00:00Z') });
+    expect(summary.retired).toBe(2); // the parking FAQ and the smoke check's FAQ
+
+    const verified = (await db.query<{ kind: string; key: string; value: unknown; version: number; supersedes_id: string | null; source_ref: string | null }>(
+      "select kind, key, value, version, supersedes_id, source_ref from public.business_facts where business_id = 'biz_pizza_01' and status = 'verified'")).rows;
+    const fact = (kind: string, key: string) => verified.find((f) => f.kind === kind && f.key === key);
+    for (const f of demoShopFacts) expect(fact(f.kind, f.key)?.value).toEqual(f.value);
+    // Monday was 11:00 to 21:00 in the seed: the new row is version 2 and points at the seeded row.
+    expect(fact('hours', 'mon')).toMatchObject({ value: { open: '11:00', close: '23:59' }, version: 2, supersedes_id: 'fact_pizza_hours_mon', source_ref: 'issue-161' });
+    expect(fact('contact', 'address')?.value).toEqual({ address: '1000 Higuera Street, San Luis Obispo, CA 93401' });
+    expect(fact('faq', 'gluten_free')).toMatchObject({ version: 2, supersedes_id: 'fact_pizza_faq_gluten_free' });
+    expect(fact('faq', 'price')).toMatchObject({ version: 1, supersedes_id: null });
+    expect(fact('faq', 'parking')).toBeUndefined();
+    expect(fact('faq', 'live_abc')).toBeUndefined();
+    // Facts this seed does not own stay as they were.
+    expect(fact('policy', 'pickup_window')?.value).toEqual({ minutes: 20 });
+    expect(fact('policy', 'no_refunds_by_phone')).toBeDefined();
+    for (const f of verified) if (f.kind === 'hours') HoursValueSchema.parse(f.value);
+    const old = await db.query<{ status: string }>("select status from public.business_facts where id = 'fact_pizza_hours_mon'");
+    expect(old.rows[0]!.status).toBe('superseded');
   });
 });
 
