@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CatalogItem } from '@abos/contracts';
 import { barberFacts, barberSpecV1, demoShopCatalog, demoShopFacts, pizzaCatalog, pizzaSpecV2, SQ } from '@abos/contracts/fixtures';
-import { MAX_KNOWLEDGE_CHARS, buildKnowledge, clock, dollars, menuLines, nowLine } from '../../src/voice/knowledge';
+import { MAX_KNOWLEDGE_CHARS, buildKnowledge, clock, dollars, menuLines, nowLine, openNowLine } from '../../src/voice/knowledge';
 import { buildInstructions } from '../../src/voice/prompt';
 import type { FactsSnapshot } from '../../src/voice/types';
 import { PIZZA_SNAPSHOT } from './helpers';
@@ -223,5 +223,41 @@ describe('the demo shop menu (issue #161): 16 pizzas, every pizza the same price
     expect(long).toContain('The menu is long. If the caller asks what is on the menu, say how many items there are, name four or five of them');
     const short = buildInstructions(pizzaSpecV2, { businessName: 'Demo Pizza Co.', messageChannel: 'qr_only', facts: PIZZA_SNAPSHOT, menu: pizzaCatalog, nowMs: Date.parse('2026-11-14T19:00:00Z') });
     expect(short).not.toContain('The menu is long.');
+  });
+});
+
+// 2026-11-15, 1:24 AM: the pizza place (11:00 to 02:00 every day) was still open on Saturday's hours, and
+// the agent told a caller it was closed because Sunday's hours start at 11 AM. The server now states it.
+describe('voice knowledge: open or closed right now', () => {
+  const TZ = 'America/Los_Angeles';
+  const week = (value: unknown, over: Record<string, unknown> = {}) => ({
+    timezone: TZ,
+    facts: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'].map((key) => ({ kind: 'hours' as const, key, value: (over[key] ?? value) as never, version: 1 })),
+  });
+  const late = week({ open: '11:00', close: '02:00' });
+  const at = (iso: string) => Date.parse(iso);
+
+  it('is open after midnight on hours that close the next morning', () => {
+    expect(openNowLine(late, at('2026-11-15T01:24:00-08:00'))).toBe('Right now the shop is open, until 2 AM. A pickup or visit before then is inside opening hours.');
+    expect(openNowLine(late, at('2026-11-15T23:30:00-08:00'))).toContain('open, until 2 AM');
+  });
+
+  it('is closed between the morning close and the open, and says when it opens next', () => {
+    expect(openNowLine(late, at('2026-11-15T02:30:00-08:00'))).toBe('Right now the shop is closed. It opens next today at 11 AM.');
+    expect(openNowLine(late, at('2026-11-15T10:59:00-08:00'))).toBe('Right now the shop is closed. It opens next today at 11 AM.');
+  });
+
+  it('handles ordinary hours, a closed day and a full day', () => {
+    const shop = week({ open: '09:00', close: '19:00' }, { sun: { closed: true } });
+    expect(openNowLine(shop, at('2026-11-14T12:00:00-08:00'))).toContain('open, until 7 PM');
+    expect(openNowLine(shop, at('2026-11-14T20:00:00-08:00'))).toBe('Right now the shop is closed. It opens next on Monday at 9 AM.');
+    expect(openNowLine(shop, at('2026-11-13T20:00:00-08:00'))).toBe('Right now the shop is closed. It opens next tomorrow at 9 AM.');
+    expect(openNowLine(week({ open: '00:00', close: '23:59' }), at('2026-11-14T23:59:30-08:00'))).toBe('Right now the shop is open.');
+    expect(openNowLine(week({ closed: true }), at('2026-11-14T12:00:00-08:00'))).toBeUndefined();
+  });
+
+  it('is in the data block beside the Now line', () => {
+    const text = buildKnowledge({ facts: late, nowMs: at('2026-11-15T01:24:00-08:00') })?.text ?? '';
+    expect(text).toContain('Right now the shop is open, until 2 AM.');
   });
 });
