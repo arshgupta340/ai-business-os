@@ -87,8 +87,13 @@ type Session = TurnSession & { spec: AgentSpec; businessId: string; businessName
   rt?: Promise<RealtimeCall | undefined> | undefined;
   greeting: string;
   greeted: boolean;
-  /** A proposal is stored on this call: every later turn hears one short line and the call hangs up. */
+  /** A proposal is stored on this call: every later turn hears the closing line again and the call hangs up. */
   proposed: boolean;
+  /**
+   * The closing line of the turn that stored the proposal. AgentPhone often splits "Yes. We do." into two
+   * turns: the first stores the order and its closing line is never spoken, so the second must say it.
+   */
+  closing?: string | undefined;
   /** The tool-call cap ended the call. */
   limitEnded: boolean;
   facts?: FactsSnapshot | undefined;
@@ -291,7 +296,8 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
         const proposal = r.tools.find((e) => isPropose(e.tool) && isStoredProposal(e.result));
         if (proposal) {
           s.proposed = true;
-          return { reply: closingLine(s.spec.template, s.businessName, proposedName(proposal.args)), hangup: true, engine: 'realtime', toolCalls: r.toolCalls };
+          s.closing = closingLine(s.spec.template, s.businessName, proposedName(proposal.args));
+          return { reply: s.closing, hangup: true, engine: 'realtime', toolCalls: r.toolCalls };
         }
         if (r.kind === 'tool_limit') {
           s.limitEnded = true;
@@ -307,7 +313,8 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
         // A proposal stored before the failure: the call ends the way it would have.
         if (stageBefore !== 'CUSTOMER_CONFIRMED' && s.stage === 'CUSTOMER_CONFIRMED') {
           s.proposed = true;
-          return { reply: closingLine(s.spec.template, s.businessName, undefined), hangup: true, engine: 'realtime', toolCalls: 0 };
+          s.closing = closingLine(s.spec.template, s.businessName, undefined);
+          return { reply: s.closing, hangup: true, engine: 'realtime', toolCalls: 0 };
         }
       }
     }
@@ -320,7 +327,8 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
     const proposal = r.toolTrace.find((e) => isPropose(e.tool) && isStoredProposal(e.output));
     if (proposal || (stageBefore !== 'CUSTOMER_CONFIRMED' && s.stage === 'CUSTOMER_CONFIRMED')) {
       s.proposed = true;
-      return { reply: closingLine(s.spec.template, s.businessName, proposedName(proposal?.input)), hangup: true, engine: 'builder', toolCalls: r.toolTrace.length };
+      s.closing = closingLine(s.spec.template, s.businessName, proposedName(proposal?.input));
+      return { reply: s.closing, hangup: true, engine: 'builder', toolCalls: r.toolTrace.length };
     }
     return { reply: r.reply, engine: 'builder', toolCalls: r.toolTrace.length };
   }
@@ -366,8 +374,9 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
         const out = (reply: TurnReply): TurnOutcome => ({ reply, businessId: s.businessId, callId: s.callId });
 
         if (s.channelRules) {
-          // A later turn on a call whose proposal is stored, or that the tool cap ended: one line, then hang up.
-          if (s.proposed) { closeRt(s, 'hangup'); return out({ text: `${update}${afterProposalLine(s.spec.template)}`, hangup: true }); }
+          // A later turn on a call whose proposal is stored: the closing line again, then hang up. One that the
+          // tool cap ended: one line, then hang up.
+          if (s.proposed) { closeRt(s, 'hangup'); return out({ text: `${update}${s.closing ?? afterProposalLine(s.spec.template, s.businessName)}`, hangup: true }); }
           if (s.limitEnded) return out({ text: `${update}${SPEECH.callEnded}`, hangup: true });
           // A turn with no words (the call start, if AgentPhone sends one): the greeting, once.
           if (!text && !s.greeted) { s.greeted = true; return out({ text: s.greeting }); }

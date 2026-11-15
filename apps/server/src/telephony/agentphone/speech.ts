@@ -91,11 +91,13 @@ export function closingLine(template: AgentSpec['template'], businessName: strin
   return `${withName(wait, name)} Thanks for calling ${nameSentence(businessName)} Goodbye.`;
 }
 
-/** A later turn on a call whose proposal is already stored (the hangup did not land). */
-export function afterProposalLine(template: AgentSpec['template']): string {
-  return template === 'appointment_booker'
-    ? 'Your request is with the shop for approval. Goodbye.'
-    : 'Your order is with the shop for approval. Goodbye.';
+/**
+ * A later turn on a call whose proposal is already stored, when the closing line itself is not at hand
+ * (a call continued after a restart). Otherwise the call repeats its closing line (voice.ts).
+ */
+export function afterProposalLine(template: AgentSpec['template'], businessName?: string | undefined): string {
+  if (template === 'appointment_booker') return 'Your request is with the shop for approval. Goodbye.';
+  return `Your order is awaiting the shop's confirmation.${businessName ? ` Thanks for calling ${nameSentence(businessName)}` : ''} Goodbye.`;
 }
 
 /** The call reached its cap on tool calls (issue #95 item 8): the call ends. */

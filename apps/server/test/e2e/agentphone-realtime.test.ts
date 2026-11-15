@@ -96,10 +96,12 @@ describe('AgentPhone on the realtime turn engine', () => {
     expect(w.calendarWrites).toEqual([]);
     expect(w.messageSends).toBe(0);
 
-    // A later turn (the hangup did not land): one short line and hangup, and the model is not asked.
+    // A later turn (the second half of a split "Yes. We do.", or the hangup did not land): the same closing
+    // line and hangup, and the model is not asked.
     const asked = fake.userTexts.length;
-    const t5 = await signed(w, voiceTurn('call_rt_1', 'Hello? Are you there?'));
-    expect(finalChunk(t5.payload)).toEqual({ text: afterProposalLine('restaurant_order_taker'), hangup: true });
+    const t5 = await signed(w, voiceTurn('call_rt_1', 'We do.'));
+    expect(finalChunk(t5.payload)).toEqual(finalChunk(t4.payload));
+    expect(afterProposalLine('restaurant_order_taker', 'Demo Pizza Co.')).toBe("Your order is awaiting the shop's confirmation. Thanks for calling Demo Pizza Co. Goodbye.");
     expect(fake.userTexts.length).toBe(asked);
 
     // One line per turn with the engine, the time and the tool count; never the words or a number.
