@@ -3,9 +3,7 @@
 import {useEffect} from 'react';
 import {stageShopForBusiness} from '@abos/contracts/fixtures';
 import {Card} from '@astryxdesign/core/Card';
-import {Grid} from '@astryxdesign/core/Grid';
 import {Heading} from '@astryxdesign/core/Heading';
-import {HStack} from '@astryxdesign/core/HStack';
 import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {LoadingState} from '@/components/LoadingState';
@@ -86,61 +84,63 @@ export function BookingCard({businessId, approvalId, onDecided, pollMs = WAITING
   const approvalView = statusView('approval', flow.working ? 'PENDING' : (flow.shownState ?? 'PENDING'));
   const bookingView = booking.data ? statusView('booking', booking.data.status) : null;
 
+  // Green on the badge only once the server has answered this decision, the same rule as the Approved block.
+  const isApproved = flow.confirmed && flow.shownState === 'APPROVED' && !flow.working;
+
   return (
-    <Card elevation="low">
-      <Grid columns={{minWidth: 320, max: 2}} gap={5}>
-        <VStack gap={3}>
-          <HStack gap={2} vAlign="center" wrap="wrap">
-            <Heading level={2}>New booking</Heading>
-            <StatusBadge label={approvalView.label} tone={approvalView.tone} />
-            {flow.state === 'PENDING' && !flow.confirmed && !flow.working ? (
-              <Text type="large" hasTabularNumbers color="secondary">
-                {`Expires in ${formatCountdown(secondsUntil(approval.expiresAt, flow.now))}`}
-              </Text>
+    <div className="abos-arrive">
+      <Card elevation="low">
+        <div className="abos-card">
+          <div>
+            <div className="abos-card-head">
+              <Heading level={2}>New booking</Heading>
+              <StatusBadge label={approvalView.label} tone={isApproved ? 'success' : approvalView.tone} />
+              {flow.state === 'PENDING' && !flow.confirmed && !flow.working ? (
+                <span className="abos-card-expires">{`Expires in ${formatCountdown(secondsUntil(approval.expiresAt, flow.now))}`}</span>
+              ) : null}
+            </div>
+            {booking.data ? (
+              <>
+                <div className="abos-who">{booking.data.serviceName}</div>
+                <div className="abos-when">{`${formatDate(p.startUtc, p.timezone)}, ${formatTime(p.startUtc, p.timezone)}`}</div>
+                <div className="abos-lines">
+                  <div className="abos-line">
+                    <span>{booking.data.customer.name}</span>
+                    <span className="abos-line-side">{`${durationMinutes(p.startUtc, p.endUtc)} minutes`}</span>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <LoadingState label="Loading the booking" />
+            )}
+            {unreachable ? <Text type="supporting">The server could not be reached. Still trying.</Text> : null}
+          </div>
+
+          <div className="abos-card-side">
+            {price ? (
+              <div>
+                <div className="abos-total-label">
+                  <span>Price</span>
+                  <SandboxBadge />
+                </div>
+                <div className="abos-total">{formatMoney(price.priceMinor, price.currency)}</div>
+              </div>
             ) : null}
-          </HStack>
-          {booking.data ? (
-            <VStack gap={1}>
-              <Text type="display-3" weight="semibold">
-                {booking.data.serviceName}
-              </Text>
-              <Text type="display-3">{`${formatDate(p.startUtc, p.timezone)}, ${formatTime(p.startUtc, p.timezone)}`}</Text>
-              <Text type="display-3">{booking.data.customer.name}</Text>
-              <Text type="large" weight="normal" color="secondary">
-                {`${durationMinutes(p.startUtc, p.endUtc)} minutes`}
-              </Text>
-            </VStack>
-          ) : (
-            <LoadingState label="Loading the booking" />
-          )}
-          {unreachable ? <Text type="supporting">The server could not be reached. Still trying.</Text> : null}
-        </VStack>
 
-        <VStack gap={4} vAlign="center">
-          {price ? (
-            <VStack gap={1}>
-              <HStack gap={2} vAlign="center">
-                <Text type="label" color="secondary">
-                  Price
-                </Text>
-                <SandboxBadge />
-              </HStack>
-              <Text type="display-1" weight="semibold" hasTabularNumbers>
-                {formatMoney(price.priceMinor, price.currency)}
-              </Text>
-            </VStack>
-          ) : null}
+            <Decision flow={flow} wording={BOOKING_WORDING} notice={decisionNotice(flow, BOOKING_WORDING, approval.id, mismatch)} />
 
-          <Decision flow={flow} wording={BOOKING_WORDING} notice={decisionNotice(flow, BOOKING_WORDING, approval.id, mismatch)} />
-
-          {flow.confirmed && bookingView && !flow.working ? (
-            <HStack gap={2} vAlign="center" wrap="wrap">
-              <Text type="large">Now:</Text>
-              <StatusBadge label={bookingView.label} tone={bookingView.tone} />
-            </HStack>
-          ) : null}
-        </VStack>
-      </Grid>
-    </Card>
+            {/* The row keeps its height before there is anything to say, so the card does not move. */}
+            <div className="abos-now">
+              {flow.confirmed && bookingView && !flow.working ? (
+                <>
+                  <span>Now:</span>
+                  <StatusBadge label={bookingView.label} tone={bookingView.tone} />
+                </>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </Card>
+    </div>
   );
 }

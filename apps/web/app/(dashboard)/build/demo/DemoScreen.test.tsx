@@ -459,10 +459,14 @@ describe('Demo run: the booking finale', {timeout: 30000}, () => {
     await bookingOnScreen();
     // The booking's customer shows once the booking itself has loaded.
     expect(await screen.findByText(bookingVerified.customer.name)).toBeTruthy();
-    // The service shows in the services panel and on the card.
-    expect(screen.getAllByText('Haircut')).toHaveLength(2);
+    // Once the booking is on screen the services panel has stepped aside (the number shrinks to a strip),
+    // so the service and its duration show once, on the card.
+    expect(screen.getAllByText('Haircut')).toHaveLength(1);
     expect(screen.getByText(/^[A-Z][a-z]{2},\s[A-Z][a-z]{2}\s\d{1,2},\s\d{1,2}:\d\d\s[AP]M$/)).toBeTruthy();
-    expect(screen.getAllByText('30 minutes')).toHaveLength(2);
+    expect(screen.getAllByText('30 minutes')).toHaveLength(1);
+    // The shop and its number stay on screen, in the strip.
+    expect(screen.getByText(STAGE_SHOPS.barber.name)).toBeTruthy();
+    expect(screen.getByText('(805) 555-0124')).toBeTruthy();
     expect(screen.getAllByText('Sandbox').length).toBeGreaterThan(0);
     expect(screen.getAllByText('$30.00').length).toBeGreaterThan(0);
     expect(screen.getByText(/^Expires in \d+:\d\d$/)).toBeTruthy();

@@ -19,8 +19,9 @@ const NAV_ICONS: Record<NavItem['key'], LucideIcon> = {
   settings: Settings,
 };
 
-// The selected tab is filled with the theme's accent color, so it reads as the tab you are on.
-const SELECTED_STYLE = {backgroundColor: 'var(--color-accent)', color: 'var(--color-on-accent)'} as const;
+// The selected tab is tinted with the accent color and its label takes the accent, so it reads as the
+// tab you are on without being the heaviest thing on the screen.
+const SELECTED_STYLE = {backgroundColor: 'var(--abos-tint-strong)', color: 'var(--color-text-accent)', fontWeight: 650} as const;
 
 export type SidebarProps = {
   /** Pending approvals. null or 0 hides the badge. */
@@ -45,7 +46,7 @@ export function Sidebar({pendingApprovalsCount = null}: SidebarProps) {
             style={isSelected ? SELECTED_STYLE : undefined}
             endContent={
               item.key === 'approvals' && pendingApprovalsCount ? (
-                <Badge label={String(pendingApprovalsCount)} variant="warning" />
+                <Badge label={String(pendingApprovalsCount)} variant="info" />
               ) : undefined
             }
           />

@@ -7,32 +7,24 @@
  * green "Approved" block only after the server has confirmed the decision.
  */
 
-import {useEffect, useRef, useState, type ReactNode} from 'react';
+import {useEffect, useRef, useState, type CSSProperties, type ReactNode} from 'react';
 import {Banner} from '@astryxdesign/core/Banner';
 import {Button} from '@astryxdesign/core/Button';
-import {Card} from '@astryxdesign/core/Card';
-import {HStack} from '@astryxdesign/core/HStack';
-import {Icon} from '@astryxdesign/core/Icon';
-import {Spinner} from '@astryxdesign/core/Spinner';
 import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {useDecideApproval, type ApprovalRequest, type ApprovalState} from '@/lib/api';
 import {statusView} from '@/lib/status';
 import {decisionErrorView, effectiveState} from '../../approvals/_lib/approval-view';
 import {useNow} from '../../approvals/_lib/useNow';
+import {APPROVE_HOLD_MS} from './demo-machine';
 
 /**
- * The block that takes the place of the Approve button once the server has
- * confirmed the decision, so the room sees the button turn green. Green is
- * allowed here because the decision is confirmed (see StatusBadge). The
- * keyframes are in app/globals.css.
+ * Approve, "Approving" and "Approved" share one slot of a fixed height
+ * (`.abos-decision` in app/globals.css), so nothing on the card moves between
+ * them. The slot fills while the decision is on its way, then turns green.
+ * Green is allowed there because the decision is confirmed (see StatusBadge).
  */
-const APPROVED_STYLE = {
-  backgroundColor: 'var(--color-success)',
-  borderColor: 'var(--color-success)',
-  color: 'var(--color-on-success)',
-  animation: 'abos-approved-in var(--duration-medium) var(--ease-entrance) both',
-} as const;
+const HOLD_STYLE = {'--abos-hold': `${APPROVE_HOLD_MS}ms`} as CSSProperties;
 
 /** The words that differ between an order and a booking. */
 export type DecisionWording = {
@@ -187,32 +179,29 @@ export function Decision({
   // The decision is on its way, or it came back sooner than the room could see.
   if (flow.working) {
     return (
-      <Card variant="muted" padding={5} role="status">
-        <HStack gap={3} vAlign="center" justify="center">
-          <Spinner size="xl" aria-label="Approving" />
-          <Text type="display-2" weight="semibold">
-            {wording.approving}
-          </Text>
-        </HStack>
-      </Card>
+      <div className="abos-decision" style={HOLD_STYLE}>
+        <div className="abos-approving" role="status">
+          <span className="abos-spinner" role="img" aria-label="Approving" />
+          <span>{wording.approving}</span>
+        </div>
+      </div>
     );
   }
   // "Approved" only from the server's answer to this decision or a stored decision it reports.
   if (shownState === 'APPROVED') {
     return (
-      <Card padding={5} style={APPROVED_STYLE} role="status">
-        <VStack gap={1} hAlign="center">
-          <HStack gap={3} vAlign="center" justify="center">
-            <Icon icon="success" size="lg" />
-            <Text type="display-1" weight="semibold" color="inherit">
-              Approved
-            </Text>
-          </HStack>
-          <Text type="large" weight="normal" color="inherit">
-            {wording.accepted}
-          </Text>
-        </VStack>
-      </Card>
+      <div className="abos-decision">
+        <div className="abos-approved" role="status">
+          <svg className="abos-approved-check" viewBox="0 0 24 24" aria-hidden>
+            <circle cx="12" cy="12" r="10" />
+            <path d="m7.4 12.4 3 3 6.2-6.6" />
+          </svg>
+          <span>
+            <span className="abos-approved-title">Approved</span>
+            <span className="abos-approved-note">{wording.accepted}</span>
+          </span>
+        </div>
+      </div>
     );
   }
   if (flow.confirmed || shownState !== 'PENDING') {
@@ -228,7 +217,12 @@ export function Decision({
   }
   return (
     <VStack gap={3}>
-      <Button label="Approve" variant="primary" size="lg" width="100%" onClick={flow.approve} isDisabled={!flow.canApprove} />
+      <div className="abos-decision">
+        {/* A plain button, so it can fill the slot. aria-disabled, as the Astryx Button does: the click is ignored in flow.approve. */}
+        <button type="button" className="abos-approve" onClick={flow.approve} aria-disabled={flow.canApprove ? undefined : true}>
+          Approve
+        </button>
+      </div>
       {notice}
     </VStack>
   );
