@@ -124,8 +124,9 @@ To try the engine against the real model without a call: `npx tsx scripts/live/a
 
 ### Still unproven on a real call
 
-- Whether AgentPhone sends an event when the call starts, before the caller speaks. If it sends a voice `agent.message` with an empty transcript, the caller hears the greeting at once. If it sends nothing, the greeting comes with the first answer, so the caller speaks first. An event of another type is stored and ignored.
-- Whether `beginMessage` is spoken in webhook mode. The connector says hosted mode only, so the server speaks the greeting itself. If a real call shows AgentPhone does speak it, set `AGENTPHONE_GREETING_MODE=begin_message`.
+- Tested on 2026-11-14 (two calls from a phone, one scripted call from the Twilio number; AgentPhone's call records and our logs). AgentPhone sends no event when a call starts: the first webhook arrives only after the caller speaks. With `beginMessage` null the caller hears silence until they speak.
+- Tested on 2026-11-14: `beginMessage` IS spoken in webhook mode. With it set on the agent, the call record shows it as the first entry, before the caller's first words. The live setup is therefore the agent's `beginMessage` set to the greeting and `AGENTPHONE_GREETING_MODE=begin_message`. The `beginMessage` text lives on AgentPhone and is not updated when the business name changes. Not measured: how many seconds after pickup it starts.
+- In `first_reply` mode a first turn that is only a hello is answered with the greeting alone and no model turn; a first turn with a request gets the shop name and the AI disclosure before the answer. The interim "One moment." chunk waits 3.5 seconds (it was 1.5, which spoke before the greeting on the first two calls).
 - How AgentPhone's speech engine reads prices and times. The prompt asks for words, not digits.
 - Whether the 10 second webhook timeout covers the whole NDJSON answer or only its first chunk, and what the caller hears when it passes.
 - Whether `interruptionSensitivity` 0.3 is low enough, or too low to let a caller correct the agent.
