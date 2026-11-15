@@ -25,6 +25,26 @@ export function agentPhoneGreeting(businessName: string, template: AgentSpec['te
   return `Thanks for calling ${nameSentence(businessName)} ${GREETING_DISCLOSURE} ${ask}`;
 }
 
+/**
+ * The opening for a call whose first words are already a request: the shop name and the AI disclosure,
+ * without the question, so the answer that follows is not a second question.
+ */
+export function agentPhoneGreetingLead(businessName: string): string {
+  return `Thanks for calling ${nameSentence(businessName)} ${GREETING_DISCLOSURE}`;
+}
+
+const HELLO_WORDS = new Set(['hello', 'hi', 'hey', 'hiya', 'yo', 'yes', 'yeah', 'um', 'uh', 'ok', 'okay', 'good', 'morning', 'afternoon', 'evening',
+  'is', 'are', 'you', 'there', 'anyone', 'anybody', 'somebody', 'someone', 'can', 'hear', 'me']);
+/**
+ * True when a caller's first words are only a hello ("Hello?", "Hi, is anyone there?"). AgentPhone stays
+ * silent until the caller speaks, so most calls start this way; the server then answers with the greeting
+ * alone, at once, without a model turn.
+ */
+export function isHelloOnly(text: string): boolean {
+  const words = text.toLowerCase().replace(/[^a-z ]+/g, ' ').split(' ').filter(Boolean);
+  return words.length > 0 && words.length <= 6 && words.every((w) => HELLO_WORDS.has(w));
+}
+
 /** The lines this channel needs, after the phone prompt. */
 export function agentPhoneChannelLines(greeting: string): string {
   return [

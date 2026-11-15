@@ -32,7 +32,7 @@ import { initialTurnStage, runAgentTurn, MAX_REPLY_CHARS, type TurnSession } fro
 import { plainSpeech } from '../../api/simcall/plain';
 import type { TurnReply } from '../types';
 import { isStoredProposal, openRealtimeCall, type RealtimeCall, type RealtimeCallDeps, type TurnHooks } from './realtime';
-import { afterProposalLine, agentPhoneChannelLines, agentPhoneGreeting, closingLine, sayableName, toolLimitLine } from './speech';
+import { afterProposalLine, agentPhoneChannelLines, agentPhoneGreeting, agentPhoneGreetingLead, closingLine, isHelloOnly, sayableName, toolLimitLine } from './speech';
 
 export const SPEECH = {
   notTakingCalls: 'Sorry, this number is not taking calls right now. Goodbye.',
@@ -56,7 +56,7 @@ export function decisionSpeech(template: AgentSpec['template'], decision: CallDe
 export type TurnEngine = 'realtime' | 'builder';
 /**
  * first_reply (the default): the server speaks the greeting on the call's first event, alone when the event
- * has no words, or before its first answer. begin_message: AgentPhone is trusted to speak the agent's
+ * has no words or only a hello, or its shop name and AI disclosure before the first answer. begin_message: AgentPhone is trusted to speak the agent's
  * beginMessage (its connector schema calls that field hosted mode only, so this is not the default).
  */
 export type GreetingMode = 'begin_message' | 'first_reply';
@@ -369,12 +369,17 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
           if (s.limitEnded) return out({ text: `${update}${SPEECH.callEnded}`, hangup: true });
           // A turn with no words (the call start, if AgentPhone sends one): the greeting, once.
           if (!text && !s.greeted) { s.greeted = true; return out({ text: s.greeting }); }
+          // The caller's first words are only a hello (AgentPhone waits for the caller to speak, so most calls
+          // start this way): the greeting alone, at once. No model turn runs, so nothing delays it and the
+          // model cannot add a second question; its session opens while the greeting is spoken.
+          if (!s.greeted && isHelloOnly(text)) { s.greeted = true; return out({ text: `${update}${s.greeting}` }); }
         }
         if (!text) return out({ text: `${update}${SPEECH.didNotHear}` });
-        // first_reply (the default): the first event of the call carried words, so the greeting goes before
-        // the first answer. begin_message: AgentPhone was trusted to have spoken the agent's beginMessage.
+        // first_reply (the default): the first event of the call carried a request, so the shop name and the
+        // AI disclosure go before the first answer, without the greeting's question (the answer follows).
+        // begin_message: AgentPhone was trusted to have spoken the agent's beginMessage.
         let lead = update;
-        if (s.channelRules && !s.greeted) { s.greeted = true; lead = `${s.greeting} ${update}`; }
+        if (s.channelRules && !s.greeted) { s.greeted = true; lead = `${agentPhoneGreetingLead(s.businessName)} ${update}`; }
 
         // The turn is quiet, and the next one may start, when it has finished, or when it was abandoned and
         // no tool call of its own is still running (an abandoned turn can start no new one).

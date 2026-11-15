@@ -20,7 +20,11 @@ import type { TelephonyEvent, TelephonyProvider, TurnReply } from '../types';
 import { SPEECH, type AgentPhoneVoice } from './voice';
 
 export const AGENTPHONE_NDJSON = 'application/x-ndjson';
-export const DEFAULT_INTERIM_AFTER_MS = 1500;
+/**
+ * Two calls on 2026-11-14 showed the 1.5 second value speaking "One moment." before the greeting (the
+ * first turn took 1.6 and 2.3 seconds). The filler is now only for a turn that is really slow.
+ */
+export const DEFAULT_INTERIM_AFTER_MS = 3500;
 /** The most webhook.rejected events one server process writes for this route in any 60 seconds. Every rejected request still answers 401 or 400. */
 export const REJECTED_EVENTS_PER_MINUTE = 30;
 /** event_type of the row that remembers a delivery's signed content. It carries no payload and is never acted on. */
