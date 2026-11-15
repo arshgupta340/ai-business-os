@@ -17,6 +17,8 @@ const SECURITY_HEADERS = [
 // This app has no API routes. It calls the server at NEXT_PUBLIC_API_URL.
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  // No Next.js badge in the corner of the screen while running `next dev`. The demo is presented from a dev server.
+  devIndicators: false,
   // packages/contracts ships TypeScript source with no build step.
   transpilePackages: ['@abos/contracts'],
   // The repo root, so Next does not pick up a lockfile outside the repo.
