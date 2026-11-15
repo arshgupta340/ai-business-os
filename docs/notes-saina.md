@@ -256,7 +256,7 @@ What happened, in order:
 
 The event order from this run is replayed in `apps/web/app/(dashboard)/build/voice/voiceSession.test.ts` ("follows the event order a real session sent").
 
-Spoken test by Saina, the same day, with a real microphone and the laptop speakers on. All seven steps posted on issue #50 passed:
+Spoken test by Saina, the same day, in Chrome, with a real microphone and the laptop speakers on. All seven steps posted on issue #50 passed:
 
 - Voice connected and said "Listening."
 - A spoken sentence appeared in the chat marked "Spoken", and the reply was read aloud.
@@ -267,4 +267,4 @@ Spoken test by Saina, the same day, with a real microphone and the laptop speake
 Still not verified:
 
 - With a source that goes completely silent after speech, OpenAI never sent `speech_stopped` and nothing was transcribed. A real microphone always carries some room noise, so this did not happen in the spoken test, but a muted or virtual input device could show it.
-- Which browser the spoken test used is not written down here. If the demo uses a different one, repeat the test in it.
+- Any browser other than Chrome. If the demo uses a different one, repeat the test in it.
