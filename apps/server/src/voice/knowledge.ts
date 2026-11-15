@@ -88,7 +88,10 @@ function hoursLine(facts: FactsSnapshot): string | undefined {
     if (parsed === undefined || !parsed.success) continue;
     // 00:00 to 23:59 is how a full day is stored.
     const allDay = !('closed' in parsed.data) && parsed.data.open === '00:00' && parsed.data.close === '23:59';
-    days.push('closed' in parsed.data ? `${label} closed` : allDay ? `${label} open 24 hours` : `${label} ${clock(parsed.data.open)} to ${clock(parsed.data.close)}`);
+    // A close at or before the open is a close the next morning (11:00 to 02:00).
+    const nextMorning = !('closed' in parsed.data) && !allDay && parsed.data.close <= parsed.data.open;
+    days.push('closed' in parsed.data ? `${label} closed` : allDay ? `${label} open 24 hours`
+      : `${label} ${clock(parsed.data.open)} to ${clock(parsed.data.close)}${nextMorning ? ' the next morning' : ''}`);
   }
   // Every day must be readable. With a day missing, the agent keeps reading hours from the tool.
   return days.length === DAYS.length ? `Opening hours: ${days.join('. ')}.` : undefined;

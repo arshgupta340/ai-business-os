@@ -57,6 +57,29 @@ export function localToEpoch(date: string, time: string, timeZone: string): numb
 }
 
 /** The weekday key of a local `YYYY-MM-DD` date. */
+/** The local date `days` after a local date (negative for before). */
+export function shiftLocalDate(date: string, days: number): string {
+  const [y, m, d] = date.split('-').map(Number);
+  const t = new Date(Date.UTC(y ?? 0, (m ?? 1) - 1, (d ?? 1) + days));
+  const two = (n: number) => String(n).padStart(2, '0');
+  return `${t.getUTCFullYear()}-${two(t.getUTCMonth() + 1)}-${two(t.getUTCDate())}`;
+}
+
+/** True when a day's hours end the next morning: a close at or before the open, as in 11:00 to 02:00. */
+export function closesNextMorning(hours: { open: string; close: string }): boolean {
+  return hours.close <= hours.open;
+}
+
+/**
+ * True when [startMs, endMs] lies inside the opening window that starts on the local `date`. The window of
+ * a day that closes the next morning runs to that closing time on the following date.
+ */
+export function insideWindow(date: string, hours: { open: string; close: string }, timeZone: string, startMs: number, endMs: number): boolean {
+  const open = localToEpoch(date, hours.open, timeZone);
+  const close = localToEpoch(closesNextMorning(hours) ? shiftLocalDate(date, 1) : date, hours.close, timeZone);
+  return startMs >= open && endMs <= close;
+}
+
 export function weekdayOfLocalDate(date: string): HoursKey {
   const [y, m, d] = date.split('-').map(Number);
   return WEEKDAYS[new Date(Date.UTC(y ?? 0, (m ?? 1) - 1, d ?? 1)).getUTCDay()] ?? 'sun';

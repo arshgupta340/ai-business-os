@@ -33,7 +33,7 @@ import {
   type ToolTraceEntry,
   type Toolset,
 } from '@abos/contracts';
-import { localDay, localToEpoch, pickupTooSoon, PICKUP_TOO_SOON, weekdayOfLocalDate } from './time';
+import { closesNextMorning, insideWindow, localDay, localToEpoch, pickupTooSoon, PICKUP_TOO_SOON, shiftLocalDate, weekdayOfLocalDate } from './time';
 import type { ConsentEvidence, FactsSnapshot, PortContext, RealToolset, RealToolsetDeps, InvocationControl, SafeTraceInput, SafeTraceOutput } from './types';
 
 export type * from './types';
@@ -136,8 +136,13 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
     const { date, weekday } = localDay(startMs, tz);
     const h = hoursOn(snapshot, weekday);
     if (h.state === 'unknown') return 'unknown';
-    if (h.state === 'closed') return 'outside';
-    return startMs >= localToEpoch(date, h.open, tz) && endMs <= localToEpoch(date, h.close, tz) ? 'inside' : 'outside';
+    if (h.state === 'open' && insideWindow(date, h, tz, startMs, endMs)) return 'inside';
+    // After midnight the time can belong to the day before, when that day closes the next morning
+    // (a shop open 11:00 to 02:00). Unreadable hours for that day never make the answer `inside`.
+    const before = shiftLocalDate(date, -1);
+    const prev = hoursOn(snapshot, weekdayOfLocalDate(before));
+    if (prev.state === 'open' && closesNextMorning(prev) && insideWindow(before, prev, tz, startMs, endMs)) return 'inside';
+    return 'outside';
   }
 
   function storeQuote(quote: Quote, cart: Cart) {

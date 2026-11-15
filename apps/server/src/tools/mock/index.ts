@@ -44,7 +44,7 @@ import {
   pizzaCatalog,
 } from '@abos/contracts/fixtures';
 import { isoUtc, localDateTime, localToEpoch, weekdayOfLocalDate } from './time';
-import { pickupTooSoon, PICKUP_TOO_SOON } from '../real/time';
+import { closesNextMorning, insideWindow, pickupTooSoon, PICKUP_TOO_SOON, shiftLocalDate } from '../real/time';
 import { nearestSlots } from '../real/index';
 
 export type MockToolsetOptions = {
@@ -268,8 +268,13 @@ export function createMockToolset(options: MockToolsetOptions): MockToolset {
       if (pickup < now().getTime()) return fail('VALIDATION_FAILED', 'The pickup time is in the past.');
       if (pickupTooSoon(pickup, now().getTime())) return fail('VALIDATION_FAILED', PICKUP_TOO_SOON);
       const local = localDateTime(pickup, timezone);
-      const window = openWindow(local.date);
-      if (window === undefined || pickup < window.open || pickup > window.close) return fail('VALIDATION_FAILED', 'The pickup time is outside opening hours.');
+      // The same rule as the real toolset: inside that day's hours, or inside the day before when it closes the next morning.
+      const today = hoursFor(local.date);
+      const before = shiftLocalDate(local.date, -1);
+      const yesterday = hoursFor(before);
+      const open = (today !== undefined && !('closed' in today) && insideWindow(local.date, today, timezone, pickup, pickup))
+        || (yesterday !== undefined && !('closed' in yesterday) && closesNextMorning(yesterday) && insideWindow(before, yesterday, timezone, pickup, pickup));
+      if (!open) return fail('VALIDATION_FAILED', 'The pickup time is outside opening hours.');
 
       const orderId = nextId('ord_mock_', 'order');
       const approvalId = nextId(MOCK_APPROVAL_PREFIX, 'approval');
