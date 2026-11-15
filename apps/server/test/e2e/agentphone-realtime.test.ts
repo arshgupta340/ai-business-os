@@ -80,7 +80,7 @@ describe('AgentPhone on the realtime turn engine', () => {
     expect(finalChunk(t3.payload).text).toContain('Shall I send this to the shop for approval?');
     const t4 = await signed(w, voiceTurn('call_rt_1', 'Yes.'));
     expect(finalChunk(t4.payload)).toEqual({
-      text: 'Thanks, Sam. Your order is with the shop for approval. The payment link will be shown to you at the counter. Your order is not placed until you pay on that link. Thanks for calling Demo Pizza Co. Goodbye.',
+      text: "Thanks, Sam. Your order is awaiting the shop's confirmation. Thanks for calling Demo Pizza Co. Goodbye.",
       hangup: true,
     });
     expect(fake.sockets).toBe(1);
