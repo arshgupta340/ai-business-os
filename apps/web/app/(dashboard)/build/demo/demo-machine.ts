@@ -9,7 +9,7 @@
  */
 import type {StageShopKey} from '@abos/contracts/fixtures';
 import type {ApprovalRequest, ApprovalState} from '@/lib/api';
-import {DEMO_STEPS} from './demo-steps';
+import {DEMO_STEPS, type DemoStepDefinition} from './demo-steps';
 
 /** How often the pending approvals and the order are read again, besides the live updates. */
 export const WAITING_POLL_MS = 3000;
@@ -39,6 +39,8 @@ export type DemoState = {
   /** The stage shop the attached files chose. Set on send, cleared on start over. */
   shopKey: StageShopKey | null;
   steps: StepStatus[];
+  /** When the message was sent (ms). The steps run from it, also after the screen comes back. */
+  sentAt: number | null;
   /** When the number was shown (ms). Only orders created after it count. */
   numberShownAt: number | null;
   approvalId: string | null;
@@ -50,16 +52,18 @@ export type DemoState = {
 export type ApprovalKind = 'order_bundle' | 'booking_bundle';
 
 export type DemoAction =
-  | {type: 'send'; text: string; fileNames: string[]; shopKey: StageShopKey}
+  | {type: 'send'; text: string; fileNames: string[]; shopKey: StageShopKey; now?: number}
   | {type: 'step_done'; run: number; index: number; now: number}
   | {type: 'order_arrived'; approvalId: string; kind: ApprovalKind}
   | {type: 'decided'; approvalId: string; state: ApprovalState}
-  | {type: 'start_over'};
+  | {type: 'start_over'}
+  /** The screen came back to a run saved earlier in this tab (see demo-run-store.ts). Applies only on the starting page. */
+  | {type: 'restore'; state: DemoState};
 
 const allPending = (): StepStatus[] => DEMO_STEPS.map(() => 'pending');
 
 export function initialDemoState(run = 0): DemoState {
-  return {phase: 'compose', run, message: null, shopKey: null, steps: allPending(), numberShownAt: null, approvalId: null, approvalKind: null, decidedState: null};
+  return {phase: 'compose', run, message: null, shopKey: null, steps: allPending(), sentAt: null, numberShownAt: null, approvalId: null, approvalKind: null, decidedState: null};
 }
 
 export function demoReducer(state: DemoState, action: DemoAction): DemoState {
@@ -76,6 +80,7 @@ export function demoReducer(state: DemoState, action: DemoAction): DemoState {
         message: {text, fileNames: [...action.fileNames]},
         shopKey: action.shopKey,
         steps,
+        sentAt: action.now ?? null,
       };
     }
     case 'step_done': {
@@ -97,7 +102,72 @@ export function demoReducer(state: DemoState, action: DemoAction): DemoState {
     }
     case 'start_over':
       return initialDemoState(state.run + 1);
+    case 'restore':
+      return state.phase === 'compose' ? action.state : state;
   }
+}
+
+/** The plain data of a run that is kept while the presenter is on another tab. */
+export type SavedDemoRun = {
+  run: number;
+  shopKey: StageShopKey;
+  message: {text: string; fileNames: string[]} | null;
+  sentAt: number | null;
+  numberShownAt: number | null;
+  /** The orders already waiting when the number was shown, once the first list after it was read. */
+  knownIds: string[] | null;
+  approvalId: string | null;
+  approvalKind: ApprovalKind | null;
+};
+
+/**
+ * The state to show when the screen comes back to a saved run.
+ *
+ * An order or booking on screen comes back as the same card; whether it was
+ * approved is never taken from here, the card reads it from the server. With
+ * the number shown, the screen waits again with the original moment the
+ * number was shown. During the steps, the clock decides: the steps already
+ * over show as done, and if the whole build would be over by now, the number
+ * shows, as of the moment it would have shown.
+ */
+export function restoreDemoState(
+  saved: SavedDemoRun,
+  {now, steps = DEMO_STEPS, scale = 1}: {now: number; steps?: readonly DemoStepDefinition[]; scale?: number},
+): DemoState {
+  const base: DemoState = {...initialDemoState(saved.run), message: saved.message, shopKey: saved.shopKey, sentAt: saved.sentAt};
+  const allDone = (): StepStatus[] => steps.map(() => 'done');
+  if (saved.approvalId && saved.approvalKind) {
+    return {...base, phase: 'order', steps: allDone(), numberShownAt: saved.numberShownAt ?? now, approvalId: saved.approvalId, approvalKind: saved.approvalKind};
+  }
+  if (saved.numberShownAt !== null) return {...base, phase: 'ready', steps: allDone(), numberShownAt: saved.numberShownAt};
+  const elapsed = saved.sentAt === null ? Number.POSITIVE_INFINITY : Math.max(0, now - saved.sentAt);
+  const statuses: StepStatus[] = [];
+  let end = 0;
+  for (const step of steps) {
+    const start = end;
+    end += Math.max(0, step.durationMs * scale);
+    statuses.push(elapsed >= end ? 'done' : elapsed >= start && !statuses.includes('running') ? 'running' : 'pending');
+  }
+  if (!statuses.includes('running')) {
+    return {...base, phase: 'ready', steps: allDone(), numberShownAt: saved.sentAt === null ? now : saved.sentAt + end};
+  }
+  return {...base, phase: 'progress', steps: statuses};
+}
+
+/** The saved form of a state, or null on the starting page. `known` is kept only for this run's number. */
+export function toSavedRun(state: DemoState, known: {shownAt: number; ids: ReadonlySet<string>} | null): SavedDemoRun | null {
+  if (state.phase === 'compose' || !state.shopKey) return null;
+  const knownIds = known && state.numberShownAt !== null && known.shownAt === state.numberShownAt ? [...known.ids] : null;
+  return {
+    run: state.run,
+    shopKey: state.shopKey,
+    message: state.message,
+    sentAt: state.sentAt,
+    numberShownAt: state.numberShownAt,
+    knownIds,
+    approvalId: state.approvalId,
+    approvalKind: state.approvalKind,
+  };
 }
 
 /** True once the result panel shows. The finale's queries start only then. */

@@ -7,12 +7,13 @@
  * Mutations never update the cache before the server answers. Success state
  * comes only from the server response or from a refetch after it.
  */
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import * as api from "./client";
 import { queryKeys, type Resource } from "./query-keys";
 import type { ApiError } from "./errors";
 import type { ScopedQuery } from "./client";
+import { newerThan, useHiddenBefore } from "../demo-reset";
 import type {
   AgentRunResponse,
   ApprovalDecision,
@@ -30,6 +31,21 @@ type MaybeId = string | null | undefined;
 
 function invalidate(qc: QueryClient, businessId: string, ...resources: Resource[]) {
   return Promise.all(resources.map((r) => qc.invalidateQueries({ queryKey: queryKeys.resource(businessId, r) })));
+}
+
+/**
+ * The demo reset (lib/demo-reset.ts): once the presenter has reset the app, the
+ * lists of run data leave out what happened at or before that moment. Without
+ * a reset the page is returned as the server sent it.
+ */
+function useNewerOnly<P extends { items: unknown[] }>(at: (item: P["items"][number]) => string | undefined) {
+  const cutoff = useHiddenBefore();
+  const atRef = useRef(at);
+  atRef.current = at;
+  return useMemo(
+    () => (cutoff === null ? undefined : (page: P): P => ({ ...page, items: newerThan(page.items, cutoff, atRef.current) })),
+    [cutoff],
+  );
 }
 
 function requireId(id: MaybeId, name: string): string {
@@ -345,10 +361,12 @@ export function useSetLiveAgent() {
 // ------------------------------------------------------------- approvals
 
 export function useApprovals(businessId: MaybeId, query: ScopedQuery<"listApprovals"> = {}) {
+  const select = useNewerOnly<Awaited<ReturnType<typeof api.listApprovals>>>((x) => x.createdAt);
   return useQuery({
     queryKey: queryKeys.approvals(businessId ?? "", query),
     queryFn: () => api.listApprovals(requireId(businessId, "businessId"), query),
     enabled: !!businessId,
+    select,
   });
 }
 
@@ -403,10 +421,12 @@ export function useDecideApproval(businessId: MaybeId) {
 // ------------------------------------------------------- orders, bookings
 
 export function useOrders(businessId: MaybeId, query: ScopedQuery<"listOrders"> = {}) {
+  const select = useNewerOnly<Awaited<ReturnType<typeof api.listOrders>>>((x) => x.createdAt);
   return useQuery({
     queryKey: queryKeys.orders(businessId ?? "", query),
     queryFn: () => api.listOrders(requireId(businessId, "businessId"), query),
     enabled: !!businessId,
+    select,
   });
 }
 
@@ -428,10 +448,12 @@ export function useOrderCheckout(businessId: MaybeId, orderId: MaybeId) {
 }
 
 export function useBookings(businessId: MaybeId, query: ScopedQuery<"listBookings"> = {}) {
+  const select = useNewerOnly<Awaited<ReturnType<typeof api.listBookings>>>((x) => x.createdAt);
   return useQuery({
     queryKey: queryKeys.bookings(businessId ?? "", query),
     queryFn: () => api.listBookings(requireId(businessId, "businessId"), query),
     enabled: !!businessId,
+    select,
   });
 }
 
@@ -446,20 +468,24 @@ export function useBooking(businessId: MaybeId, bookingId: MaybeId) {
 // --------------------------------------------------------------- activity
 
 export function useActivity(businessId: MaybeId, query: ScopedQuery<"listActivity"> = {}) {
+  const select = useNewerOnly<Awaited<ReturnType<typeof api.listActivity>>>((x) => x.occurredAt);
   return useQuery({
     queryKey: queryKeys.activity(businessId ?? "", query),
     queryFn: () => api.listActivity(requireId(businessId, "businessId"), query),
     enabled: !!businessId,
+    select,
   });
 }
 
 // ------------------------------------------------------------------ calls
 
 export function useCalls(businessId: MaybeId, query: ScopedQuery<"listCalls"> = {}) {
+  const select = useNewerOnly<Awaited<ReturnType<typeof api.listCalls>>>((x) => x.startedAt);
   return useQuery({
     queryKey: queryKeys.calls(businessId ?? "", query),
     queryFn: () => api.listCalls(requireId(businessId, "businessId"), query),
     enabled: !!businessId,
+    select,
   });
 }
 

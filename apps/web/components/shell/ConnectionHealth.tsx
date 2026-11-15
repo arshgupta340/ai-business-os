@@ -2,7 +2,9 @@
 
 import {HStack} from '@astryxdesign/core/HStack';
 import {Link} from '@astryxdesign/core/Link';
-import {isMockMode} from '@/lib/env';
+import {isDemoScript, isMockMode} from '@/lib/env';
+import {hideEverythingUntil} from '@/lib/demo-reset';
+import {clearDemoRun} from '@/app/(dashboard)/build/demo/demo-run-store';
 import {useIntegrationsHealth, type IntegrationHealth, type IntegrationProvider} from '@/lib/api';
 import {useBusiness} from '@/lib/session';
 import {PROVIDER_LABELS, providerLabel} from '@/lib/labels';
@@ -84,6 +86,21 @@ export function summarizeHealth(health: IntegrationHealth): HealthSummary {
 }
 
 /**
+ * The demo reset (Arsh, 2026-11-15). On the scripted demo build the badge
+ * keeps its look and, when pressed, puts the app back to its starting page:
+ * the saved Build run is dropped, the lists of calls, orders, bookings,
+ * approvals and activity leave out everything up to now, and the Build page is
+ * loaded afresh. Nothing is deleted on the server (lib/demo-reset.ts).
+ */
+export function resetDemo(now: number = Date.now(), go: (url: string) => void = (url) => window.location.assign(url)): void {
+  clearDemoRun();
+  hideEverythingUntil(now);
+  go('/build');
+}
+
+const RESET_BUTTON_STYLE = {all: 'unset', cursor: 'pointer', display: 'inline-flex'} as const;
+
+/**
  * Connection health slot in the top bar. It reads the integration health of
  * the selected business and links to /integrations; the provider names with a
  * problem show on hover. In mock mode the "Mock mode" marker stays visible
@@ -115,9 +132,16 @@ export function ConnectionHealth({status}: {status?: ConnectionHealthStatus}) {
   return (
     <HStack gap={2} vAlign="center">
       {mock ? <StatusBadge label="Mock mode" tone="info" /> : null}
-      <Link href="/integrations" tooltip={detail ? `${detail} Open integrations.` : 'Open integrations'}>
-        <StatusBadge label={badge.label} tone={badge.tone} />
-      </Link>
+      {isDemoScript() ? (
+        // No tooltip and no visible change: on stage this is the presenter's own reset.
+        <button type="button" style={RESET_BUTTON_STYLE} aria-label={`${badge.label}. Reset the demo.`} onClick={() => resetDemo()}>
+          <StatusBadge label={badge.label} tone={badge.tone} />
+        </button>
+      ) : (
+        <Link href="/integrations" tooltip={detail ? `${detail} Open integrations.` : 'Open integrations'}>
+          <StatusBadge label={badge.label} tone={badge.tone} />
+        </Link>
+      )}
     </HStack>
   );
 }

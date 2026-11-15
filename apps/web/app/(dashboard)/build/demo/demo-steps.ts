@@ -49,24 +49,29 @@ export function totalDurationMs(steps: readonly DemoStepDefinition[] = DEMO_STEP
 /**
  * Runs the steps one after the other on timers. `onStepDone(i)` fires when
  * step i has shown for its duration; the last call means the sequence is
- * over. `scale` shortens every duration (tests pass 0). Returns a cancel function.
+ * over. `scale` shortens every duration (tests pass 0). `elapsedMs` is how
+ * long the sequence has already run, for a screen that comes back to a run in
+ * progress: steps already over by then fire at once, in order, and the
+ * running step fires when its own time is up. Returns a cancel function.
  */
 export function runSchedule(
   steps: readonly DemoStepDefinition[],
   onStepDone: (index: number) => void,
   scale: number = 1,
+  elapsedMs: number = 0,
 ): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let cancelled = false;
-  const next = (index: number) => {
+  const next = (index: number, carry: number) => {
     if (index >= steps.length) return;
+    const duration = Math.max(0, steps[index]!.durationMs * scale);
     timer = setTimeout(() => {
       if (cancelled) return;
       onStepDone(index);
-      next(index + 1);
-    }, Math.max(0, steps[index]!.durationMs * scale));
+      next(index + 1, Math.max(0, carry - duration));
+    }, Math.max(0, duration - carry));
   };
-  next(0);
+  next(0, Math.max(0, elapsedMs));
   return () => {
     cancelled = true;
     if (timer) clearTimeout(timer);

@@ -1,6 +1,6 @@
 'use client';
 
-import {lazy, Suspense, useEffect, useMemo, useReducer, useRef, useState} from 'react';
+import {lazy, Suspense, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore} from 'react';
 import type {StageShopKey} from '@abos/contracts/fixtures';
 import {Badge} from '@astryxdesign/core/Badge';
 import {Button} from '@astryxdesign/core/Button';
@@ -21,9 +21,13 @@ import {
   isShowingResult,
   knownBeforeDemo,
   pickIncomingApproval,
+  restoreDemoState,
   SHOW_DEMO_BADGE,
+  toSavedRun,
   WAITING_POLL_MS,
+  type DemoState,
 } from './demo-machine';
+import {clearDemoRun, readDemoRun, rememberKnownIds, saveDemoRun} from './demo-run-store';
 import {BookingCard} from './BookingCard';
 import {DEMO_STEPS, runSchedule, stepsFor} from './demo-steps';
 import {DemoChat} from './DemoChat';
@@ -47,10 +51,44 @@ export type DemoScreenProps = {
   approveHoldMs?: number;
 };
 
+type KnownOrders = {shownAt: number; ids: Set<string>};
+
+/** The run saved in this tab, as the state to show now, with the orders it already ignores. */
+function loadSavedRun(stepScale: number): {state: DemoState; known: KnownOrders | null} | null {
+  const saved = readDemoRun();
+  if (!saved) return null;
+  const state = restoreDemoState(saved, {now: Date.now(), steps: stepsFor(stageShop(saved.shopKey).infoTitle), scale: stepScale});
+  const shownAt = state.numberShownAt;
+  const known = saved.knownIds && shownAt !== null && saved.numberShownAt === shownAt ? {shownAt, ids: new Set(saved.knownIds)} : null;
+  return {state, known};
+}
+
+const noSubscribe = () => () => undefined;
+
+/**
+ * False while the page hydrates, true on a client-side navigation. The server
+ * HTML and the first client render must agree, so a full reload restores the
+ * saved run in an effect; coming back from another tab restores it at once.
+ */
+function useIsHydrated(): boolean {
+  return useSyncExternalStore(
+    noSubscribe,
+    () => true,
+    () => false,
+  );
+}
+
 export function DemoScreen({stepScale = 1, pollMs = WAITING_POLL_MS, approveHoldMs = APPROVE_HOLD_MS}: DemoScreenProps) {
-  const {businessId, business, businesses, setBusinessId} = useBusiness();
+  const {businessId, business, businesses, isReady, setBusinessId} = useBusiness();
   const timeZone = business?.timezone ?? 'UTC';
-  const [state, dispatch] = useReducer(demoReducer, undefined, () => initialDemoState());
+  const hydrated = useIsHydrated();
+  const [restoredAtMount] = useState(() => (hydrated ? loadSavedRun(stepScale) : null));
+  const [state, dispatch] = useReducer(demoReducer, undefined, () => restoredAtMount?.state ?? initialDemoState());
+  // The orders already waiting when the number was shown, for that moment only (see below).
+  const known = useRef<KnownOrders | null>(restoredAtMount?.known ?? null);
+  const restoreChecked = useRef(hydrated);
+  // After a restore, the selected business is set back to the run's shop once.
+  const syncBusiness = useRef(restoredAtMount !== null);
   const [sendError, setSendError] = useState<string | null>(null);
   const shop = state.shopKey ? stageShop(state.shopKey) : null;
   // The finale reads only once the selected business is the chosen shop.
@@ -67,8 +105,31 @@ export function DemoScreen({stepScale = 1, pollMs = WAITING_POLL_MS, approveHold
     }
     setSendError(null);
     setBusinessId(chosen.businessId);
-    dispatch({type: 'send', text, fileNames, shopKey});
+    dispatch({type: 'send', text, fileNames, shopKey, now: Date.now()});
   };
+
+  // A full reload: the saved run comes back after hydration.
+  useEffect(() => {
+    if (restoreChecked.current) return;
+    restoreChecked.current = true;
+    const restored = loadSavedRun(stepScale);
+    if (!restored) return;
+    known.current = restored.known;
+    syncBusiness.current = true;
+    dispatch({type: 'restore', state: restored.state});
+  }, [stepScale]);
+
+  // The run is kept for this tab, so leaving the Build screen and coming back does not lose it.
+  useEffect(() => {
+    if (state.phase !== 'compose') saveDemoRun(toSavedRun(state, known.current));
+  }, [state]);
+
+  const shopBusinessId = shop?.businessId;
+  useEffect(() => {
+    if (!syncBusiness.current || !isReady || !shopBusinessId) return;
+    syncBusiness.current = false;
+    if (businessId !== shopBusinessId) setBusinessId(shopBusinessId);
+  }, [isReady, shopBusinessId, businessId, setBusinessId]);
 
   // Nothing is read before the result panel shows: the build step plays the
   // same with the server slow or down. After that, the live updates refetch
@@ -76,14 +137,15 @@ export function DemoScreen({stepScale = 1, pollMs = WAITING_POLL_MS, approveHold
   const feed = useActivityFeed(showing ? businessId : null);
   const pending = useApprovals(showing ? businessId : null, PENDING_APPROVALS_QUERY);
 
-  const {phase, run} = state;
+  const {phase, run, sentAt} = state;
   useEffect(() => {
     if (phase !== 'progress') return undefined;
-    return runSchedule(steps, (index) => dispatch({type: 'step_done', run, index, now: Date.now()}), stepScale);
-  }, [phase, run, stepScale, steps]);
+    // From the moment of sending, so a run the screen came back to carries on where the clock says.
+    const elapsed = sentAt === null ? 0 : Math.max(0, Date.now() - sentAt);
+    return runSchedule(steps, (index) => dispatch({type: 'step_done', run, index, now: Date.now()}), stepScale, elapsed);
+  }, [phase, run, stepScale, steps, sentAt]);
 
   // Overview and My Agents show the agent of this shop only once this run has reached the number.
-  const shopBusinessId = shop?.businessId;
   useEffect(() => {
     if (phase === 'progress') clearDemoAgentBuilt();
     else if (phase !== 'compose' && shopBusinessId) markDemoAgentBuilt(shopBusinessId);
@@ -94,12 +156,14 @@ export function DemoScreen({stepScale = 1, pollMs = WAITING_POLL_MS, approveHold
   const shownAt = state.numberShownAt;
   const pendingItems = pending.data?.items;
   const pendingReadAt = pending.dataUpdatedAt;
-  const known = useRef<{shownAt: number; ids: Set<string>} | null>(null);
   useEffect(() => {
     if (phase !== 'ready' || shownAt === null || !pendingItems) return;
     // A list read before the number was shown (kept from an earlier run) is too old to decide anything.
     if (pendingReadAt < shownAt) return;
-    if (known.current?.shownAt !== shownAt) known.current = {shownAt, ids: knownBeforeDemo(pendingItems, shownAt)};
+    if (known.current?.shownAt !== shownAt) {
+      known.current = {shownAt, ids: knownBeforeDemo(pendingItems, shownAt)};
+      rememberKnownIds(shownAt, known.current.ids);
+    }
     const incoming = pickIncomingApproval(pendingItems, known.current.ids);
     if (incoming) dispatch({type: 'order_arrived', approvalId: incoming.id, kind: incoming.bundleType === 'booking_bundle' ? 'booking_bundle' : 'order_bundle'});
   }, [phase, shownAt, pendingItems, pendingReadAt]);
@@ -124,6 +188,8 @@ export function DemoScreen({stepScale = 1, pollMs = WAITING_POLL_MS, approveHold
               label="Start over"
               onClick={() => {
                 clearDemoAgentBuilt();
+                clearDemoRun();
+                known.current = null;
                 setSendError(null);
                 dispatch({type: 'start_over'});
               }}
