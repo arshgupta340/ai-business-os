@@ -28,17 +28,21 @@ function storage(): Storage | null {
   }
 }
 
-function readBuilt(): boolean {
+/** Any business: written when the build reached the number with no business named. */
+const ANY = '1';
+
+/** The business the demo build reached the number for, '1' for any, or null. */
+function readBuilt(): string | null {
   try {
-    return storage()?.getItem(KEY) === '1';
+    return storage()?.getItem(KEY) ?? null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-function write(built: boolean): void {
+function write(built: string | null): void {
   try {
-    if (built) storage()?.setItem(KEY, '1');
+    if (built) storage()?.setItem(KEY, built);
     else storage()?.removeItem(KEY);
   } catch {
     // Storage blocked: the agent simply stays hidden until the tab reloads.
@@ -46,14 +50,17 @@ function write(built: boolean): void {
   for (const listener of listeners) listener();
 }
 
-/** The demo build reached the phone number: Overview and My Agents may show the agent. */
-export function markDemoAgentBuilt(): void {
-  write(true);
+/**
+ * The demo build reached the phone number: Overview and My Agents may show the
+ * agent of that business (the stage shop the judge picked). Without a business, any.
+ */
+export function markDemoAgentBuilt(businessId?: string): void {
+  write(businessId ?? ANY);
 }
 
 /** A new demo run started, or "Start over" was clicked: hide the agent again. */
 export function clearDemoAgentBuilt(): void {
-  write(false);
+  write(null);
 }
 
 function subscribe(listener: () => void): () => void {
@@ -61,8 +68,14 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-/** True while the scripted demo is on and its build step has not reached the number in this tab. */
-export function useDemoHidesAgents(): boolean {
-  const built = useSyncExternalStore(subscribe, readBuilt, () => false);
-  return isDemoScript() && !built;
+/**
+ * True while the scripted demo is on and its build step has not reached the
+ * number in this tab for this business. Each of the three stage shops is its
+ * own business, so the agent of a shop that was not built stays hidden.
+ */
+export function useDemoHidesAgents(businessId?: string | null): boolean {
+  const built = useSyncExternalStore(subscribe, readBuilt, () => null);
+  if (!isDemoScript()) return false;
+  if (!built) return true;
+  return built !== ANY && !!businessId && built !== businessId;
 }

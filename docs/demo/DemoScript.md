@@ -1,3 +1,5 @@
+> **Changed on 2026-11-15.** The demo now offers three made-up businesses (a pizza place, a barbershop and a salon). A judge says which one they want, we attach that business's two PDFs, and the screen shows that business's own number. The lines below were written for one pizza shop and still name it. They need a pass before the next rehearsal; `README.md` in this folder has the three businesses and their files.
+
 # AI Business OS: four minute demo script
 
 Two presenters. Saina drives the laptop. Arsh talks during the waits.

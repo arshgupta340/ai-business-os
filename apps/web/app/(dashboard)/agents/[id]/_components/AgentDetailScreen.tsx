@@ -127,7 +127,7 @@ export function AgentDetailScreen({agentId}: {agentId: string}) {
   const liveAgent = useLiveAgent();
 
   if (!business || !businessId) {
-    return <EmptyState title="No business selected" description="Pick a business in the top bar." headingLevel={1} />;
+    return <EmptyState title="No business selected" description="Choose a business in the top bar." headingLevel={1} />;
   }
 
   if (agent.isPending) return <LoadingState label="Loading the agent" />;

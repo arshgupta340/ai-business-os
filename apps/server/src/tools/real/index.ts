@@ -33,13 +33,23 @@ import {
   type ToolTraceEntry,
   type Toolset,
 } from '@abos/contracts';
-import { localDay, localToEpoch, pickupTooSoon, PICKUP_TOO_SOON, weekdayOfLocalDate } from './time';
+import { closesNextMorning, insideWindow, localDay, localToEpoch, pickupTooSoon, PICKUP_TOO_SOON, shiftLocalDate, weekdayOfLocalDate } from './time';
 import type { ConsentEvidence, FactsSnapshot, PortContext, RealToolset, RealToolsetDeps, InvocationControl, SafeTraceInput, SafeTraceOutput } from './types';
 
 export type * from './types';
 
 const MAX_CATALOG_RESULTS = 5;
 const DEFAULT_MAX_SLOTS = 5;
+/** Enough for every slot of one day on the 15 minute grid. */
+const DAY_SLOTS = 96;
+
+/** The `max` slots whose start is closest to `at`, in time order. A slot exactly at `at` is always among them. */
+export function nearestSlots<T extends { startUtc: string }>(slots: readonly T[], at: number, max: number): T[] {
+  return [...slots]
+    .sort((a, b) => Math.abs(Date.parse(a.startUtc) - at) - Math.abs(Date.parse(b.startUtc) - at) || Date.parse(a.startUtc) - Date.parse(b.startUtc))
+    .slice(0, max)
+    .sort((a, b) => Date.parse(a.startUtc) - Date.parse(b.startUtc));
+}
 const MAX_ALTERNATIVES = 3;
 const MINUTE_MS = 60 * 1000;
 /** Bounds on per-call memory. */
@@ -126,8 +136,13 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
     const { date, weekday } = localDay(startMs, tz);
     const h = hoursOn(snapshot, weekday);
     if (h.state === 'unknown') return 'unknown';
-    if (h.state === 'closed') return 'outside';
-    return startMs >= localToEpoch(date, h.open, tz) && endMs <= localToEpoch(date, h.close, tz) ? 'inside' : 'outside';
+    if (h.state === 'open' && insideWindow(date, h, tz, startMs, endMs)) return 'inside';
+    // After midnight the time can belong to the day before, when that day closes the next morning
+    // (a shop open 11:00 to 02:00). Unreadable hours for that day never make the answer `inside`.
+    const before = shiftLocalDate(date, -1);
+    const prev = hoursOn(snapshot, weekdayOfLocalDate(before));
+    if (prev.state === 'open' && closesNextMorning(prev) && insideWindow(before, prev, tz, startMs, endMs)) return 'inside';
+    return 'outside';
   }
 
   function storeQuote(quote: Quote, cart: Cart) {
@@ -286,14 +301,18 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
       const h = hoursOn(snapshot, weekdayOfLocalDate(input.date));
       if (h.state === 'unknown') return fail('VALIDATION_FAILED', NO_HOURS);
       if (h.state === 'closed') return { ok: true, slots: [], timezone: snapshot.timezone };
-      const slots = await ports.availability.freeSlots({ businessId, service, date: input.date, hours: { open: h.open, close: h.close }, timezone: snapshot.timezone, maxSlots: max, signal: op.controller.signal });
+      // With `near`, the whole day's free slots are read, so the caller's own time can be found among them.
+      const slots = await ports.availability.freeSlots({ businessId, service, date: input.date, hours: { open: h.open, close: h.close }, timezone: snapshot.timezone,
+        maxSlots: input.near === undefined ? max : DAY_SLOTS, signal: op.controller.signal });
       if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
       // Only slots that are inside the pinned hours and match the pinned duration are offered.
       const ok = (s: AvailabilitySlot) =>
         s.serviceId === service.id &&
         Date.parse(s.endUtc) - Date.parse(s.startUtc) === service.durationMinutes * MINUTE_MS &&
         insideHours(snapshot, Date.parse(s.startUtc), Date.parse(s.endUtc)) === 'inside';
-      return { ok: true, slots: slots.filter(ok).slice(0, max), timezone: snapshot.timezone };
+      const usable = slots.filter(ok);
+      if (input.near === undefined) return { ok: true, slots: usable.slice(0, max), timezone: snapshot.timezone };
+      return { ok: true, slots: nearestSlots(usable, localToEpoch(input.date, input.near, snapshot.timezone), max), timezone: snapshot.timezone };
     },
 
     async propose_booking(input, ctx, op) {

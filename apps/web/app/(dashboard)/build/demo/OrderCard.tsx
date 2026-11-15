@@ -1,40 +1,22 @@
 'use client';
 
-import {useEffect, useRef, useState, type ReactNode} from 'react';
-import {Banner} from '@astryxdesign/core/Banner';
-import {Button} from '@astryxdesign/core/Button';
+import {useEffect} from 'react';
 import {Card} from '@astryxdesign/core/Card';
 import {Grid} from '@astryxdesign/core/Grid';
 import {Heading} from '@astryxdesign/core/Heading';
 import {HStack} from '@astryxdesign/core/HStack';
-import {Icon} from '@astryxdesign/core/Icon';
-import {Spinner} from '@astryxdesign/core/Spinner';
 import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {LoadingState} from '@/components/LoadingState';
 import {SandboxBadge} from '@/components/SandboxBadge';
 import {StatusBadge} from '@/components/StatusBadge';
-import {useApproval, useCatalog, useDecideApproval, useOrder, type ApprovalState, type CatalogItem, type Order} from '@/lib/api';
+import {useApproval, useCatalog, useOrder, type ApprovalState, type CatalogItem, type Order} from '@/lib/api';
 import {formatCountdown, formatMoney, formatTime, secondsUntil} from '@/lib/format';
 import {statusView} from '@/lib/status';
-import {actionSteps, decisionErrorView, effectiveState, typedApproval} from '../../approvals/_lib/approval-view';
-import {useNow} from '../../approvals/_lib/useNow';
+import {actionSteps, typedApproval} from '../../approvals/_lib/approval-view';
 import {subjectDiffers} from '../../approvals/_components/ApprovalDecisionContent';
+import {Decision, decisionNotice, ORDER_WORDING, useApproveFlow} from './approve-flow';
 import {APPROVE_HOLD_MS, WAITING_POLL_MS} from './demo-machine';
-import {DEMO_MENU, demoSizeName, type DemoMenu} from './demo-menu';
-
-/**
- * The block that takes the place of the Approve button once the server has
- * confirmed the decision, so the room sees the button turn green. Green is
- * allowed here because the decision is confirmed (see StatusBadge). The
- * keyframes are in app/globals.css.
- */
-const APPROVED_STYLE = {
-  backgroundColor: 'var(--color-success)',
-  borderColor: 'var(--color-success)',
-  color: 'var(--color-on-success)',
-  animation: 'abos-approved-in var(--duration-medium) var(--ease-entrance) both',
-} as const;
 
 /** Order states after which nothing else happens on its own. */
 const SETTLED_ORDER_STATES: readonly Order['status'][] = [
@@ -50,16 +32,20 @@ const SETTLED_ORDER_STATES: readonly Order['status'][] = [
 
 type QuoteLine = Order['quote']['lines'][number];
 
+/** A `variationName` the server may send on the line (not in the contract yet, so read with care). */
+function sentSizeName(line: QuoteLine): string | undefined {
+  const sent = (line as {variationName?: unknown}).variationName;
+  return typeof sent === 'string' && sent.trim() ? sent.trim() : undefined;
+}
+
 /**
  * The size of a quote line, for example "Large". In order: a `variationName`
- * the server may send on the line (not in the contract yet, so read with
- * care), the demo menu, the catalog, else nothing.
+ * on the line, else the business catalog from the API (looked up by
+ * `variationId`), else nothing.
  */
-export function lineSizeName(line: QuoteLine, menu: DemoMenu, catalog?: readonly CatalogItem[]): string | undefined {
-  const sent = (line as {variationName?: unknown}).variationName;
-  if (typeof sent === 'string' && sent.trim()) return sent.trim();
-  const fromMenu = demoSizeName(menu, line.variationId);
-  if (fromMenu) return fromMenu;
+export function lineSizeName(line: QuoteLine, catalog?: readonly CatalogItem[]): string | undefined {
+  const sent = sentSizeName(line);
+  if (sent) return sent;
   for (const item of catalog ?? []) {
     const v = item.variations.find((x) => x.id === line.variationId);
     if (v && v.name.trim()) return v.name.trim();
@@ -79,7 +65,7 @@ export function toppingsText(line: QuoteLine): string | null {
   return line.modifiers.map((m) => m.name).join(', ');
 }
 
-export type OrderCardProps = {
+export type FinaleCardProps = {
   businessId: string;
   approvalId: string;
   timeZone: string;
@@ -88,44 +74,25 @@ export type OrderCardProps = {
   pollMs?: number;
   /** The least time "Approving" shows after the click. Tests pass 0. */
   approveHoldMs?: number;
-  menu?: DemoMenu;
 };
 
-export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs = WAITING_POLL_MS, approveHoldMs = APPROVE_HOLD_MS, menu = DEMO_MENU}: OrderCardProps) {
+export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs = WAITING_POLL_MS, approveHoldMs = APPROVE_HOLD_MS}: FinaleCardProps) {
   const query = useApproval(businessId, approvalId);
   const approval = query.data;
   const t = approval ? typedApproval(approval) : null;
   const orderId = t?.bundleType === 'order_bundle' ? approval!.subjectId : null;
   const order = useOrder(businessId, orderId);
-  const decide = useDecideApproval(businessId);
-  const now = useNow(approval?.state === 'PENDING' && !decide.data);
-  const inFlight = useRef(false);
-  // After the click, "Approving" shows for at least approveHoldMs, so the room sees the step.
-  // The result is never shown early: it shows once the server has answered and the hold is over.
-  const [holding, setHolding] = useState(false);
-  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(
-    () => () => {
-      if (holdTimer.current) clearTimeout(holdTimer.current);
-    },
-    [],
-  );
-  // The hash on screen when the order appeared. A refetch with another hash locks Approve.
-  const [seenHash, setSeenHash] = useState<string | null>(null);
-  useEffect(() => {
-    if (approval && seenHash === null) setSeenHash(approval.payloadHash);
-  }, [approval, seenHash]);
 
-  const confirmed = decide.data?.approval;
-  const confirmedState = confirmed?.state;
-
-  // Sizes the demo menu cannot name come from the catalog. Only read when needed.
-  const needsCatalog = !!order.data && order.data.quote.lines.some((l) => lineSizeName(l, menu) === undefined);
+  // Sizes the line does not name come from the catalog. Only read when needed.
+  const needsCatalog = !!order.data && order.data.quote.lines.some((l) => sentSizeName(l) === undefined);
   const catalog = useCatalog(needsCatalog ? businessId : null);
+
+  const mismatch = !!t && (subjectDiffers(t, order.data, undefined) || actionSteps(t).some((s) => s.isUnknown));
+  const flow = useApproveFlow({businessId, approval, approveHoldMs, onDecided, subjectReady: !!order.data && !mismatch});
 
   // Besides the live updates, read the request and the order again every few
   // seconds: until the decision, then until the order settles.
-  const decidedOrDone = !!confirmedState || (approval !== undefined && approval.state !== 'PENDING');
+  const {decidedOrDone} = flow;
   const orderStatus = order.data?.status;
   const orderSettled = !!orderStatus && SETTLED_ORDER_STATES.includes(orderStatus);
   const refetchApproval = query.refetch;
@@ -155,39 +122,8 @@ export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs =
   if (t.bundleType !== 'order_bundle') return null;
 
   const payload = t.payload;
-  const state = effectiveState(approval, now);
-  const shownState: ApprovalState = confirmedState ?? state;
-  const payloadChanged = seenHash !== null && seenHash !== approval.payloadHash;
-  const mismatch = subjectDiffers(t, order.data, undefined);
-  const unknownStep = actionSteps(t).some((s) => s.isUnknown);
-  const errorView = decide.error ? decisionErrorView(decide.error) : null;
-  const lockedByError = errorView !== null && errorView.next !== 'retry';
-  const canApprove =
-    state === 'PENDING' && !confirmed && !decide.isPending && !payloadChanged && !mismatch && !unknownStep && !lockedByError && !!order.data;
-
-  const approve = () => {
-    if (!canApprove || inFlight.current) return;
-    inFlight.current = true;
-    if (approveHoldMs > 0) {
-      setHolding(true);
-      if (holdTimer.current) clearTimeout(holdTimer.current);
-      holdTimer.current = setTimeout(() => setHolding(false), approveHoldMs);
-    }
-    decide.mutate(
-      // Always the stored hash of the order shown, never recomputed. The hook keeps one Idempotency-Key per approval, decision and hash.
-      {approvalId: approval.id, decision: 'approve', payloadHash: approval.payloadHash},
-      {
-        onSuccess: (res) => onDecided(res.approval.id, res.approval.state),
-        onSettled: () => {
-          inFlight.current = false;
-        },
-      },
-    );
-  };
-
-  const working = decide.isPending || holding;
   // While "Approving" shows, the badge keeps saying what it said before the click.
-  const approvalView = statusView('approval', working ? 'PENDING' : shownState);
+  const approvalView = statusView('approval', flow.working ? 'PENDING' : (flow.shownState ?? 'PENDING'));
   const orderView = order.data ? statusView('order', order.data.status) : null;
 
   return (
@@ -197,9 +133,9 @@ export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs =
           <HStack gap={2} vAlign="center" wrap="wrap">
             <Heading level={2}>New order</Heading>
             <StatusBadge label={approvalView.label} tone={approvalView.tone} />
-            {state === 'PENDING' && !confirmed && !working ? (
+            {flow.state === 'PENDING' && !flow.confirmed && !flow.working ? (
               <Text type="large" hasTabularNumbers color="secondary">
-                {`Expires in ${formatCountdown(secondsUntil(approval.expiresAt, now))}`}
+                {`Expires in ${formatCountdown(secondsUntil(approval.expiresAt, flow.now))}`}
               </Text>
             ) : null}
           </HStack>
@@ -214,7 +150,7 @@ export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs =
               <VStack gap={2}>
                 {order.data.quote.lines.map((line, i) => {
                   const toppings = toppingsText(line);
-                  const title = lineTitle(line, lineSizeName(line, menu, catalog.data?.items));
+                  const title = lineTitle(line, lineSizeName(line, catalog.data?.items));
                   return (
                     <HStack key={`${line.variationId}-${i}`} gap={3} justify="between" vAlign="start">
                       <VStack gap={0}>
@@ -252,39 +188,9 @@ export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs =
             </Text>
           </VStack>
 
-          <Decision
-            shownState={shownState}
-            confirmed={!!confirmed}
-            canApprove={canApprove}
-            isWorking={working}
-            onApprove={approve}
-            notice={
-              errorView ? (
-                <Banner
-                  status={errorView.status}
-                  title={errorView.title}
-                  description={errorView.message}
-                  endContent={errorView.next === 'retry' ? <Button label="Try again" onClick={approve} isDisabled={decide.isPending} /> : undefined}
-                />
-              ) : state === 'EXPIRED' && !confirmed ? (
-                <Banner status="warning" title="This order expired before it was approved, so nothing was charged." />
-              ) : payloadChanged ? (
-                <Banner
-                  status="warning"
-                  title="This order changed after it appeared, so it was not approved."
-                  endContent={<Button label="Show the new version" onClick={() => setSeenHash(approval.payloadHash)} />}
-                />
-              ) : mismatch || unknownStep ? (
-                <Banner
-                  status="error"
-                  title="This order does not match its request, so Approve is off."
-                  endContent={<Button label="Open in Approvals" href={`/approvals?id=${encodeURIComponent(approval.id)}`} />}
-                />
-              ) : null
-            }
-          />
+          <Decision flow={flow} wording={ORDER_WORDING} notice={decisionNotice(flow, ORDER_WORDING, approval.id, mismatch)} />
 
-          {confirmed && orderView && !working ? (
+          {flow.confirmed && orderView && !flow.working ? (
             <HStack gap={2} vAlign="center" wrap="wrap">
               <Text type="large">Now:</Text>
               <StatusBadge label={orderView.label} tone={orderView.tone} />
@@ -293,70 +199,5 @@ export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs =
         </VStack>
       </Grid>
     </Card>
-  );
-}
-
-function Decision({
-  shownState,
-  confirmed,
-  canApprove,
-  isWorking,
-  onApprove,
-  notice,
-}: {
-  shownState: ApprovalState;
-  confirmed: boolean;
-  canApprove: boolean;
-  isWorking: boolean;
-  onApprove: () => void;
-  notice: ReactNode;
-}) {
-  // The decision is on its way, or it came back sooner than the room could see.
-  if (isWorking) {
-    return (
-      <Card variant="muted" padding={5} role="status">
-        <HStack gap={3} vAlign="center" justify="center">
-          <Spinner size="xl" aria-label="Approving" />
-          <Text type="display-2" weight="semibold">
-            Approving the order
-          </Text>
-        </HStack>
-      </Card>
-    );
-  }
-  // "Approved" only from the server's answer to this decision or a stored decision it reports.
-  if (shownState === 'APPROVED') {
-    return (
-      <Card padding={5} style={APPROVED_STYLE} role="status">
-        <VStack gap={1} hAlign="center">
-          <HStack gap={3} vAlign="center" justify="center">
-            <Icon icon="success" size="lg" />
-            <Text type="display-1" weight="semibold" color="inherit">
-              Approved
-            </Text>
-          </HStack>
-          <Text type="large" weight="normal" color="inherit">
-            The shop accepted this order
-          </Text>
-        </VStack>
-      </Card>
-    );
-  }
-  if (confirmed || shownState !== 'PENDING') {
-    const view = statusView('approval', shownState);
-    return (
-      <VStack gap={2}>
-        <Text type="display-3" weight="semibold">
-          {view.label}
-        </Text>
-        {notice}
-      </VStack>
-    );
-  }
-  return (
-    <VStack gap={3}>
-      <Button label="Approve" variant="primary" size="lg" width="100%" onClick={onApprove} isDisabled={!canApprove} />
-      {notice}
-    </VStack>
   );
 }

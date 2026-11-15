@@ -4,7 +4,7 @@ import { ModifierSelectionTypeSchema } from './schemas/catalog';
 import { OrderStatusSchema, ReadableFactKindSchema, ToolNameSchema, type ToolName } from './enums';
 import { ToolFailureReasonSchema } from './errors';
 import { AgentVersionIdSchema, ApprovalIdSchema, BookingIdSchema, BusinessIdSchema, CallIdSchema, OrderIdSchema, QuoteIdSchema, ServiceIdSchema, TestSessionIdSchema } from './ids';
-import { IsoDateTimeSchema, JsonValueSchema, LocalDateSchema, MinorAmountSchema, TimezoneSchema } from './primitives';
+import { IsoDateTimeSchema, JsonValueSchema, LocalDateSchema, LocalTimeSchema, MinorAmountSchema, TimezoneSchema } from './primitives';
 import { CartSchema, QuoteSchema } from './schemas/catalog';
 import { AvailabilitySlotSchema, BookingCustomerSchema, ContactSchema, FulfillmentSchema } from './schemas/orders';
 
@@ -22,6 +22,9 @@ export const TOOL_INPUT_SCHEMAS = {
     serviceId: ServiceIdSchema,
     date: LocalDateSchema,
     maxSlots: z.int().min(1).max(5).optional(),
+    // Additive (2026-11-15): the time of day the caller asked for, local, 24-hour "HH:MM". With it the free
+    // slots nearest to that time are returned, in time order, and not the earliest of the day.
+    near: LocalTimeSchema.optional(),
   }),
   propose_booking: z.strictObject({ serviceId: ServiceIdSchema, startUtc: IsoDateTimeSchema, customer: BookingCustomerSchema }),
   propose_menu_message: z.strictObject({}),

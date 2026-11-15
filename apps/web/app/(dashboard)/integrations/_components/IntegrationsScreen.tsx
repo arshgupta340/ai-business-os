@@ -36,7 +36,7 @@ export function IntegrationsScreen() {
   const feed = useActivityFeed(businessId);
 
   if (!business || !businessId) {
-    return <EmptyState title="No business selected" description="Pick a business in the top bar." headingLevel={1} />;
+    return <EmptyState title="No business selected" description="Choose a business in the top bar." headingLevel={1} />;
   }
 
   const timeZone = business.timezone;

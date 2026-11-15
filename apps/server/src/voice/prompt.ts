@@ -206,6 +206,13 @@ function prepLine(knowsNow: boolean): string {
   return `${base} Work the pickup time out yourself from the "Now" line in the shop data: "in twenty minutes", "in half an hour" and "as soon as possible" are answers, so never ask for a clock time after one of them. "As soon as possible" means ${ORDER_PREP_MINUTES} minutes from now. In the read-back say the pickup time as a clock time.`;
 }
 const CONFIRM_LINE = 'The order is sent only after a yes to that question. "Yes", "sure", "okay", "sounds good" and "go ahead" are a yes. If the caller answers with something that is not a yes, a no or a change, such as "thank you" or "that is it", ask again: "Shall I send it to the shop?" Do not let the call end with an order read back and neither sent nor refused.';
+// The same lessons for a booking call (the barbershop and the salon of the stage demo, 2026-11-15).
+function bookingTimeLine(knowsNow: boolean): string {
+  const base = 'If the caller already named a day or a time, do not ask for it again: call read_calendar_availability for that day, with `near` set to their time as 24-hour HH:MM when they named one. If their time is among the slots, take exactly that time and go on; otherwise offer the nearest free times it returned.';
+  const hour = 'A time said without morning, afternoon, AM or PM means that hour inside the opening hours: with a shop open nine to seven, "four" is four in the afternoon and "ten" is ten in the morning.';
+  return knowsNow ? `${base} ${hour} Work out "today", "tomorrow" and weekday names yourself from the "Now" line in the shop data, and say the day and the time back as a day and a clock time.` : `${base} ${hour}`;
+}
+const BOOKING_CONFIRM_LINE = 'The booking is sent only after a yes to that question. "Yes", "sure", "okay", "sounds good" and "go ahead" are a yes. If the caller answers with something that is not a yes, a no or a change, such as "thank you" or "that is it", ask again: "Shall I send it to the shop?" Do not let the call end with a booking read back and neither sent nor refused.';
 const NO_OPTION_LINE = 'If the caller asks for a change the menu has no option for, such as leaving an ingredient off, say once: "I cannot add that here. Please ask at the counter at pickup." Keep the order as it is and go back to the question you were on.';
 
 /** Issue #161: a menu of 16 pizzas must not be read out in full. Added only for a menu longer than this. */
@@ -294,6 +301,7 @@ export function buildInstructions(spec: AgentSpec, facts: InstructionFacts): str
         : 'Offer only services from read_business_facts and only slots from read_calendar_availability.',
       'Book with these questions, in this order, and skip any the caller already answered: "Which service would you like?" Then "What day works for you?" Then call read_calendar_availability and do not announce it or say you will check the times. When the slots come back, offer up to three times, for example: "I have ten, eleven thirty or two. Which works?" Then "What name is it under?"',
       'All times are in the shop timezone. Do not ask the caller about timezones.',
+      bookingTimeLine(known),
     );
     if (offer !== undefined) {
       lines.push(TEXT_STEP_LINE, TEXT_CHANGE_BOOKING_LINE);
@@ -304,7 +312,8 @@ export function buildInstructions(spec: AgentSpec, facts: InstructionFacts): str
       );
     }
     lines.push(
-      'Read back the service, day, time, name and number if there is one in one sentence, then ask: "Shall I send this to the shop for approval?" Call propose_booking only after a yes. If the slot is taken, offer the alternatives it returns.',
+      'Read back the service, its price, the day, the time, the name and the number if there is one in one sentence, then ask: "Shall I send this to the shop for approval?" The pattern is: "A haircut, thirty dollars, tomorrow at ten, for {name}. Shall I send this to the shop for approval?" Call propose_booking only after a yes. If the slot is taken, offer the alternatives it returns.',
+      BOOKING_CONFIRM_LINE,
       offer !== undefined ? TEXT_READBACK_BOOKING_LINE : READBACK_LINE,
       CANNOT_TAKE_LINE,
       offer !== undefined

@@ -11,9 +11,9 @@ import {
   AgentVersionSchema, BusinessFactSchema, BusinessSchema, CAPABILITY_LIST, CatalogModifierListSchema, FactConflictSchema,
   HoursValueSchema, LiveAgentSchema, ServiceOfferingSchema,
 } from '@abos/contracts';
-import { demoShopCatalog, demoShopFacts, pizzaCatalogRows } from '@abos/contracts/fixtures';
+import { STAGE_SHOPS, demoShopCatalog, demoShopFacts, pizzaCatalogRows, stageShops } from '@abos/contracts/fixtures';
 import {
-  ALL_TABLES, ResetRefusedError, SEEDED_FACTS, TRUNCATED_TABLES, countRows, liveAgentNumberVars, runReset, seedDatabase, seedDemoShop, seedSquareCatalog,
+  ALL_TABLES, ResetRefusedError, SEEDED_FACTS, TRUNCATED_TABLES, countRows, liveAgentNumberVars, runReset, seedDatabase, seedDemoShop, seedDemoStage, seedSquareCatalog, stageVersionId,
   type AuthAdmin, type SeedDb, type SeedEnv, type SquareCatalogClient, type SquareCatalogObject,
 } from '../src/seed';
 import { createApprovedApproval, createExecution, createMigratedDb, createOrder, insert, type Owner } from './helpers';
@@ -375,6 +375,94 @@ describe('seed:demo-shop (issue #161)', () => {
     for (const f of verified) if (f.kind === 'hours') HoursValueSchema.parse(f.value);
     const old = await db.query<{ status: string }>("select status from public.business_facts where id = 'fact_pizza_hours_mon'");
     expect(old.rows[0]!.status).toBe('superseded');
+  });
+});
+
+describe('seed:demo-stage (three shops, three numbers)', () => {
+  const NUMBERS = { pizza: '+15555550101', barber: '+15555550102', salon: '+15555550103' };
+  const at = () => new Date('2026-11-15T09:00:00Z');
+
+  it('gives each shop its business, facts, published agent and number, and is safe to run twice', async () => {
+    await seedDatabase(sdb, { env: BASE_ENV, auth: fakeAuth(db), envFilePath: undefined });
+    const square = fakeSquare();
+    await seedSquareCatalog(sdb, { env: BASE_ENV, client: square, now: at });
+    const first = await seedDemoStage(sdb, { env: BASE_ENV, client: square, now: at, numbers: NUMBERS });
+    expect(first.notes).toEqual([]);
+
+    const businesses = (await db.query<{ id: string; name: string; category: string }>('select id, name, category from public.businesses order by id')).rows;
+    expect(businesses).toEqual([
+      { id: 'biz_barber_01', name: 'Classic Cuts Barbershop', category: 'barbershop' },
+      { id: 'biz_pizza_01', name: 'Main Street Pizza', category: 'restaurant' },
+      { id: 'biz_salon_01', name: 'Glow Hair Salon', category: 'salon' },
+    ]);
+    // The salon has the same integration rows as the other two.
+    const integ = (await db.query<{ business_id: string; n: number }>('select business_id, count(*)::int as n from public.integrations group by business_id order by business_id')).rows;
+    expect(new Set(integ.map((r) => r.n)).size).toBe(1);
+    expect(integ.map((r) => r.business_id)).toEqual(['biz_barber_01', 'biz_pizza_01', 'biz_salon_01']);
+
+    // One number per shop, each on that shop's own published agent version. The Twilio number follows the pizza agent.
+    const live = (await db.query<{ phone_number: string; business_id: string; agent_version_id: string }>('select phone_number, business_id, agent_version_id from public.live_agent order by phone_number')).rows;
+    expect(live).toEqual([
+      { phone_number: NUMBERS.pizza, business_id: 'biz_pizza_01', agent_version_id: stageVersionId(STAGE_SHOPS.pizza) },
+      { phone_number: NUMBERS.barber, business_id: 'biz_barber_01', agent_version_id: stageVersionId(STAGE_SHOPS.barber) },
+      { phone_number: NUMBERS.salon, business_id: 'biz_salon_01', agent_version_id: stageVersionId(STAGE_SHOPS.salon) },
+      { phone_number: PHONE, business_id: 'biz_pizza_01', agent_version_id: stageVersionId(STAGE_SHOPS.pizza) },
+    ]);
+    for (const shop of stageShops) {
+      const agent = (await db.query<{ state: string; active_version_id: string; name: string }>('select state, active_version_id, name from public.agents where id = $1', [shop.agent.id])).rows[0]!;
+      expect(agent).toEqual({ state: 'live', active_version_id: stageVersionId(shop), name: shop.agent.name });
+      const version = (await db.query<{ spec: unknown; published_at: unknown }>('select spec, published_at from public.agent_versions where id = $1', [stageVersionId(shop)])).rows[0]!;
+      const spec = AgentVersionSchema.shape.spec.parse(version.spec);
+      expect(spec.greeting).toContain(shop.name);
+      expect(spec.businessId).toBe(shop.businessId);
+      expect(version.published_at).toBeTruthy();
+    }
+
+    // Facts: the salon's four services, hours that are open on a Sunday, and no placeholder phone left.
+    const verified = (await db.query<{ business_id: string; kind: string; key: string; value: unknown }>(
+      "select business_id, kind, key, value from public.business_facts where status = 'verified'")).rows;
+    const of = (b: string, kind: string) => verified.filter((f) => f.business_id === b && f.kind === kind);
+    expect(of('biz_salon_01', 'service').map((f) => f.key).sort()).toEqual(STAGE_SHOPS.salon.services.map((x) => x.id).sort());
+    for (const f of verified) if (f.kind === 'service') ServiceOfferingSchema.parse(f.value);
+    for (const f of verified) if (f.kind === 'hours') HoursValueSchema.parse(f.value);
+    expect(of('biz_barber_01', 'hours').find((f) => f.key === 'sun')?.value).toEqual({ open: '09:00', close: '19:00' });
+    expect(of('biz_barber_01', 'service').map((f) => f.key).sort()).toEqual(['svc_beard_trim', 'svc_haircut', 'svc_haircut_beard', 'svc_kids_cut']);
+    expect(of('biz_barber_01', 'policy').find((f) => f.key === 'min_notice')?.value).toMatchObject({ minutes: 60 });
+    for (const b of ['biz_pizza_01', 'biz_barber_01', 'biz_salon_01']) {
+      expect(of(b, 'contact').map((f) => f.key)).toEqual(['address']);
+      expect(of(b, 'faq').length).toBeGreaterThanOrEqual(6);
+    }
+    // The pizza menu: eight pizzas in three sizes, no toppings list.
+    const rows = (await db.query<{ item_name: string; price_minor: number; modifier_lists: unknown }>("select item_name, price_minor, modifier_lists from public.catalog_items where business_id = 'biz_pizza_01'")).rows;
+    expect(rows).toHaveLength(24);
+    expect([...new Set(rows.map((r) => r.item_name))].sort()).toEqual(STAGE_SHOPS.pizza.catalog.map((i) => i.name).sort());
+    expect(rows.every((r) => [1500, 2500, 3500].includes(r.price_minor) && JSON.stringify(r.modifier_lists) === '[]')).toBe(true);
+
+    const sum = await checksum(db);
+    const second = await seedDemoStage(sdb, { env: BASE_ENV, client: square, now: () => new Date('2026-11-15T10:00:00Z'), numbers: NUMBERS });
+    expect(second.catalog.upserted).toBe(false);
+    expect(second.retired).toBe(0);
+    expect(second.tables.agent_versions).toEqual({ created: 0, updated: 0, unchanged: 3 });
+    expect(await checksum(db)).toEqual(sum);
+  });
+
+  it('after a reset, running it again brings all three shops back', async () => {
+    await seedDatabase(sdb, { env: BASE_ENV, auth: fakeAuth(db), envFilePath: undefined });
+    const square = fakeSquare();
+    await seedDemoStage(sdb, { env: BASE_ENV, client: square, now: at, numbers: NUMBERS });
+    await runReset(sdb, { env: BASE_ENV, confirmed: true });
+    // The reset removes the salon's agent and every stage number.
+    expect((await db.query("select 1 from public.agents where id = 'agt_salon_01'")).rows).toHaveLength(0);
+    await seedDemoStage(sdb, { env: BASE_ENV, client: square, now: at, numbers: NUMBERS });
+    const live = (await db.query<{ phone_number: string; business_id: string }>('select phone_number, business_id from public.live_agent order by phone_number')).rows;
+    expect(live.filter((r) => Object.values(NUMBERS).includes(r.phone_number)).map((r) => r.business_id)).toEqual(['biz_pizza_01', 'biz_barber_01', 'biz_salon_01']);
+    expect((await db.query<{ name: string }>("select name from public.businesses where id = 'biz_pizza_01'")).rows[0]!.name).toBe('Main Street Pizza');
+    expect((await db.query<{ n: number }>("select count(*)::int as n from public.business_facts where business_id = 'biz_salon_01' and status = 'verified' and kind = 'service'")).rows[0]!.n).toBe(4);
+  });
+
+  it('refuses a number that is not E.164', async () => {
+    await seedDatabase(sdb, { env: BASE_ENV, auth: fakeAuth(db), envFilePath: undefined });
+    await expect(seedDemoStage(sdb, { env: BASE_ENV, client: fakeSquare(), numbers: { ...NUMBERS, salon: '805-555-0100' } })).rejects.toThrow(/E\.164/);
   });
 });
 

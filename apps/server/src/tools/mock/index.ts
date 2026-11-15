@@ -44,7 +44,8 @@ import {
   pizzaCatalog,
 } from '@abos/contracts/fixtures';
 import { isoUtc, localDateTime, localToEpoch, weekdayOfLocalDate } from './time';
-import { pickupTooSoon, PICKUP_TOO_SOON } from '../real/time';
+import { closesNextMorning, insideWindow, pickupTooSoon, PICKUP_TOO_SOON, shiftLocalDate } from '../real/time';
+import { nearestSlots } from '../real/index';
 
 export type MockToolsetOptions = {
   businessId: string;
@@ -54,6 +55,8 @@ export type MockToolsetOptions = {
   unavailableItemIds?: readonly string[];
   /** Another menu in place of the pizza fixture (the demo shop, issue #161). Items of other businesses are ignored. */
   catalog?: readonly CatalogItem[];
+  /** Other facts in place of the fixture facts (a stage shop of the demo). Only verified facts of this business are read. */
+  facts?: readonly BusinessFact[];
 };
 
 export type MockToolset = {
@@ -113,7 +116,7 @@ export function createMockToolset(options: MockToolsetOptions): MockToolset {
   const nextId = (prefix: string, key: keyof typeof counters) => `${prefix}${String(++counters[key]).padStart(4, '0')}`;
 
   const catalog: CatalogItem[] = (options.catalog ?? pizzaCatalog).filter((i) => i.businessId === businessId);
-  const verifiedFacts: BusinessFact[] = allFacts.filter((f) => f.businessId === businessId && f.status === 'verified');
+  const verifiedFacts: BusinessFact[] = (options.facts ?? allFacts).filter((f) => f.businessId === businessId && f.status === 'verified');
   const services: ServiceOffering[] = verifiedFacts
     .filter((f) => f.kind === 'service')
     .flatMap((f) => {
@@ -265,8 +268,13 @@ export function createMockToolset(options: MockToolsetOptions): MockToolset {
       if (pickup < now().getTime()) return fail('VALIDATION_FAILED', 'The pickup time is in the past.');
       if (pickupTooSoon(pickup, now().getTime())) return fail('VALIDATION_FAILED', PICKUP_TOO_SOON);
       const local = localDateTime(pickup, timezone);
-      const window = openWindow(local.date);
-      if (window === undefined || pickup < window.open || pickup > window.close) return fail('VALIDATION_FAILED', 'The pickup time is outside opening hours.');
+      // The same rule as the real toolset: inside that day's hours, or inside the day before when it closes the next morning.
+      const today = hoursFor(local.date);
+      const before = shiftLocalDate(local.date, -1);
+      const yesterday = hoursFor(before);
+      const open = (today !== undefined && !('closed' in today) && insideWindow(local.date, today, timezone, pickup, pickup))
+        || (yesterday !== undefined && !('closed' in yesterday) && closesNextMorning(yesterday) && insideWindow(before, yesterday, timezone, pickup, pickup));
+      if (!open) return fail('VALIDATION_FAILED', 'The pickup time is outside opening hours.');
 
       const orderId = nextId('ord_mock_', 'order');
       const approvalId = nextId(MOCK_APPROVAL_PREFIX, 'approval');
@@ -288,7 +296,9 @@ export function createMockToolset(options: MockToolsetOptions): MockToolset {
     async read_calendar_availability(input) {
       const service = services.find((s) => s.id === input.serviceId);
       if (service === undefined) return fail('NOT_FOUND', 'No such service.');
-      return { ok: true, slots: freeSlots(service, input.date, input.maxSlots ?? DEFAULT_MAX_SLOTS), timezone };
+      const max = input.maxSlots ?? DEFAULT_MAX_SLOTS;
+      if (input.near === undefined) return { ok: true, slots: freeSlots(service, input.date, max), timezone };
+      return { ok: true, slots: nearestSlots(freeSlots(service, input.date, 96), localToEpoch(input.date, input.near, timezone), max), timezone };
     },
 
     async propose_booking(input) {

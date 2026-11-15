@@ -1,10 +1,13 @@
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import type {ApprovalRequest} from '@/lib/api';
 import {demoReducer, initialDemoState, isShowingResult, knownBeforeDemo, pickIncomingApproval, type DemoState} from './demo-machine';
-import {DEMO_STEPS, runSchedule, totalDurationMs} from './demo-steps';
+import {STAGE_SHOPS} from '@abos/contracts/fixtures';
+import {DEMO_STEPS, runSchedule, stepsFor, totalDurationMs} from './demo-steps';
+
+const PIZZA = STAGE_SHOPS.pizza;
 
 function sent(): DemoState {
-  return demoReducer(initialDemoState(), {type: 'send', text: '  Margherita 12  ', fileNames: ['WoodstocksPizzaMenu.pdf', 'WoodstocksCustomerFAQs.pdf']});
+  return demoReducer(initialDemoState(), {type: 'send', text: '  Margherita 12  ', fileNames: [PIZZA.files.info, PIZZA.files.faq], shopKey: 'pizza'});
 }
 
 function finishAll(state: DemoState, now = 5000): DemoState {
@@ -19,13 +22,27 @@ describe('demoReducer', () => {
   it('starts the sequence on one message and keeps the text and file names', () => {
     const s = sent();
     expect(s.phase).toBe('progress');
-    expect(s.message).toEqual({text: 'Margherita 12', fileNames: ['WoodstocksPizzaMenu.pdf', 'WoodstocksCustomerFAQs.pdf']});
+    expect(s.message).toEqual({text: 'Margherita 12', fileNames: [PIZZA.files.info, PIZZA.files.faq]});
+    expect(s.shopKey).toBe('pizza');
     expect(s.steps[0]).toBe('running');
     expect(s.steps.slice(1).every((x) => x === 'pending')).toBe(true);
   });
 
   it('ignores an empty message', () => {
-    expect(demoReducer(initialDemoState(), {type: 'send', text: '   ', fileNames: []}).phase).toBe('compose');
+    expect(demoReducer(initialDemoState(), {type: 'send', text: '   ', fileNames: [], shopKey: 'pizza'}).phase).toBe('compose');
+  });
+
+  it('carries the chosen shop through the steps and the finale, and start over clears it', () => {
+    let s = demoReducer(initialDemoState(), {type: 'send', text: 'Build it', fileNames: [STAGE_SHOPS.salon.files.faq], shopKey: 'salon'});
+    s = finishAll(s);
+    expect(s).toMatchObject({phase: 'ready', shopKey: 'salon'});
+    s = demoReducer(s, {type: 'order_arrived', approvalId: 'apv_b', kind: 'booking_bundle'});
+    expect(s).toMatchObject({phase: 'order', shopKey: 'salon', approvalKind: 'booking_bundle'});
+    s = demoReducer(s, {type: 'decided', approvalId: 'apv_b', state: 'APPROVED'});
+    expect(s.shopKey).toBe('salon');
+    s = demoReducer(s, {type: 'start_over'});
+    expect(s.shopKey).toBeNull();
+    expect(s.approvalKind).toBeNull();
   });
 
   it('runs the steps in order and shows the number after the last one', () => {
@@ -46,7 +63,7 @@ describe('demoReducer', () => {
 
   it('moves to the order, then to decided only for that approval', () => {
     let s = finishAll(sent());
-    s = demoReducer(s, {type: 'order_arrived', approvalId: 'apv_1'});
+    s = demoReducer(s, {type: 'order_arrived', approvalId: 'apv_1', kind: 'order_bundle'});
     expect(s.phase).toBe('order');
     expect(demoReducer(s, {type: 'decided', approvalId: 'apv_2', state: 'APPROVED'})).toBe(s);
     s = demoReducer(s, {type: 'decided', approvalId: 'apv_1', state: 'APPROVED'});
@@ -76,16 +93,18 @@ describe('which order is the incoming one', () => {
     expect(pickIncomingApproval(first, known)).toBeNull();
   });
 
-  it('takes the newest pending order that was not there before, and no booking or decided request', () => {
+  it('takes the newest pending order or booking that was not there before, and no decided request', () => {
     const known = knownBeforeDemo([apv('rehearsal', '2026-11-14T19:59:00Z')], since);
     const items = [
       apv('rehearsal', '2026-11-14T19:59:00Z'),
       apv('a', '2026-11-14T20:01:00Z'),
       apv('b', '2026-11-14T20:02:00Z'),
-      apv('booking', '2026-11-14T20:03:00Z', {bundleType: 'booking_bundle'}),
+      apv('fact', '2026-11-14T20:03:00Z', {bundleType: 'fact_edit'}),
       apv('decided', '2026-11-14T20:04:00Z', {state: 'APPROVED'}),
     ];
     expect(pickIncomingApproval(items, known)?.id).toBe('b');
+    const withBooking = [...items, apv('booking', '2026-11-14T20:05:00Z', {bundleType: 'booking_bundle'})];
+    expect(pickIncomingApproval(withBooking, known)?.id).toBe('booking');
   });
 
   it('shows an order that is already in the first list when it was created after the number was shown', () => {
@@ -119,6 +138,13 @@ describe('the timed steps', () => {
       'Setting up the voice agent',
       'Getting a phone number',
     ]);
+  });
+
+  it('name the menu for the pizza place and the services for the other two, with the same timings', () => {
+    expect(stepsFor(STAGE_SHOPS.pizza.infoTitle)[0]!.label).toBe('Reading the menu');
+    expect(stepsFor(STAGE_SHOPS.barber.infoTitle)[0]!.label).toBe('Reading the services');
+    expect(stepsFor(STAGE_SHOPS.salon.infoTitle)[0]!.label).toBe('Reading the services');
+    expect(stepsFor('Services').map((s) => s.durationMs)).toEqual(DEMO_STEPS.map((s) => s.durationMs));
   });
 
   it('finish one after the other, each after its own duration', () => {

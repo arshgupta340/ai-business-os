@@ -2,36 +2,55 @@
 
 What we use on stage for the four minute demo.
 
-| File | What it is |
-|---|---|
-| `DemoScript.md` | The script, with timings and stage notes. |
-| `WoodstocksPizzaMenu.pdf` | The menu file we attach on the Build screen. |
-| `WoodstocksCustomerFAQs.pdf` | The customer questions and answers file we attach on the Build screen. |
+The demo offers three made-up businesses. A judge says which one they want. The presenter attaches that business's two PDFs on the Build screen and sends one sentence. The screen shows that business's own phone number, the judge calls it, and the order or booking arrives for approval.
+
+| Business | Files to attach | What a caller does |
+|---|---|---|
+| Main Street Pizza (pizza place) | `MainStreetPizzaMenu.pdf`, `MainStreetPizzaFAQs.pdf` | Orders a pizza for pickup |
+| Classic Cuts Barbershop (barbershop) | `ClassicCutsServices.pdf`, `ClassicCutsFAQs.pdf` | Books an appointment |
+| Glow Hair Salon (salon) | `GlowHairSalonServices.pdf`, `GlowHairSalonFAQs.pdf` | Books an appointment |
+
+`DemoScript.md` is the script. It was written for the one-shop demo and its lines still name the old shop; see the note at its top.
 
 ## How the files are used
 
-The two PDFs are attached in the composer on the Build screen and their names show under the message. They are not uploaded and nothing reads them. The agent, its menu and its facts are loaded before the demo (issue #161, `npm run seed:demo-shop`). The PDFs carry the same data so that what the audience sees matches what the agent knows.
+The Build screen reads only the NAME of an attached file. The name selects the business, and with it the phone number and the menu or services the screen shows. Keep the file names exactly as they are. Either of a business's two files is enough. The files are not uploaded and nothing reads their content: all three agents, their numbers, menus and facts are set up before the demo by `npm run seed:demo-stage`.
+
+Nothing on the screen lists the three options. The choice is made aloud.
 
 ## Where the data comes from
 
-- Pizza names, toppings, address and hours: the public online menu and Google listing of Woodstock's Pizza, 1000 Higuera St, San Luis Obispo, read on 2026-11-14.
-- Sizes and prices: simplified for the demo. Every pizza is $15 Small, $25 Medium, $35 Large. This is not the shop's price list.
-- These are not official Woodstock's Pizza documents. Each PDF says so in its footer.
+All three businesses are made up. No real San Luis Obispo business is meant. The single source for the names, menus, services, hours and FAQs is `packages/contracts/fixtures/demo-stage.ts`. The PDFs are printed from it:
+
+```bash
+npx tsx scripts/demo-stage-pdfs.ts <out-dir>
+```
+
+That writes six HTML files; a browser prints each to PDF. Payments are Square sandbox test data.
 
 ## The demo screen
 
-Run the web app as in `docs/DEMO-LAPTOP.md`, with two more values set when the dev server starts:
+The web app needs these values when it is built or started:
 
 ```bash
-NEXT_PUBLIC_DEMO_SCRIPT=1 NEXT_PUBLIC_DEMO_PHONE_NUMBER=+18052039807 npm run dev -w @abos/web
+NEXT_PUBLIC_DEMO_SCRIPT=1
+NEXT_PUBLIC_DEMO_PHONE_PIZZA=<the pizza line>
+NEXT_PUBLIC_DEMO_PHONE_BARBER=<the barbershop line>
+NEXT_PUBLIC_DEMO_PHONE_SALON=<the salon line>
 ```
 
 Sign in and open Build. Load the page once before presenting. Use "Start over" between rehearsals.
 
-## If the data changes
+## Before presenting
 
-The same numbers live in three places. Change all of them together:
+Clear the rehearsal data and set the three shops up again (the reset puts the two-pizza seed back, so the second command must follow it). Archive first; see the team notes for the procedure.
 
-1. `packages/contracts/fixtures/demo-shop.ts` (what the agent sells and its FAQ answers), then load it again.
-2. `apps/web/app/(dashboard)/build/demo/woodstocks-menu.ts` (what the Build screen shows).
-3. The two PDFs in this folder.
+```bash
+TELEPHONY_PROVIDER=agentphone npm run reset -- --yes
+```
+
+```bash
+npm run seed:demo-stage
+```
+
+The second command needs the three numbers in the settings: `AGENTPHONE_PHONE_NUMBER` (pizza), `DEMO_BARBER_PHONE_NUMBER` and `DEMO_SALON_PHONE_NUMBER`.

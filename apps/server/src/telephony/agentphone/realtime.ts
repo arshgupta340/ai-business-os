@@ -55,7 +55,22 @@ export function withDollars(v: unknown): unknown {
     out[k] = withDollars(val);
     if (k.endsWith('Minor') && typeof val === 'number' && Number.isFinite(val)) out[`${k.slice(0, -'Minor'.length)}Dollars`] = (val / 100).toFixed(2);
   }
+  // A slot's start in the shop's own time, beside the UTC instant: a text trial on 2026-11-15 had the model
+  // say "I do not have four" while listing four, from reading UTC times. Only where the object names its zone.
+  const local = typeof o.startUtc === 'string' && typeof o.timezone === 'string' ? localTime(o.startUtc, o.timezone) : undefined;
+  if (local !== undefined) out.startLocal = local;
   return out;
+}
+
+/** "Sunday, November 15, 4:00 PM" for an instant in a time zone, or undefined when either is not usable. */
+export function localTime(iso: string, timeZone: string): string | undefined {
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) return undefined;
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(at));
+  } catch {
+    return undefined;
+  }
 }
 
 export type ToolEvent = { tool: ToolName; args: unknown; result: unknown; ok: boolean; latencyMs: number };

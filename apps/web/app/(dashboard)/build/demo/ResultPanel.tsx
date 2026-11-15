@@ -1,6 +1,6 @@
 'use client';
 
-import {DEMO_PHONE_NUMBER} from '@abos/contracts/fixtures';
+import {STAGE_PIZZA_SIZES, type StageShop} from '@abos/contracts/fixtures';
 import {Card} from '@astryxdesign/core/Card';
 import {Grid} from '@astryxdesign/core/Grid';
 import {Heading} from '@astryxdesign/core/Heading';
@@ -8,20 +8,8 @@ import {HStack} from '@astryxdesign/core/HStack';
 import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {SandboxBadge} from '@/components/SandboxBadge';
-import {getDemoPhoneNumber, isMockMode} from '@/lib/env';
 import {formatMoney, formatPhoneLocal} from '@/lib/format';
-import {groupByPrice, WOODSTOCKS_MENU, type PriceRow, type WoodstocksMenu} from './woodstocks-menu';
-
-/**
- * The number the panel shows: NEXT_PUBLIC_DEMO_PHONE_NUMBER, fixed before the
- * demo. In mock mode with no value, the shared fixture number, so rehearsal
- * works. Otherwise undefined: the panel never invents a number.
- */
-export function demoPhoneNumber(): string | undefined {
-  return getDemoPhoneNumber() ?? (isMockMode() ? DEMO_PHONE_NUMBER : undefined);
-}
-
-export const MISSING_NUMBER_TEXT = 'The demo phone number is not set. Set NEXT_PUBLIC_DEMO_PHONE_NUMBER and build the app again.';
+import {missingNumberText} from './stage-shop';
 
 // Bigger than display-1, from the type scale tokens, so the number reads from the back of a room.
 // It stays on one line, and shrinks with the window before it could overflow its card.
@@ -31,13 +19,19 @@ const NUMBER_STYLE = {fontSize: 'min(calc(var(--font-size-5xl) * 1.4), 4.2vw)', 
 const NUMBER_COLUMN = {flex: '1 1 30rem', minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center'} as const;
 const MENU_COLUMN = {flex: '1 1 32rem', minWidth: 0} as const;
 
-/** One block per price row: the prices once, large, then the pizzas they apply to. */
-function PriceBlock({row, menu, isOnly}: {row: PriceRow; menu: WoodstocksMenu; isOnly: boolean}) {
+/** "$15" for a whole-dollar price, else "$15.50". */
+export function wholeDollars(amountMinor: number, currency = 'USD'): string {
+  if (amountMinor % 100 !== 0) return formatMoney(amountMinor, currency);
+  return new Intl.NumberFormat('en-US', {style: 'currency', currency, maximumFractionDigits: 0}).format(amountMinor / 100);
+}
+
+/** The pizza place: the three size prices once, large, then every pizza they apply to. */
+function PizzaMenu({shop}: {shop: StageShop}) {
   return (
     <VStack gap={2}>
-      <Grid columns={menu.sizes.length} gap={3}>
-        {menu.sizes.map((size, i) => (
-          <VStack key={size.key} gap={0}>
+      <Grid columns={STAGE_PIZZA_SIZES.length} gap={3}>
+        {STAGE_PIZZA_SIZES.map((size) => (
+          <VStack key={size.code} gap={0}>
             <HStack gap={1} vAlign="end" wrap="wrap">
               <Text type="large" weight="semibold">
                 {size.name}
@@ -45,47 +39,70 @@ function PriceBlock({row, menu, isOnly}: {row: PriceRow; menu: WoodstocksMenu; i
               <Text type="supporting">{`${size.inches} inch`}</Text>
             </HStack>
             <Text type="display-2" weight="semibold" hasTabularNumbers>
-              {formatMoney(row.priceMinor[i]!, menu.currency)}
+              {wholeDollars(size.priceMinor)}
             </Text>
           </VStack>
         ))}
       </Grid>
       <Text type="body" color="secondary">
-        {isOnly ? 'Every pizza below, any size, same price' : 'These pizzas, any size'}
+        Every pizza below, any size, same price
       </Text>
       <Grid columns={{minWidth: 150, max: 3}} columnGap={4} rowGap={1}>
-        {row.names.map((name) => (
-          <Text key={name} type="large" weight="normal">
-            {name}
-          </Text>
-        ))}
+        {shop.catalog
+          .filter((item) => item.available)
+          .map((item) => (
+            <Text key={item.squareItemId} type="large" weight="normal">
+              {item.name}
+            </Text>
+          ))}
       </Grid>
     </VStack>
   );
 }
 
-export function ResultPanel({phoneNumber, menu = WOODSTOCKS_MENU}: {phoneNumber: string | undefined; menu?: WoodstocksMenu}) {
-  const rows = groupByPrice(menu.pizzas);
+/** The barbershop and the salon: each service with its duration and price. */
+function ServiceList({shop}: {shop: StageShop}) {
+  return (
+    <VStack gap={2}>
+      {shop.services.map((service) => (
+        <HStack key={service.id} gap={3} justify="between" vAlign="center">
+          <VStack gap={0}>
+            <Text type="display-3">{service.name}</Text>
+            <Text type="large" weight="normal" color="secondary">{`${service.durationMinutes} minutes`}</Text>
+          </VStack>
+          <Text type="display-3" weight="semibold" hasTabularNumbers>
+            {formatMoney(service.priceMinor, service.currency)}
+          </Text>
+        </HStack>
+      ))}
+    </VStack>
+  );
+}
+
+export function ResultPanel({shop, phoneNumber}: {shop: StageShop; phoneNumber: string | undefined}) {
   return (
     <HStack gap={4} wrap="wrap" vAlign="stretch">
       <Card variant="muted" style={NUMBER_COLUMN}>
         {phoneNumber ? (
           <VStack gap={3} hAlign="center">
+            <Text type="display-3" weight="semibold">
+              {shop.name}
+            </Text>
             <Text type="display-3" color="secondary">
-              Call to order
+              {shop.callerAction}
             </Text>
             <Text type="display-1" weight="semibold" hasTabularNumbers style={NUMBER_STYLE} as="p">
               {formatPhoneLocal(phoneNumber)}
             </Text>
             <Text type="large" weight="normal" color="secondary">
-              Pick any pizza and a size. Pickup only.
+              {shop.hoursText}
             </Text>
           </VStack>
         ) : (
           <VStack gap={2}>
             <Heading level={2}>No phone number to show</Heading>
             <Text type="large" weight="normal">
-              {MISSING_NUMBER_TEXT}
+              {missingNumberText(shop.key)}
             </Text>
           </VStack>
         )}
@@ -93,12 +110,10 @@ export function ResultPanel({phoneNumber, menu = WOODSTOCKS_MENU}: {phoneNumber:
       <Card style={MENU_COLUMN}>
         <VStack gap={3}>
           <HStack gap={2} vAlign="center" wrap="wrap">
-            <Heading level={2}>Menu</Heading>
+            <Heading level={2}>{shop.infoTitle}</Heading>
             <SandboxBadge label="Sandbox prices" />
           </HStack>
-          {rows.map((row) => (
-            <PriceBlock key={row.priceMinor.join('-')} row={row} menu={menu} isOnly={rows.length === 1} />
-          ))}
+          {shop.key === 'pizza' ? <PizzaMenu shop={shop} /> : <ServiceList shop={shop} />}
         </VStack>
       </Card>
     </HStack>

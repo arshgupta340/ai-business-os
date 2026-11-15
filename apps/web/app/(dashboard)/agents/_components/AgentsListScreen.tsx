@@ -59,10 +59,10 @@ export function AgentsListScreen() {
   const agents = useAgents(businessId);
   const liveAgent = useLiveAgent();
   // The scripted demo shows no agent until its build step has reached the phone number.
-  const hidden = useDemoHidesAgents();
+  const hidden = useDemoHidesAgents(businessId);
 
   if (!business || !businessId) {
-    return <EmptyState title="No business selected" description="Pick a business in the top bar." headingLevel={1} />;
+    return <EmptyState title="No business selected" description="Choose a business in the top bar." headingLevel={1} />;
   }
 
   const buildAction = <Button label="Build an agent" variant="primary" href="/build" />;
