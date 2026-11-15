@@ -86,8 +86,10 @@ describe('Build screen switch', () => {
   it('renders the demo run when the flag is on', async () => {
     vi.stubEnv('NEXT_PUBLIC_DEMO_SCRIPT', '1');
     render(<Providers>{BuildPage()}</Providers>);
-    expect(await screen.findByText('Demo run. This agent was set up before the demo.')).toBeTruthy();
-    expect(screen.getByText('Demo')).toBeTruthy();
+    expect(await screen.findByText('Use the suggested prompt')).toBeTruthy();
+    // Arsh's decision on 2026-11-14: no demo badge on the screen.
+    expect(screen.queryByText('Demo run. This agent was set up before the demo.')).toBeNull();
+    expect(screen.queryByText('Demo')).toBeNull();
   });
 });
 

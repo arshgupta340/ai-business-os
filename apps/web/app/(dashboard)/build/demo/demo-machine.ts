@@ -14,7 +14,7 @@ import {DEMO_STEPS} from './demo-steps';
 export const WAITING_POLL_MS = 3000;
 
 /** Shows the "Demo" badge and its line in the page header. Set to false to hide both. */
-export const SHOW_DEMO_BADGE = true;
+export const SHOW_DEMO_BADGE = false;
 
 export const DEMO_BADGE_TEXT = 'Demo run. This agent was set up before the demo.';
 
