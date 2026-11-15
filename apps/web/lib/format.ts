@@ -49,6 +49,18 @@ export function formatRelative(iso: string, timeZone: string, now: number = Date
   return formatDateTime(iso, timeZone);
 }
 
+/**
+ * A phone number for reading aloud: "+15555550199" shows as "+1 (555) 555 0199".
+ * Only North American numbers (+1 and ten digits) are reformatted. Anything
+ * else is returned unchanged.
+ */
+export function formatPhone(value: string): string {
+  const compact = value.trim().replace(/[\s().-]/g, '');
+  const match = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(compact);
+  if (!match) return value;
+  return `+1 (${match[1]}) ${match[2]} ${match[3]}`;
+}
+
 /** The last four characters of a phone number or ID, for redacted display. */
 export function lastFour(value: string): string {
   return value.slice(-4);
