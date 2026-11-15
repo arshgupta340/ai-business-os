@@ -9,8 +9,9 @@
 // Rejected deliveries cost one bounded body read and at most one HMAC; their activity rows are capped per
 // minute (REJECTED_EVENTS_PER_MINUTE), so a flood without the secret cannot fill the owner's feed.
 //
-// A voice turn is answered in the response itself (the vendor has no retry for it): NDJSON, with one
-// interim "One moment." chunk if the turn is slow, then the final chunk. Other events answer 200.
+// A voice turn is answered in the response itself (the vendor has no retry for it): NDJSON with one final
+// chunk. No interim filler is sent (Arsh, 2026-11-14: the caller never hears "One moment."; a slow turn is
+// a short silence, then the answer). Other events answer 200.
 import { PassThrough } from 'node:stream';
 import { ERROR_CODE_INFO, WEBHOOK_ENDPOINTS, makeApiError } from '@abos/contracts';
 import { markWebhookProcessed } from '@abos/db';
@@ -20,11 +21,6 @@ import type { TelephonyEvent, TelephonyProvider, TurnReply } from '../types';
 import { SPEECH, type AgentPhoneVoice } from './voice';
 
 export const AGENTPHONE_NDJSON = 'application/x-ndjson';
-/**
- * Two calls on 2026-11-14 showed the 1.5 second value speaking "One moment." before the greeting (the
- * first turn took 1.6 and 2.3 seconds). The filler is now only for a turn that is really slow.
- */
-export const DEFAULT_INTERIM_AFTER_MS = 3500;
 /** The most webhook.rejected events one server process writes for this route in any 60 seconds. Every rejected request still answers 401 or 400. */
 export const REJECTED_EVENTS_PER_MINUTE = 30;
 /** event_type of the row that remembers a delivery's signed content. It carries no payload and is never acted on. */
@@ -45,7 +41,6 @@ export interface AgentPhoneWebhookDeps {
   ownerOf(phoneNumber: string | undefined): Promise<string | undefined>;
   rejected(businessId: string | undefined, reason: 'signature_invalid' | 'malformed'): Promise<void>;
   log: { info(data: Record<string, unknown>, msg: string): void; warn(data: Record<string, unknown>, msg: string): void };
-  interimAfterMs?: number;
   /** The server clock, for the rejected-event cap. */
   nowMs?(): number;
 }
@@ -158,8 +153,6 @@ export const agentPhoneWebhookPlugin: FastifyPluginAsync<AgentPhoneWebhookDeps> 
     if (event.kind === 'incoming_call') {
       const stream = new PassThrough();
       reply.code(200).type(AGENTPHONE_NDJSON).send(stream);
-      let finished = false;
-      const interim = setTimeout(() => { if (!finished) stream.write(formatTurnChunks([{ text: SPEECH.oneMoment, interim: true }])); }, deps.interimAfterMs ?? DEFAULT_INTERIM_AFTER_MS);
       let final: TurnReply = { text: SPEECH.trouble };
       let settle!: (r: TurnReply) => void;
       remember(verified.deliveryId, new Promise<TurnReply>((resolve) => { settle = resolve; }));
@@ -172,9 +165,6 @@ export const agentPhoneWebhookPlugin: FastifyPluginAsync<AgentPhoneWebhookDeps> 
         final = (await deps.voice.turn({ providerCallId: event.providerCallId, to: event.to, callerLast4: event.callerLast4, text: event.text })).reply;
       } catch {
         deps.log.warn({ job: 'agentphone-webhook', webhookId: stored.id }, 'voice turn failed');
-      } finally {
-        finished = true;
-        clearTimeout(interim);
       }
       settle(final);
       stream.end(formatTurnChunks([{ text: final.text, ...(final.hangup ? { hangup: true } : {}) }]));

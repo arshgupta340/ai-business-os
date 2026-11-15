@@ -80,7 +80,7 @@ export interface ComposeOptions {
   /** Bound on each integration health probe (tests use a short one). */
   healthProbeTimeoutMs?: number;
   /** D-12: the AgentPhone HTTP ports and voice-turn timings (tests inject fakes and short times). */
-  telephony?: { http?: HttpPort; interimAfterMs?: number; turnTimeoutMs?: number;
+  telephony?: { http?: HttpPort; turnTimeoutMs?: number;
     /** The OpenAI Realtime socket for the AgentPhone realtime engine (tests pass a fake). Default: the provider's. */
     openaiSocketFactory?: import('../voice/types').OpenAISocketFactory;
     realtimeLimits?: import('../telephony/agentphone/voice').AgentPhoneRealtimeOptions['limits'] };
@@ -419,7 +419,6 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
       greeting: env.AGENTPHONE_GREETING, greetingMode: env.AGENTPHONE_GREETING_MODE,
       ...(options.telephony?.realtimeLimits ? { limits: options.telephony.realtimeLimits } : {}),
     } : undefined,
-    ...(options.telephony?.interimAfterMs !== undefined ? { interimAfterMs: options.telephony.interimAfterMs } : {}),
     ...(options.telephony?.turnTimeoutMs !== undefined ? { turnTimeoutMs: options.telephony.turnTimeoutMs } : {}),
     receiptsEnabled: messageChannel === 'agentphone', modelMissing });
 
