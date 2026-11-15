@@ -47,7 +47,7 @@ describe('AgentPhone on the realtime turn engine', () => {
   const lines: Line[] = [];
   beforeAll(async () => {
     fake = fakeRealtime();
-    w = await createWorld({ executor: notWiredExecutor, log: capturingLog(lines), telephony: { http, interimAfterMs: 60_000, openaiSocketFactory: fake.factory } }, AP_ENV);
+    w = await createWorld({ executor: notWiredExecutor, log: capturingLog(lines), telephony: { http, openaiSocketFactory: fake.factory } }, AP_ENV);
   }, 120_000);
   afterAll(async () => { await w?.close(); });
 
@@ -189,7 +189,7 @@ describe('AgentPhone on the realtime turn engine', () => {
 describe('AgentPhone realtime engine: session cannot open, idle close, and begin_message', () => {
   it('a session that cannot open sends the call to the builder runner from the first turn', async () => {
     const broken = fakeRealtime({ refuseOpen: true });
-    const w = await createWorld({ executor: notWiredExecutor, telephony: { http, interimAfterMs: 60_000, openaiSocketFactory: broken.factory } }, AP_ENV);
+    const w = await createWorld({ executor: notWiredExecutor, telephony: { http, openaiSocketFactory: broken.factory } }, AP_ENV);
     try {
       w.model.push(async () => 'Hello from the builder.');
       const r = await signed(w, voiceTurn('call_rt_open', 'Do you deliver?'));
@@ -200,7 +200,7 @@ describe('AgentPhone realtime engine: session cannot open, idle close, and begin
 
   it('the session closes after the idle limit; with begin_message no greeting is added by the server', async () => {
     const fake = fakeRealtime();
-    const w = await createWorld({ executor: notWiredExecutor, telephony: { http, interimAfterMs: 60_000, openaiSocketFactory: fake.factory, realtimeLimits: { idleMs: 30 } } },
+    const w = await createWorld({ executor: notWiredExecutor, telephony: { http, openaiSocketFactory: fake.factory, realtimeLimits: { idleMs: 30 } } },
       { ...AP_ENV, AGENTPHONE_GREETING_MODE: 'begin_message' });
     try {
       fake.push(() => ({ text: 'Hi, what can I get you?' }));

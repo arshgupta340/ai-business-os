@@ -55,7 +55,6 @@ export function createAgentPhoneWiring(deps: {
   now(): Date;
   newId(prefix: string): string;
   log: SeamDeps['log'];
-  interimAfterMs?: number;
   turnTimeoutMs?: number;
   receiptsEnabled: boolean;
   /** Model settings that are absent; the voice path stays off without a real model. */
@@ -92,7 +91,6 @@ export function createAgentPhoneWiring(deps: {
   const plugin: FastifyPluginAsync = enabled && ap && voice ? async (app) => {
     await app.register(agentPhoneWebhookPlugin, {
       provider: ap, db: deps.db, voice, ownerOf, log: deps.log, nowMs: () => deps.now().getTime(),
-      ...(deps.interimAfterMs !== undefined ? { interimAfterMs: deps.interimAfterMs } : {}),
       async rejected(businessId, reason) {
         if (!businessId) return;
         await emitActivity(deps.db, { id: deps.newId('evt_'), businessId, correlationId: deps.newId('req_'), type: 'webhook.rejected', actorType: 'provider',

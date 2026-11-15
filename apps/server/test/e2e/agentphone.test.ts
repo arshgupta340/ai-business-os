@@ -53,7 +53,7 @@ describe('AgentPhone voice turns (TELEPHONY_PROVIDER=agentphone)', () => {
   let ap: ReturnType<typeof fakeAgentPhoneHttp>;
   beforeAll(async () => {
     ap = fakeAgentPhoneHttp();
-    w = await createWorld({ executor: notWiredExecutor, telephony: { http: ap.http, interimAfterMs: 60_000 } }, AP_ENV);
+    w = await createWorld({ executor: notWiredExecutor, telephony: { http: ap.http } }, AP_ENV);
   }, 120_000);
   afterAll(async () => { await w?.close(); });
 
@@ -223,14 +223,14 @@ describe('AgentPhone voice turns (TELEPHONY_PROVIDER=agentphone)', () => {
   });
 });
 
-describe('a slow voice turn streams an interim chunk first', () => {
+describe('a slow voice turn sends no filler', () => {
   let w: World;
-  beforeAll(async () => { w = await createWorld({ executor: notWiredExecutor, telephony: { http: fakeAgentPhoneHttp().http, interimAfterMs: 5 } }, AP_ENV); }, 120_000);
+  beforeAll(async () => { w = await createWorld({ executor: notWiredExecutor, telephony: { http: fakeAgentPhoneHttp().http } }, AP_ENV); }, 120_000);
   afterAll(async () => { await w?.close(); });
-  it('speaks "One moment." as an interim chunk, then the reply closes the turn', async () => {
+  it('answers with one final chunk and never "One moment."', async () => {
     w.model.push(async () => { await new Promise((r) => setTimeout(r, 60)); return 'Here you go.'; });
     const r = await signed(w, voiceTurn('call_slow_1', 'Hours?'));
-    expect(chunks(r.payload)).toEqual([{ text: 'One moment.', interim: true }, { text: 'Here you go.' }]);
+    expect(chunks(r.payload)).toEqual([{ text: 'Here you go.' }]);
   });
 });
 

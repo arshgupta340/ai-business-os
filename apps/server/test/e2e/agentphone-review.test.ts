@@ -44,7 +44,7 @@ const TROUBLE = 'Sorry, I am having trouble right now. Please try again in a mom
 
 describe('AgentPhone webhook: replay, rule 6 and the processed mark', () => {
   let w: World;
-  beforeAll(async () => { w = await createWorld({ executor: notWiredExecutor, telephony: { http: noHttp, interimAfterMs: 60_000 } }, AP_ENV); }, 120_000);
+  beforeAll(async () => { w = await createWorld({ executor: notWiredExecutor, telephony: { http: noHttp } }, AP_ENV); }, 120_000);
   afterAll(async () => { await w?.close(); });
 
   it('the same signed bytes under a new X-Webhook-ID run no second turn (review F2)', async () => {
@@ -299,7 +299,7 @@ describe('AgentPhone webhook: replay, rule 6 and the processed mark', () => {
 
 describe('AgentPhone voice turn past its bound (review F1)', () => {
   let w: World;
-  beforeAll(async () => { w = await createWorld({ executor: notWiredExecutor, telephony: { http: noHttp, interimAfterMs: 60_000, turnTimeoutMs: BOUND_MS } }, AP_ENV); }, 120_000);
+  beforeAll(async () => { w = await createWorld({ executor: notWiredExecutor, telephony: { http: noHttp, turnTimeoutMs: BOUND_MS } }, AP_ENV); }, 120_000);
   afterAll(async () => { await w?.close(); });
 
   it('after the bound the abandoned turn starts no tool, stores no proposal and leaves no unheard reply in the history', async () => {

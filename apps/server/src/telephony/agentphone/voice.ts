@@ -39,7 +39,6 @@ export const SPEECH = {
   callEnded: 'This call has ended. Goodbye.',
   trouble: 'Sorry, I am having trouble right now. Please try again in a moment.',
   didNotHear: 'Sorry, I did not catch that. Could you say it again?',
-  oneMoment: 'One moment.',
 } as const;
 
 /** What the caller hears when the owner decided since the last turn. Approved never means paid or booked. */
