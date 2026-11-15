@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import {cleanup, render, screen, waitFor} from '@testing-library/react';
+import {act, cleanup, render, screen, waitFor} from '@testing-library/react';
 import {http, HttpResponse} from 'msw';
 import {useState, type ReactNode} from 'react';
 import {QueryClientProvider} from '@tanstack/react-query';
@@ -102,5 +102,24 @@ describe('DashboardShell and the sandbox bar', () => {
     renderShell();
     expect(await screen.findByLabelText('page')).toBeTruthy();
     expect(screen.queryByText(SANDBOX_BANNER_TEXT)).toBeNull();
+  });
+});
+
+describe('DashboardShell top bar', () => {
+  it('shows the business selector by default and a profile circle with Sign out in its menu', async () => {
+    renderShell();
+    expect(await screen.findByLabelText('page')).toBeTruthy();
+    expect(selector()).toBeTruthy();
+    const account = screen.getByRole('button', {name: 'Account'});
+    act(() => account.click());
+    expect(await screen.findByRole('menuitem', {name: 'Sign out'})).toBeTruthy();
+  });
+
+  it('hides the business selector while the scripted demo is on', async () => {
+    vi.stubEnv('NEXT_PUBLIC_DEMO_SCRIPT', '1');
+    renderShell();
+    expect(await screen.findByLabelText('page')).toBeTruthy();
+    expect(screen.queryByRole('combobox', {name: 'Business'})).toBeNull();
+    expect(screen.getByRole('button', {name: 'Account'})).toBeTruthy();
   });
 });

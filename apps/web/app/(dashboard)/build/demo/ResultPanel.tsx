@@ -25,7 +25,7 @@ export const MISSING_NUMBER_TEXT = 'The demo phone number is not set. Set NEXT_P
 
 // Bigger than display-1, from the type scale tokens, so the number reads from the back of a room.
 // It stays on one line, and shrinks with the window before it could overflow its card.
-const NUMBER_STYLE = {fontSize: 'min(calc(var(--font-size-5xl) * 1.4), 5.4vw)', lineHeight: 1.1, whiteSpace: 'nowrap'} as const;
+const NUMBER_STYLE = {fontSize: 'min(calc(var(--font-size-5xl) * 1.4), 4.2vw)', lineHeight: 1.1, whiteSpace: 'nowrap'} as const;
 // Two cards of the same height. The number sits in the middle of its card, the menu takes the other half.
 // The two stack on a narrow screen.
 const NUMBER_COLUMN = {flex: '1 1 30rem', minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'center'} as const;
