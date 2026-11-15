@@ -2,6 +2,19 @@
 // against the verified opening hours in the call's fact snapshot.
 import type { HoursKey } from '@abos/contracts';
 
+/** Minutes the shop needs to make an order (Arsh, 2026-11-14). A pickup sooner than this cannot be prepared. */
+export const ORDER_PREP_MINUTES = 20;
+/**
+ * Time passes on a call between "twenty minutes from now" and the proposal, so a pickup this much short
+ * of the minimum is still accepted.
+ */
+export const ORDER_PREP_GRACE_MS = 3 * 60_000;
+export const PICKUP_TOO_SOON = `The pickup time is too soon. An order takes ${ORDER_PREP_MINUTES} minutes to prepare. Offer a pickup time ${ORDER_PREP_MINUTES} minutes from now or later.`;
+/** True when a pickup time leaves the shop too little time to make the order. */
+export function pickupTooSoon(pickupMs: number, nowMs: number): boolean {
+  return pickupMs < nowMs + ORDER_PREP_MINUTES * 60_000 - ORDER_PREP_GRACE_MS;
+}
+
 const WEEKDAYS: HoursKey[] = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 const formatters = new Map<string, Intl.DateTimeFormat>();
 

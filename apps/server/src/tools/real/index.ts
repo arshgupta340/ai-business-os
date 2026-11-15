@@ -33,7 +33,7 @@ import {
   type ToolTraceEntry,
   type Toolset,
 } from '@abos/contracts';
-import { localDay, localToEpoch, weekdayOfLocalDate } from './time';
+import { localDay, localToEpoch, pickupTooSoon, PICKUP_TOO_SOON, weekdayOfLocalDate } from './time';
 import type { ConsentEvidence, FactsSnapshot, PortContext, RealToolset, RealToolsetDeps, InvocationControl, SafeTraceInput, SafeTraceOutput } from './types';
 
 export type * from './types';
@@ -234,6 +234,7 @@ export function createRealToolset(deps: RealToolsetDeps): RealToolset {
       if (!live(op)) return fail('INTEGRATION_UNAVAILABLE', UNAVAILABLE);
       const pickup = Date.parse(input.fulfillment.pickupAt);
       if (pickup < now().getTime()) return fail('VALIDATION_FAILED', 'The pickup time is in the past.');
+      if (pickupTooSoon(pickup, now().getTime())) return fail('VALIDATION_FAILED', PICKUP_TOO_SOON);
       const where = insideHours(snapshot, pickup, pickup);
       if (where === 'unknown') return fail('VALIDATION_FAILED', NO_HOURS);
       if (where === 'outside') return fail('VALIDATION_FAILED', 'The pickup time is outside opening hours.');

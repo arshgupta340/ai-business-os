@@ -156,6 +156,16 @@ describe('AgentPhone on the realtime turn engine', () => {
     expect(fake.userTexts.slice(start)).toEqual(['first question', 'second question']);
   });
 
+  it('an answer with no words is asked for once more, and only once', async () => {
+    fake.push(() => ({ text: '' }), () => ({ text: 'Anything else?' }));
+    await signed(w, voiceTurn('call_rt_e', '')); // greeting
+    const again = await signed(w, voiceTurn('call_rt_e', 'One large pepperoni.'));
+    expect(finalChunk(again.payload)).toEqual({ text: 'Anything else?' });
+    fake.push(() => ({ text: '' }), () => ({ text: '' }));
+    const nothing = await signed(w, voiceTurn('call_rt_e', 'No.'));
+    expect(finalChunk(nothing.payload).text).toBe('Sorry, I did not catch that. Could you say it again?');
+  });
+
   it('a session error mid-call falls back to the builder runner for that call, and the log names the engine', async () => {
     fake.push(() => ({ text: 'Hi, what can I get you?' }), () => 'error');
     await signed(w, voiceTurn('call_rt_5', 'Do you sell pizza?'));
