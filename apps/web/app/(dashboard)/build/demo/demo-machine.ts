@@ -13,6 +13,14 @@ import {DEMO_STEPS} from './demo-steps';
 /** How often the pending approvals and the order are read again, besides the live updates. */
 export const WAITING_POLL_MS = 3000;
 
+/**
+ * How long the order card shows "Approving" after the click, at the least.
+ * The server usually answers in well under a second, which is too fast for a
+ * room to see that something happened. "Approved" still shows only after the
+ * server has confirmed: this only delays it, it never shows it early.
+ */
+export const APPROVE_HOLD_MS = 2000;
+
 /** Shows the "Demo" badge and its line in the page header. Set to false to hide both. */
 export const SHOW_DEMO_BADGE = false;
 

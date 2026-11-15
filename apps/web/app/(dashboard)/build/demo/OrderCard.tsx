@@ -8,6 +8,7 @@ import {Grid} from '@astryxdesign/core/Grid';
 import {Heading} from '@astryxdesign/core/Heading';
 import {HStack} from '@astryxdesign/core/HStack';
 import {Icon} from '@astryxdesign/core/Icon';
+import {Spinner} from '@astryxdesign/core/Spinner';
 import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {LoadingState} from '@/components/LoadingState';
@@ -19,7 +20,7 @@ import {statusView} from '@/lib/status';
 import {actionSteps, decisionErrorView, effectiveState, typedApproval} from '../../approvals/_lib/approval-view';
 import {useNow} from '../../approvals/_lib/useNow';
 import {subjectDiffers} from '../../approvals/_components/ApprovalDecisionContent';
-import {WAITING_POLL_MS} from './demo-machine';
+import {APPROVE_HOLD_MS, WAITING_POLL_MS} from './demo-machine';
 import {DEMO_MENU, demoSizeName, type DemoMenu} from './demo-menu';
 
 /**
@@ -85,10 +86,12 @@ export type OrderCardProps = {
   onDecided: (approvalId: string, state: ApprovalState) => void;
   /** Tests pass a short interval. */
   pollMs?: number;
+  /** The least time "Approving" shows after the click. Tests pass 0. */
+  approveHoldMs?: number;
   menu?: DemoMenu;
 };
 
-export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs = WAITING_POLL_MS, menu = DEMO_MENU}: OrderCardProps) {
+export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs = WAITING_POLL_MS, approveHoldMs = APPROVE_HOLD_MS, menu = DEMO_MENU}: OrderCardProps) {
   const query = useApproval(businessId, approvalId);
   const approval = query.data;
   const t = approval ? typedApproval(approval) : null;
@@ -97,6 +100,16 @@ export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs =
   const decide = useDecideApproval(businessId);
   const now = useNow(approval?.state === 'PENDING' && !decide.data);
   const inFlight = useRef(false);
+  // After the click, "Approving" shows for at least approveHoldMs, so the room sees the step.
+  // The result is never shown early: it shows once the server has answered and the hold is over.
+  const [holding, setHolding] = useState(false);
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (holdTimer.current) clearTimeout(holdTimer.current);
+    },
+    [],
+  );
   // The hash on screen when the order appeared. A refetch with another hash locks Approve.
   const [seenHash, setSeenHash] = useState<string | null>(null);
   useEffect(() => {
@@ -155,6 +168,11 @@ export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs =
   const approve = () => {
     if (!canApprove || inFlight.current) return;
     inFlight.current = true;
+    if (approveHoldMs > 0) {
+      setHolding(true);
+      if (holdTimer.current) clearTimeout(holdTimer.current);
+      holdTimer.current = setTimeout(() => setHolding(false), approveHoldMs);
+    }
     decide.mutate(
       // Always the stored hash of the order shown, never recomputed. The hook keeps one Idempotency-Key per approval, decision and hash.
       {approvalId: approval.id, decision: 'approve', payloadHash: approval.payloadHash},
@@ -167,7 +185,9 @@ export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs =
     );
   };
 
-  const approvalView = statusView('approval', shownState);
+  const working = decide.isPending || holding;
+  // While "Approving" shows, the badge keeps saying what it said before the click.
+  const approvalView = statusView('approval', working ? 'PENDING' : shownState);
   const orderView = order.data ? statusView('order', order.data.status) : null;
 
   return (
@@ -177,7 +197,7 @@ export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs =
           <HStack gap={2} vAlign="center" wrap="wrap">
             <Heading level={2}>New order</Heading>
             <StatusBadge label={approvalView.label} tone={approvalView.tone} />
-            {state === 'PENDING' && !confirmed ? (
+            {state === 'PENDING' && !confirmed && !working ? (
               <Text type="large" hasTabularNumbers color="secondary">
                 {`Expires in ${formatCountdown(secondsUntil(approval.expiresAt, now))}`}
               </Text>
@@ -236,7 +256,7 @@ export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs =
             shownState={shownState}
             confirmed={!!confirmed}
             canApprove={canApprove}
-            isPending={decide.isPending}
+            isWorking={working}
             onApprove={approve}
             notice={
               errorView ? (
@@ -264,7 +284,7 @@ export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs =
             }
           />
 
-          {confirmed && orderView ? (
+          {confirmed && orderView && !working ? (
             <HStack gap={2} vAlign="center" wrap="wrap">
               <Text type="large">Now:</Text>
               <StatusBadge label={orderView.label} tone={orderView.tone} />
@@ -280,27 +300,45 @@ function Decision({
   shownState,
   confirmed,
   canApprove,
-  isPending,
+  isWorking,
   onApprove,
   notice,
 }: {
   shownState: ApprovalState;
   confirmed: boolean;
   canApprove: boolean;
-  isPending: boolean;
+  isWorking: boolean;
   onApprove: () => void;
   notice: ReactNode;
 }) {
+  // The decision is on its way, or it came back sooner than the room could see.
+  if (isWorking) {
+    return (
+      <Card variant="muted" padding={5} role="status">
+        <HStack gap={3} vAlign="center" justify="center">
+          <Spinner size="xl" aria-label="Approving" />
+          <Text type="display-2" weight="semibold">
+            Approving the order
+          </Text>
+        </HStack>
+      </Card>
+    );
+  }
   // "Approved" only from the server's answer to this decision or a stored decision it reports.
   if (shownState === 'APPROVED') {
     return (
-      <Card padding={4} style={APPROVED_STYLE} role="status">
-        <HStack gap={3} vAlign="center" justify="center">
-          <Icon icon="success" size="lg" />
-          <Text type="display-1" weight="semibold" color="inherit">
-            Approved
+      <Card padding={5} style={APPROVED_STYLE} role="status">
+        <VStack gap={1} hAlign="center">
+          <HStack gap={3} vAlign="center" justify="center">
+            <Icon icon="success" size="lg" />
+            <Text type="display-1" weight="semibold" color="inherit">
+              Approved
+            </Text>
+          </HStack>
+          <Text type="large" weight="normal" color="inherit">
+            The shop accepted this order
           </Text>
-        </HStack>
+        </VStack>
       </Card>
     );
   }
@@ -317,7 +355,7 @@ function Decision({
   }
   return (
     <VStack gap={3}>
-      <Button label="Approve" variant="primary" size="lg" width="100%" onClick={onApprove} isDisabled={!canApprove && !isPending} isLoading={isPending} />
+      <Button label="Approve" variant="primary" size="lg" width="100%" onClick={onApprove} isDisabled={!canApprove} />
       {notice}
     </VStack>
   );

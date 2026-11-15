@@ -10,7 +10,7 @@ afterEach(cleanup);
 describe('ResultPanel menu', () => {
   it('shows the number, the three prices once with inches, and every pizza', () => {
     render(<ResultPanel phoneNumber="+18055550123" />);
-    expect(screen.getByText('+1 (805) 555 0123')).toBeTruthy();
+    expect(screen.getByText('(805) 555-0123')).toBeTruthy();
     for (const [size, price] of [
       ['Small', '$15.00'],
       ['Medium', '$25.00'],

@@ -61,6 +61,18 @@ export function formatPhone(value: string): string {
   return `+1 (${match[1]}) ${match[2]} ${match[3]}`;
 }
 
+/**
+ * A North American number the way people dial it: "+18052039807" shows as
+ * "(805) 203-9807". For a number shown large to callers in the United States.
+ * Anything else falls back to formatPhone.
+ */
+export function formatPhoneLocal(value: string): string {
+  const compact = value.trim().replace(/[\s().-]/g, '');
+  const match = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(compact);
+  if (!match) return formatPhone(value);
+  return `(${match[1]}) ${match[2]}-${match[3]}`;
+}
+
 /** The last four characters of a phone number or ID, for redacted display. */
 export function lastFour(value: string): string {
   return value.slice(-4);
