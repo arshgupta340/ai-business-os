@@ -5,7 +5,7 @@
 // upsert is sent at all, so the versions and the catalog_items rows stay the same.
 
 import { createHash } from 'node:crypto';
-import type { CatalogModifierList } from '@abos/contracts';
+import type { CatalogItem, CatalogModifierList } from '@abos/contracts';
 import { DEMO_TAX_RATE_BPS, pizzaBusiness, pizzaCatalog, pizzaCatalogRows, toppingsModifierList } from '@abos/contracts/fixtures';
 import { inTransaction, json, tally, upsertRow, type SeedDb, type TableTally } from './db';
 import { envValue, requireEnv, type SeedEnv } from './env';
@@ -57,6 +57,13 @@ export interface SquareSeedOptions {
   client: SquareCatalogClient;
   /** Used to stamp synced_at. Tests pass a fixed clock. */
   now?: () => Date;
+  /**
+   * Another menu for the pizza business, in place of the two-pizza fixture (issue #161, the demo shop).
+   * Its items carry no modifier list: the Toppings list is neither written nor attached, and an item that
+   * already exists in Square under the same name is updated in place. Rows of the business that are not on
+   * this menu leave catalog_items, so the agent cannot sell them; their Square objects are left alone.
+   */
+  menu?: readonly CatalogItem[] | undefined;
 }
 
 export interface SquareSeedSummary {
@@ -103,15 +110,17 @@ export async function seedSquareCatalog(db: SeedDb, opts: SquareSeedOptions): Pr
     },
   };
 
-  const exList = byName('MODIFIER_LIST', toppingsModifierList.name);
-  note(`MODIFIER_LIST ${toppingsModifierList.name}`, exList);
+  const menu: readonly CatalogItem[] = opts.menu ?? pizzaCatalog;
+  const withToppings = opts.menu === undefined;
+  const exList = withToppings ? byName('MODIFIER_LIST', toppingsModifierList.name) : undefined;
+  if (withToppings) note(`MODIFIER_LIST ${toppingsModifierList.name}`, exList);
   const listRef = ref(exList, '#toppings');
   const modifierList: SquareCatalogObject = {
     type: 'MODIFIER_LIST', ...listRef, present_at_all_locations: true,
     modifier_list_data: {
       name: toppingsModifierList.name,
       selection_type: toppingsModifierList.selectionType,
-      modifiers: toppingsModifierList.modifiers.map((m, i) => {
+      modifiers: !withToppings ? [] : toppingsModifierList.modifiers.map((m, i) => {
         const e = exList?.modifier_list_data?.modifiers?.find((x) => x.modifier_data?.name === m.name);
         note(`MODIFIER ${m.name}`, e);
         return {
@@ -125,7 +134,7 @@ export async function seedSquareCatalog(db: SeedDb, opts: SquareSeedOptions): Pr
     },
   };
 
-  const items: SquareCatalogObject[] = pizzaCatalog.map((item, pi) => {
+  const items: SquareCatalogObject[] = menu.map((item, pi) => {
     const exItem = byName('ITEM', item.name);
     note(`ITEM ${item.name}`, exItem);
     const itemRef = ref(exItem, `#item-${pi}`);
@@ -136,7 +145,7 @@ export async function seedSquareCatalog(db: SeedDb, opts: SquareSeedOptions): Pr
         ...(item.description !== undefined ? { description: item.description } : {}),
         product_type: 'REGULAR',
         tax_ids: [tax.id],
-        modifier_list_info: [{ modifier_list_id: modifierList.id, enabled: true }],
+        modifier_list_info: withToppings ? [{ modifier_list_id: modifierList.id, enabled: true }] : [],
         variations: item.variations.map((v, si) => {
           const e = exItem?.item_data?.variations?.find((x) => x.item_variation_data?.name === v.name);
           note(`ITEM_VARIATION ${item.name} ${v.name}`, e);
@@ -152,7 +161,7 @@ export async function seedSquareCatalog(db: SeedDb, opts: SquareSeedOptions): Pr
     };
   });
 
-  const desired = [tax, modifierList, ...items];
+  const desired = [tax, ...(withToppings ? [modifierList] : []), ...items];
   const needsUpsert = created.length > 0 || desired.some((d) => {
     const e = existing.find((x) => x.id === d.id);
     return !e || JSON.stringify(project(e)) !== JSON.stringify(project(d));
@@ -171,9 +180,9 @@ export async function seedSquareCatalog(db: SeedDb, opts: SquareSeedOptions): Pr
 
   // 4. Read the real IDs and versions back by name.
   const finalItem = (name: string) => final.find((o) => o.type === 'ITEM' && objectName(o) === name);
-  const finalList = final.find((o) => o.type === 'MODIFIER_LIST' && objectName(o) === toppingsModifierList.name);
-  if (!finalList) throw new Error('Square did not return the Toppings modifier list.');
-  const modifierLists: CatalogModifierList[] = [{
+  const finalList = withToppings ? final.find((o) => o.type === 'MODIFIER_LIST' && objectName(o) === toppingsModifierList.name) : undefined;
+  if (withToppings && !finalList) throw new Error('Square did not return the Toppings modifier list.');
+  const modifierLists: CatalogModifierList[] = !finalList ? [] : [{
     id: finalList.id,
     name: toppingsModifierList.name,
     selectionType: toppingsModifierList.selectionType,
@@ -187,16 +196,19 @@ export async function seedSquareCatalog(db: SeedDb, opts: SquareSeedOptions): Pr
   // 5. catalog_items, one row per variation, keyed by the fixture row IDs (cat_marg_sm and so on).
   const tables: TableTally = {};
   const syncedAt = now().toISOString();
+  const rowIdOf = (variationId: string) => pizzaCatalogRows.find((r) => r.squareVariationId === variationId)?.id ?? `cat_${variationId.toLowerCase()}`;
   await inTransaction(db, async () => {
-    const keep: string[] = [];
-    for (const item of pizzaCatalog) {
+    // Rows that are not on this menu go first: an item kept under the same name keeps its Square variation
+    // IDs, and (business_id, square_variation_id) is unique, so an old row would block the new one.
+    const keep = menu.flatMap((item) => item.variations.map((v) => rowIdOf(v.id)));
+    await db.query('delete from public.catalog_items where business_id = $1 and not (id = any($2::text[]))', [pizzaBusiness.id, keep]);
+    for (const item of menu) {
       const sqItem = finalItem(item.name);
       if (!sqItem || sqItem.version === undefined) throw new Error(`Square did not return the item ${item.name} with a version.`);
       for (const v of item.variations) {
         const sqVar = sqItem.item_data?.variations?.find((x) => x.item_variation_data?.name === v.name);
         if (!sqVar || sqVar.version === undefined) throw new Error(`Square did not return the variation ${item.name} ${v.name}.`);
-        const rowId = pizzaCatalogRows.find((r) => r.squareVariationId === v.id)?.id ?? `cat_${v.id.toLowerCase()}`;
-        keep.push(rowId);
+        const rowId = rowIdOf(v.id);
         tally(tables, 'catalog_items', await upsertRow(db, 'catalog_items', {
           id: rowId, business_id: item.businessId, square_item_id: sqItem.id, square_variation_id: sqVar.id,
           square_item_version: sqItem.version, square_variation_version: sqVar.version,
@@ -206,7 +218,6 @@ export async function seedSquareCatalog(db: SeedDb, opts: SquareSeedOptions): Pr
         }, { conflict: ['id'], ignoreInCompare: ['synced_at'] }));
       }
     }
-    await db.query('delete from public.catalog_items where business_id = $1 and not (id = any($2::text[]))', [pizzaBusiness.id, keep]);
   });
 
   return { upserted: needsUpsert, created, updated, tables };

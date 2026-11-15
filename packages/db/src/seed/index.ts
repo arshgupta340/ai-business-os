@@ -7,4 +7,5 @@ export * from './owner';
 export * from './seed';
 export * from './reset';
 export * from './square';
+export * from './demo-shop';
 export { supabaseAuthAdmin, squareSandboxCatalogClient } from './providers';

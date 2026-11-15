@@ -208,6 +208,10 @@ function prepLine(knowsNow: boolean): string {
 const CONFIRM_LINE = 'The order is sent only after a yes to that question. "Yes", "sure", "okay", "sounds good" and "go ahead" are a yes. If the caller answers with something that is not a yes, a no or a change, such as "thank you" or "that is it", ask again: "Shall I send it to the shop?" Do not let the call end with an order read back and neither sent nor refused.';
 const NO_OPTION_LINE = 'If the caller asks for a change the menu has no option for, such as leaving an ingredient off, say once: "I cannot add that here. Please ask at the counter at pickup." Keep the order as it is and go back to the question you were on.';
 
+/** Issue #161: a menu of 16 pizzas must not be read out in full. Added only for a menu longer than this. */
+const LONG_MENU_ITEMS = 6;
+const LONG_MENU_LINE = 'The menu is long. If the caller asks what is on the menu, say how many items there are, name four or five of them, and ask whether they want to hear more or have one in mind. Never read the whole list unless they ask for all of it. If they ask what is on an item, say it from the menu. If every item costs the same, give the size prices once and do not repeat them for each item.';
+
 /** How the agent talks. The same for every template. */
 const STYLE_LINES = [
   'Talk like a quick, friendly person at the counter. One short sentence at a time.',
@@ -245,6 +249,7 @@ export function buildInstructions(spec: AgentSpec, facts: InstructionFacts): str
         ? 'Build the cart from the item, variation and modifier IDs in the menu below. Call read_catalog only for something that is not listed. Never state a total that did not come from quote_order. Never compute, round or discount. Tool results give prices in cents; say them as dollars. If the cart changes, call quote_order again.'
         : 'Build the cart only from IDs returned by read_catalog. Never state a total that did not come from quote_order. Never compute, round or discount. Prices are in cents; say them as dollars. If the cart changes, call quote_order again.',
       'Take the order with these questions, in this order, and skip any the caller already answered: "What can I get for you?" If the item has sizes and none was given: "What size?" Then "Anything else?" until they say no. Then "What name is it under?" Then "What time would you like to pick up?"',
+      ...(knowledge?.hasMenu === true && (facts.menu?.length ?? 0) > LONG_MENU_ITEMS ? [LONG_MENU_LINE] : []),
       'Offer toppings or other options only if the caller asks about them.',
       knowledge?.hasHours === true
         ? 'If the pickup time is in the past or outside the opening hours, say when the shop is open that day and ask for another time.'

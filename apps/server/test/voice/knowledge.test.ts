@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CatalogItem } from '@abos/contracts';
-import { barberFacts, barberSpecV1, pizzaCatalog, pizzaSpecV2, SQ } from '@abos/contracts/fixtures';
+import { barberFacts, barberSpecV1, demoShopCatalog, demoShopFacts, pizzaCatalog, pizzaSpecV2, SQ } from '@abos/contracts/fixtures';
 import { MAX_KNOWLEDGE_CHARS, buildKnowledge, clock, dollars, menuLines, nowLine } from '../../src/voice/knowledge';
 import { buildInstructions } from '../../src/voice/prompt';
 import type { FactsSnapshot } from '../../src/voice/types';
@@ -179,5 +179,49 @@ describe('voice prompt with the shop data', () => {
 
   it('stays a bounded size with the demo data', () => {
     expect(buildInstructions(pizzaSpecV2, pizza).length).toBeLessThan(8500);
+  });
+});
+
+describe('the demo shop menu (issue #161): 16 pizzas, every pizza the same price', () => {
+  const snapshot: FactsSnapshot = {
+    facts: [...demoShopFacts.map((f) => ({ kind: f.kind, key: f.key, value: f.value, version: 2 })), { kind: 'policy', key: 'pickup_window', value: { minutes: 20 }, version: 1 }],
+    timezone: 'America/Los_Angeles',
+  };
+  // Real Square IDs are 24 characters; the placeholders are shorter, so the size check uses real lengths.
+  const realIds: CatalogItem[] = demoShopCatalog.map((item, i) => ({ ...item, squareItemId: `ITEM${String(i).padStart(20, 'A')}`,
+    variations: item.variations.map((v, j) => ({ ...v, id: `VAR${String(i * 3 + j).padStart(21, 'B')}` })) }));
+
+  it('says a 23:59 close as midnight', () => {
+    expect(clock('23:59')).toBe('midnight');
+    expect(clock('23:30')).toBe('11:30 PM');
+  });
+
+  it('writes the size prices once and one line per pizza with its IDs and what is on it', () => {
+    const lines = menuLines(demoShopCatalog);
+    expect(lines).toHaveLength(17);
+    expect(lines[0]).toBe('Menu, 16 items, prices before tax. Every item costs the same: Small $15.00, Medium $25.00, Large $35.00.');
+    expect(lines).toContain('Classic (item id SQ_ITEM_WS_CLASSIC; variation ids: Small SQ_VAR_WS_CLASSIC_SM, Medium SQ_VAR_WS_CLASSIC_MD, Large SQ_VAR_WS_CLASSIC_LG): Pepperoni, Italian sausage, black olives, mushrooms, white onions.');
+    // A price appears in the header only, not on the 16 item lines.
+    expect(lines.slice(1).some((l) => l.includes('$'))).toBe(false);
+    // The two-pizza menu keeps its long form.
+    expect(menuLines(pizzaCatalog)[0]).toBe('Menu, prices before tax:');
+  });
+
+  it('fits the menu, the hours and every FAQ under the cap with real ID lengths', () => {
+    const k = buildKnowledge({ facts: snapshot, menu: realIds, nowMs: Date.parse('2026-11-14T19:00:00Z') });
+    expect(k?.hasMenu).toBe(true);
+    expect(k?.hasHours).toBe(true);
+    expect(k!.text.length).toBeLessThanOrEqual(MAX_KNOWLEDGE_CHARS);
+    expect(k!.text).toContain('Opening hours: Monday 11 AM to midnight.');
+    expect(k!.text).toContain('address: 1000 Higuera Street, San Luis Obispo, CA 93401.');
+    expect(k!.text).toContain("Q: Which pizzas have no meat? A: Cheese, Grateful Veg, Pesto Primavera and Woody's TGB.");
+    expect(k!.text).toContain('Q: How long does a pickup order take? A: About 20 minutes.');
+  });
+
+  it('tells the agent not to read a long menu out, and only for a long menu', () => {
+    const long = buildInstructions(pizzaSpecV2, { businessName: 'Pizza Co.', messageChannel: 'qr_only', facts: snapshot, menu: realIds, nowMs: Date.parse('2026-11-14T19:00:00Z') });
+    expect(long).toContain('The menu is long. If the caller asks what is on the menu, say how many items there are, name four or five of them');
+    const short = buildInstructions(pizzaSpecV2, { businessName: 'Demo Pizza Co.', messageChannel: 'qr_only', facts: PIZZA_SNAPSHOT, menu: pizzaCatalog, nowMs: Date.parse('2026-11-14T19:00:00Z') });
+    expect(short).not.toContain('The menu is long.');
   });
 });
