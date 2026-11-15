@@ -3,6 +3,7 @@
 export * from './world';
 export * from './catalog';
 export * from './demo-shop';
+export * from './demo-stage';
 export * from './facts';
 export * from './agents';
 export * from './calls';
