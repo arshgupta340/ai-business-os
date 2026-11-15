@@ -30,9 +30,8 @@ Sign in and open Build. Load the page once before presenting. Use "Start over" b
 
 ## If the data changes
 
-The same numbers live in four places. Change all of them together:
+The same numbers live in three places. Change all of them together:
 
-1. `packages/contracts/fixtures/demo-shop.ts` (what the agent sells), then load it again.
+1. `packages/contracts/fixtures/demo-shop.ts` (what the agent sells and its FAQ answers), then load it again.
 2. `apps/web/app/(dashboard)/build/demo/woodstocks-menu.ts` (what the Build screen shows).
 3. The two PDFs in this folder.
-4. The FAQ answers in the demo shop facts.
