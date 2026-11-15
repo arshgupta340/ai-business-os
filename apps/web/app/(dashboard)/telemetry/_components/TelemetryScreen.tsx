@@ -19,7 +19,7 @@ import {EmptyState} from '@/components/EmptyState';
 import {LoadingState} from '@/components/LoadingState';
 import {PageHeader} from '@/components/PageHeader';
 import {isMockMode, useTelemetry} from '@/lib/api';
-import {formatDateTime} from '@/lib/format';
+import {formatDateTime, timeZoneAbbreviation} from '@/lib/format';
 import {useBusiness} from '@/lib/session';
 import {
   DEFAULT_WINDOW,
@@ -90,7 +90,7 @@ export function TelemetryScreen() {
       </Link>
       <PageHeader
         title="Telemetry"
-        description={`${business.name}, times in ${timeZone}. Measured response times, not promises.`}
+        description={`${business.name}, times in ${timeZoneAbbreviation(timeZone)}. Measured response times, not promises.`}
         actions={<Button label="Refresh" onClick={refresh} isLoading={telemetry.isFetching} />}
       />
       {isMockMode() ? (

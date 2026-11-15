@@ -16,6 +16,7 @@ import {PageHeader} from '@/components/PageHeader';
 import {RefreshFailedNotice} from '@/components/RefreshFailedNotice';
 import {StatusBadge} from '@/components/StatusBadge';
 import {useActivityFeed, useAgents, useLiveAgent, type Agent, type LiveAgent} from '@/lib/api';
+import {useDemoHidesAgents} from '@/lib/demo-stage';
 import {formatRelative} from '@/lib/format';
 import {useBusiness} from '@/lib/session';
 import {statusView} from '@/lib/status';
@@ -57,6 +58,8 @@ export function AgentsListScreen() {
   useActivityFeed(businessId);
   const agents = useAgents(businessId);
   const liveAgent = useLiveAgent();
+  // The scripted demo shows no agent until its build step has reached the phone number.
+  const hidden = useDemoHidesAgents();
 
   if (!business || !businessId) {
     return <EmptyState title="No business selected" description="Pick a business in the top bar." headingLevel={1} />;
@@ -70,7 +73,7 @@ export function AgentsListScreen() {
   } else if (!agents.data) {
     // The first load failed. A failed refetch keeps the list and the line under the header says so.
     body = <ErrorNotice error={agents.error} context="load" title="Could not load your agents" onRetry={() => void agents.refetch()} />;
-  } else if (agents.data.items.length === 0) {
+  } else if (hidden || agents.data.items.length === 0) {
     body = (
       <EmptyState
         title="No agents yet"

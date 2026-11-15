@@ -21,6 +21,21 @@ export function formatTime(iso: string, timeZone: string): string {
   return new Intl.DateTimeFormat('en-US', {timeZone, hour: 'numeric', minute: '2-digit'}).format(new Date(iso));
 }
 
+/**
+ * The short name people say for a time zone: "America/Los_Angeles" shows as
+ * "PST" in winter and "PDT" in summer. Falls back to the zone ID.
+ */
+export function timeZoneAbbreviation(timeZone: string, at: Date = new Date()): string {
+  try {
+    const part = new Intl.DateTimeFormat('en-US', {timeZone, timeZoneName: 'short'})
+      .formatToParts(at)
+      .find((p) => p.type === 'timeZoneName');
+    return part?.value ?? timeZone;
+  } catch {
+    return timeZone;
+  }
+}
+
 export function formatDate(iso: string, timeZone: string): string {
   return new Intl.DateTimeFormat('en-US', {timeZone, weekday: 'short', month: 'short', day: 'numeric'}).format(
     new Date(iso),

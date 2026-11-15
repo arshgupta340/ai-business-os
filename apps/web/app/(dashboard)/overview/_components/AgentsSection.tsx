@@ -12,6 +12,7 @@ import {LoadingState} from '@/components/LoadingState';
 import {StatusBadge} from '@/components/StatusBadge';
 import {useAgents, useLiveAgent, type Agent, type LiveAgent} from '@/lib/api';
 import {lastFour} from '@/lib/format';
+import {useDemoHidesAgents} from '@/lib/demo-stage';
 import {useBusiness} from '@/lib/session';
 import {statusView} from '@/lib/status';
 import {BlockError} from './BlockError';
@@ -70,6 +71,8 @@ function NumberNote({agents, liveAgent}: {agents: Agent[]; liveAgent?: LiveAgent
 export function AgentsSection({businessId}: {businessId: string}) {
   const agents = useAgents(businessId);
   const liveAgent = useLiveAgent();
+  // The scripted demo shows no agent until its build step has reached the phone number.
+  const hidden = useDemoHidesAgents();
 
   let body;
   if (agents.isPending) {
@@ -77,7 +80,7 @@ export function AgentsSection({businessId}: {businessId: string}) {
   } else if (!agents.data) {
     // No data at all: the first load failed. A failed refetch keeps the old data and the page header says so.
     body = <BlockError title="Could not load agents" error={agents.error} onRetry={() => void agents.refetch()} />;
-  } else if (agents.data.items.length === 0) {
+  } else if (hidden || agents.data.items.length === 0) {
     body = (
       <EmptyState
         title="No agents yet"
