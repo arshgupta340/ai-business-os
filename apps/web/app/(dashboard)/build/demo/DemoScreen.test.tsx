@@ -4,15 +4,16 @@ import {http, HttpResponse} from 'msw';
 import type {ReactNode} from 'react';
 import {useState} from 'react';
 import {QueryClientProvider} from '@tanstack/react-query';
+import {bookingVerified, STAGE_SHOPS} from '@abos/contracts/fixtures';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {createApiQueryClient} from '@/lib/api/provider';
-import {BusinessProvider} from '@/lib/session';
+import {BusinessProvider, useBusiness} from '@/lib/session';
 import {advanceMockClock, mockControls, server} from '@/mocks/server';
 import {requests, TEST_BASE_URL, useMockServer} from '@/mocks/test-setup';
 import BuildPage from '../page';
 import {DemoScreen, SERVER_UNREACHABLE_TEXT} from './DemoScreen';
 import {addFiles} from './DemoChat';
-import {MISSING_NUMBER_TEXT} from './ResultPanel';
+import {missingNumberText, NO_SHOP_TEXT, shopNotFoundText} from './stage-shop';
 
 vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(''),
@@ -25,11 +26,20 @@ useMockServer();
 const A = `${TEST_BASE_URL}/api`;
 const POLL_MS = 150;
 
+/** Shows the selected business, so a test can see the switch. */
+function SelectedBusiness() {
+  const {businessId} = useBusiness();
+  return <output data-testid="selected-business">{businessId ?? ''}</output>;
+}
+
 function Providers({children}: {children: ReactNode}) {
   const [client] = useState(createApiQueryClient);
   return (
     <QueryClientProvider client={client}>
-      <BusinessProvider>{children}</BusinessProvider>
+      <BusinessProvider>
+        <SelectedBusiness />
+        {children}
+      </BusinessProvider>
     </QueryClientProvider>
   );
 }
@@ -54,21 +64,33 @@ async function clickButton(name: string | RegExp) {
   await click(button);
 }
 
-async function sendPrompt() {
+type Kind = 'Pizza place' | 'Barbershop' | 'Salon';
+
+async function pick(kind: Kind) {
+  await clickButton(kind);
+}
+
+async function sendPrompt(kind?: Kind) {
+  if (kind) await pick(kind);
   await clickButton('Use the suggested prompt');
   await clickButton(/^send/i);
 }
 
-async function reachNumber() {
-  await sendPrompt();
+async function reachNumber(kind: Kind = 'Pizza place') {
+  await sendPrompt(kind);
   await screen.findByText('Waiting for the call');
 }
+
+const selected = () => screen.getByTestId('selected-business').textContent;
 
 const decisionCalls = () => requests.filter((r) => r.method === 'POST' && new URL(r.url).pathname.endsWith('/decision'));
 
 beforeEach(() => {
   window.localStorage.clear();
-  vi.stubEnv('NEXT_PUBLIC_DEMO_PHONE_NUMBER', '+18055550123');
+  vi.stubEnv('NEXT_PUBLIC_DEMO_PHONE_NUMBER', '');
+  vi.stubEnv('NEXT_PUBLIC_DEMO_PHONE_PIZZA', '+18055550123');
+  vi.stubEnv('NEXT_PUBLIC_DEMO_PHONE_BARBER', '+18055550124');
+  vi.stubEnv('NEXT_PUBLIC_DEMO_PHONE_SALON', '+18055550125');
 });
 
 afterEach(() => {
@@ -95,8 +117,8 @@ describe('Build screen switch', () => {
 });
 
 const pdf = (name: string) => new File(['%PDF'], name, {type: 'application/pdf'});
-const MENU_PDF = 'WoodstocksPizzaMenu.pdf';
-const FAQ_PDF = 'WoodstocksCustomerFAQs.pdf';
+const MENU_PDF = STAGE_SHOPS.pizza.files.info;
+const FAQ_PDF = STAGE_SHOPS.pizza.files.faq;
 
 async function attach(...files: File[]) {
   const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
@@ -123,10 +145,71 @@ describe('Demo composer attachments', {timeout: 30000}, () => {
     expect(screen.getAllByText(FAQ_PDF)).toHaveLength(1);
     expect(screen.getAllByRole('button', {name: /remove/i}).length).toBeGreaterThanOrEqual(2);
     await sendPrompt();
-    expect(await screen.findByText(/Create a voice calling agent for this pizza shop/)).toBeTruthy();
+    expect(await screen.findByText(/Create a voice calling agent for this pizza place/)).toBeTruthy();
     expect(screen.getByText(MENU_PDF)).toBeTruthy();
     expect(screen.getByText(FAQ_PDF)).toBeTruthy();
     expect(requests).toHaveLength(0);
+  });
+
+  it('selects the shop by an attached file name: one barbershop file is enough', async () => {
+    renderDemo(0.02);
+    await attach(pdf('notes.pdf'), pdf(STAGE_SHOPS.barber.files.faq));
+    await sendPrompt();
+    expect(await screen.findByText(/Create a voice calling agent for this barbershop/)).toBeTruthy();
+    expect(screen.getByText('Reading the services')).toBeTruthy();
+  });
+
+  it('keeps the suggested prompt off, with one plain line, until a recognized file is attached', async () => {
+    renderDemo(0.02);
+    const suggest = await screen.findByRole('button', {name: 'Use the suggested prompt'});
+    expect(suggest.getAttribute('aria-disabled') === 'true' || (suggest as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(NO_SHOP_TEXT)).toBeTruthy();
+    await attach(pdf('menu.pdf'));
+    expect(screen.getByText(NO_SHOP_TEXT)).toBeTruthy();
+    await click(suggest);
+    expect(screen.queryByText(/Create a voice calling agent/)).toBeNull();
+    await attach(pdf(STAGE_SHOPS.barber.files.info));
+    expect(screen.queryByText(NO_SHOP_TEXT)).toBeNull();
+  });
+});
+
+describe('Demo composer: the business picker', {timeout: 30000}, () => {
+  it('offers the three shops with their kind and one line each', async () => {
+    renderDemo();
+    expect(await screen.findByText('Pick a business')).toBeTruthy();
+    for (const shop of Object.values(STAGE_SHOPS)) {
+      expect(screen.getByRole('button', {name: shop.kindLabel})).toBeTruthy();
+      expect(screen.getByText(shop.blurb)).toBeTruthy();
+    }
+  });
+
+  it("attaches the picked shop's two files and replaces an earlier attachment", async () => {
+    renderDemo();
+    await screen.findByText('Pick a business');
+    await attach(pdf('extra.pdf'));
+    await pick('Barbershop');
+    expect(screen.getByText(STAGE_SHOPS.barber.files.info)).toBeTruthy();
+    expect(screen.getByText(STAGE_SHOPS.barber.files.faq)).toBeTruthy();
+    expect(screen.queryByText('extra.pdf')).toBeNull();
+    await pick('Salon');
+    expect(screen.getByText(STAGE_SHOPS.salon.files.info)).toBeTruthy();
+    expect(screen.queryByText(STAGE_SHOPS.barber.files.info)).toBeNull();
+    await clickButton('Use the suggested prompt');
+    await clickButton(/^send/i);
+    // The salon is not one of the seeded businesses here: one plain line, and the steps do not start.
+    expect(await screen.findByText(shopNotFoundText(STAGE_SHOPS.salon))).toBeTruthy();
+    expect(screen.queryByText('Reading the services')).toBeNull();
+    expect(screen.getByText('Pick a business')).toBeTruthy();
+  });
+
+  it('switches the selected business to the chosen shop on send', async () => {
+    renderDemo(0.02);
+    await screen.findByText('Pick a business');
+    await waitFor(() => expect(selected()).toBe(STAGE_SHOPS.pizza.businessId));
+    await sendPrompt('Barbershop');
+    await waitFor(() => expect(selected()).toBe(STAGE_SHOPS.barber.businessId));
+    expect(await screen.findByText(/Create a voice calling agent for this barbershop/)).toBeTruthy();
+    expect(screen.getByText('Reading the services')).toBeTruthy();
   });
 
   it('removes one attached file with its token', async () => {
@@ -146,19 +229,28 @@ describe('Demo run: the build step', {timeout: 30000}, () => {
     renderDemo(0.02);
     expect(await screen.findByRole('button', {name: 'Use the suggested prompt'})).toBeTruthy();
     expect(requests).toHaveLength(0);
-    await sendPrompt();
-    expect(await screen.findByText(/Create a voice calling agent for this pizza shop/)).toBeTruthy();
+    await sendPrompt('Pizza place');
+    expect(await screen.findByText(/Create a voice calling agent for this pizza place/)).toBeTruthy();
     expect(screen.getByText('Reading the menu')).toBeTruthy();
     expect(screen.getByText('Getting a phone number')).toBeTruthy();
     expect(requests).toHaveLength(0);
-    await screen.findByText('Call to order');
+    await screen.findByText(STAGE_SHOPS.pizza.callerAction);
     // The only reads are the finale's pending approvals, after the number shows.
     expect(requests.every((r) => new URL(r.url).pathname === '/api/approvals')).toBe(true);
     expect(screen.getByText('(805) 555-0123')).toBeTruthy();
-    expect(screen.getByText('$15.00')).toBeTruthy();
-    expect(screen.getByText('$35.00')).toBeTruthy();
-    expect(screen.getByText("Woody's Waui")).toBeTruthy();
+    expect(screen.getByText('$15')).toBeTruthy();
+    expect(screen.getByText('$35')).toBeTruthy();
+    expect(screen.getByText('Supreme')).toBeTruthy();
     expect(screen.getByText('Waiting for the call')).toBeTruthy();
+  });
+
+  it("shows the barbershop's own number and its services", async () => {
+    renderDemo();
+    await reachNumber('Barbershop');
+    expect(screen.getByText(STAGE_SHOPS.barber.name)).toBeTruthy();
+    expect(screen.getByText('(805) 555-0124')).toBeTruthy();
+    expect(screen.getByText('Beard trim')).toBeTruthy();
+    expect(screen.queryByText('(805) 555-0123')).toBeNull();
   });
 
   it('still reaches the number when every API request fails', async () => {
@@ -170,15 +262,15 @@ describe('Demo run: the build step', {timeout: 30000}, () => {
   });
 
   it('says plainly that the number is not set in real mode', async () => {
-    vi.stubEnv('NEXT_PUBLIC_DEMO_PHONE_NUMBER', '');
+    vi.stubEnv('NEXT_PUBLIC_DEMO_PHONE_PIZZA', '');
     renderDemo();
     await reachNumber();
-    expect(screen.getByText(MISSING_NUMBER_TEXT)).toBeTruthy();
+    expect(screen.getByText(missingNumberText('pizza'))).toBeTruthy();
     expect(screen.queryByText(/\+1 \(/)).toBeNull();
   });
 
   it('falls back to the fixture number in mock mode', async () => {
-    vi.stubEnv('NEXT_PUBLIC_DEMO_PHONE_NUMBER', '');
+    vi.stubEnv('NEXT_PUBLIC_DEMO_PHONE_PIZZA', '');
     vi.stubEnv('NEXT_PUBLIC_MOCK', '1');
     renderDemo();
     await reachNumber();
@@ -312,6 +404,66 @@ describe('Demo run: the finale', {timeout: 30000}, () => {
     await reachNumber();
     await clickButton('Start over');
     expect(await screen.findByRole('button', {name: 'Use the suggested prompt'})).toBeTruthy();
-    expect(screen.queryByText('Call to order')).toBeNull();
+    expect(screen.queryByText(STAGE_SHOPS.pizza.callerAction)).toBeNull();
+    // The choice is cleared: no shop is attached, so the suggestion is off again.
+    expect(screen.getByText(NO_SHOP_TEXT)).toBeTruthy();
+    expect(screen.queryByText(MENU_PDF)).toBeNull();
+  });
+});
+
+describe('Demo run: the booking finale', {timeout: 30000}, () => {
+  async function bookingOnScreen(approveHoldMs = 0) {
+    renderDemo(0, approveHoldMs);
+    await reachNumber('Barbershop');
+    let approvalId = '';
+    await act(async () => {
+      ({approvalId} = await mockControls.startBookingCall());
+    });
+    expect(await screen.findByText('New booking')).toBeTruthy();
+    return approvalId;
+  }
+
+  it('shows the booking: service, date and time, customer, duration and a sandbox price', async () => {
+    await bookingOnScreen();
+    // The booking's customer shows once the booking itself has loaded.
+    expect(await screen.findByText(bookingVerified.customer.name)).toBeTruthy();
+    // The service shows in the services panel and on the card.
+    expect(screen.getAllByText('Haircut')).toHaveLength(2);
+    expect(screen.getByText(/^[A-Z][a-z]{2},\s[A-Z][a-z]{2}\s\d{1,2},\s\d{1,2}:\d\d\s[AP]M$/)).toBeTruthy();
+    expect(screen.getAllByText('30 minutes')).toHaveLength(2);
+    expect(screen.getAllByText('Sandbox').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('$30.00').length).toBeGreaterThan(0);
+    expect(screen.getByText(/^Expires in \d+:\d\d$/)).toBeTruthy();
+  });
+
+  it('sends exactly one decision and shows Approved only after the answer', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    server.use(
+      http.post(`${A}/approvals/:id/decision`, async () => {
+        await gate;
+      }),
+    );
+    const approvalId = await bookingOnScreen(300);
+    await screen.findByText(bookingVerified.customer.name);
+    const approve = await screen.findByRole('button', {name: 'Approve'});
+    await waitFor(() => expect(approve.getAttribute('aria-disabled')).not.toBe('true'));
+    requests.length = 0;
+    await click(approve);
+    await click(approve);
+    expect(await screen.findByText('Approving the booking')).toBeTruthy();
+    await waitFor(() => expect(decisionCalls()).toHaveLength(1));
+    expect(new URL(decisionCalls()[0]!.url).pathname).toBe(`/api/approvals/${approvalId}/decision`);
+    expect(decisionCalls()[0]!.headers.get('idempotency-key')).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 400));
+    expect(screen.queryByText('Approved')).toBeNull();
+    await act(async () => {
+      release();
+    });
+    expect((await screen.findAllByText('Approved', undefined, {timeout: 3000})).length).toBeGreaterThan(0);
+    expect(screen.getByText('The shop accepted this booking')).toBeTruthy();
+    expect(decisionCalls()).toHaveLength(1);
   });
 });

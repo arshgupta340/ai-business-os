@@ -5,7 +5,7 @@ import {Icon} from '@astryxdesign/core/Icon';
 import {List, ListItem} from '@astryxdesign/core/List';
 import {Spinner} from '@astryxdesign/core/Spinner';
 import {Text} from '@astryxdesign/core/Text';
-import {DEMO_STEPS} from './demo-steps';
+import {DEMO_STEPS, type DemoStepDefinition} from './demo-steps';
 import type {StepStatus} from './demo-machine';
 
 function StepIcon({status}: {status: StepStatus}) {
@@ -22,11 +22,11 @@ function StepIcon({status}: {status: StepStatus}) {
 
 const STATUS_TEXT: Record<StepStatus, string> = {pending: 'Next', running: 'Working', done: 'Done'};
 
-export function ProgressSteps({steps}: {steps: readonly StepStatus[]}) {
+export function ProgressSteps({steps, definitions = DEMO_STEPS}: {steps: readonly StepStatus[]; definitions?: readonly DemoStepDefinition[]}) {
   return (
     <Card>
       <List hasDividers>
-        {DEMO_STEPS.map((def, i) => {
+        {definitions.map((def, i) => {
           const status = steps[i] ?? 'pending';
           return (
             <ListItem
