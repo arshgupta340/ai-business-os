@@ -4,7 +4,7 @@ import {http, HttpResponse} from 'msw';
 import type {ReactNode} from 'react';
 import {useState} from 'react';
 import {QueryClientProvider} from '@tanstack/react-query';
-import {bookingVerified, STAGE_SHOPS} from '@abos/contracts/fixtures';
+import {bookingVerified, STAGE_SHOPS, type StageShopKey} from '@abos/contracts/fixtures';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {createApiQueryClient} from '@/lib/api/provider';
 import {BusinessProvider, useBusiness} from '@/lib/session';
@@ -64,20 +64,19 @@ async function clickButton(name: string | RegExp) {
   await click(button);
 }
 
-type Kind = 'Pizza place' | 'Barbershop' | 'Salon';
-
-async function pick(kind: Kind) {
-  await clickButton(kind);
+/** Attaches the shop's menu or service list, as the presenter does on stage. */
+async function attachShop(key: StageShopKey) {
+  await attach(pdf(STAGE_SHOPS[key].files.info));
 }
 
-async function sendPrompt(kind?: Kind) {
-  if (kind) await pick(kind);
+async function sendPrompt(key?: StageShopKey) {
+  if (key) await attachShop(key);
   await clickButton('Use the suggested prompt');
   await clickButton(/^send/i);
 }
 
-async function reachNumber(kind: Kind = 'Pizza place') {
-  await sendPrompt(kind);
+async function reachNumber(key: StageShopKey = 'pizza') {
+  await sendPrompt(key);
   await screen.findByText('Waiting for the call');
 }
 
@@ -116,7 +115,7 @@ describe('Build screen switch', () => {
   });
 });
 
-const pdf = (name: string) => new File(['%PDF'], name, {type: 'application/pdf'});
+const pdf = (name: string) => new File(['x'], name, {type: 'application/pdf'});
 const MENU_PDF = STAGE_SHOPS.pizza.files.info;
 const FAQ_PDF = STAGE_SHOPS.pizza.files.faq;
 
@@ -173,43 +172,76 @@ describe('Demo composer attachments', {timeout: 30000}, () => {
   });
 });
 
-describe('Demo composer: the business picker', {timeout: 30000}, () => {
-  it('offers the three shops with their kind and one line each', async () => {
+describe('Demo composer: the shop comes only from the attached files', {timeout: 30000}, () => {
+  it('lists no shops and says nothing about picking one', async () => {
     renderDemo();
-    expect(await screen.findByText('Pick a business')).toBeTruthy();
+    expect(await screen.findByText('Attach your menu or service list and your FAQs, then send.')).toBeTruthy();
+    expect(screen.getByText(NO_SHOP_TEXT)).toBeTruthy();
     for (const shop of Object.values(STAGE_SHOPS)) {
-      expect(screen.getByRole('button', {name: shop.kindLabel})).toBeTruthy();
-      expect(screen.getByText(shop.blurb)).toBeTruthy();
+      expect(screen.queryByText(shop.kindLabel)).toBeNull();
+      expect(screen.queryByText(shop.blurb)).toBeNull();
+      expect(screen.queryByText(shop.name)).toBeNull();
     }
+    expect(screen.queryByText(/pick/i)).toBeNull();
   });
 
-  it("attaches the picked shop's two files and replaces an earlier attachment", async () => {
-    renderDemo();
-    await screen.findByText('Pick a business');
-    await attach(pdf('extra.pdf'));
-    await pick('Barbershop');
-    expect(screen.getByText(STAGE_SHOPS.barber.files.info)).toBeTruthy();
-    expect(screen.getByText(STAGE_SHOPS.barber.files.faq)).toBeTruthy();
-    expect(screen.queryByText('extra.pdf')).toBeNull();
-    await pick('Salon');
-    expect(screen.getByText(STAGE_SHOPS.salon.files.info)).toBeTruthy();
-    expect(screen.queryByText(STAGE_SHOPS.barber.files.info)).toBeNull();
-    await clickButton('Use the suggested prompt');
-    await clickButton(/^send/i);
-    // The salon is not one of the seeded businesses here: one plain line, and the steps do not start.
+  it.each([
+    ['pizza', 'info', /Create a voice calling agent for this pizza place/, 'Reading the menu'],
+    ['pizza', 'faq', /Create a voice calling agent for this pizza place/, 'Reading the menu'],
+    ['barber', 'info', /Create a voice calling agent for this barbershop/, 'Reading the services'],
+    ['barber', 'faq', /Create a voice calling agent for this barbershop/, 'Reading the services'],
+  ] as const)("the %s shop's %s file alone selects it and sends", async (key, which, prompt, firstStep) => {
+    renderDemo(0.02);
+    await screen.findByText(NO_SHOP_TEXT);
+    await attach(pdf(STAGE_SHOPS[key].files[which]));
+    expect(screen.queryByText(NO_SHOP_TEXT)).toBeNull();
+    await sendPrompt();
+    expect(await screen.findByText(prompt)).toBeTruthy();
+    expect(screen.getByText(firstStep)).toBeTruthy();
+    await waitFor(() => expect(selected()).toBe(STAGE_SHOPS[key].businessId));
+  });
+
+  it("the salon's file selects the salon, which is not a seeded business here: one plain line, and no steps", async () => {
+    renderDemo(0.02);
+    await attach(pdf(STAGE_SHOPS.salon.files.faq));
+    await sendPrompt();
     expect(await screen.findByText(shopNotFoundText(STAGE_SHOPS.salon))).toBeTruthy();
     expect(screen.queryByText('Reading the services')).toBeNull();
-    expect(screen.getByText('Pick a business')).toBeTruthy();
+    expect(selected()).toBe(STAGE_SHOPS.pizza.businessId);
   });
 
-  it('switches the selected business to the chosen shop on send', async () => {
+  it('an unrecognized file leaves the suggested prompt off and Send does nothing', async () => {
     renderDemo(0.02);
-    await screen.findByText('Pick a business');
-    await waitFor(() => expect(selected()).toBe(STAGE_SHOPS.pizza.businessId));
-    await sendPrompt('Barbershop');
-    await waitFor(() => expect(selected()).toBe(STAGE_SHOPS.barber.businessId));
+    await attach(pdf('OurMenu.pdf'), pdf('FAQ.pdf'));
+    expect(screen.getByText('OurMenu.pdf')).toBeTruthy();
+    expect(screen.getByText(NO_SHOP_TEXT)).toBeTruthy();
+    const suggest = screen.getByRole('button', {name: 'Use the suggested prompt'});
+    expect(suggest.getAttribute('aria-disabled') === 'true' || (suggest as HTMLButtonElement).disabled).toBe(true);
+    await click(suggest);
+    const send = screen.queryByRole('button', {name: /^send/i});
+    if (send) await click(send);
+    expect(screen.queryByText(/Create a voice calling agent/)).toBeNull();
+    expect(screen.queryByText('Reading the menu')).toBeNull();
+    expect(screen.queryByText('Reading the services')).toBeNull();
+  });
+
+  it("with two shops' files attached, the first attached file decides", async () => {
+    renderDemo(0.02);
+    await attach(pdf(STAGE_SHOPS.barber.files.info));
+    await attach(pdf(STAGE_SHOPS.pizza.files.info));
+    await sendPrompt();
     expect(await screen.findByText(/Create a voice calling agent for this barbershop/)).toBeTruthy();
-    expect(screen.getByText('Reading the services')).toBeTruthy();
+    await waitFor(() => expect(selected()).toBe(STAGE_SHOPS.barber.businessId));
+  });
+
+  it('removing the deciding file hands the choice to the next recognized file', async () => {
+    renderDemo(0.02);
+    await attach(pdf(STAGE_SHOPS.barber.files.info), pdf(STAGE_SHOPS.pizza.files.faq));
+    const removeButtons = screen.getAllByRole('button', {name: /remove/i});
+    const removeBarber = removeButtons.find((b) => (b.getAttribute('aria-label') ?? '').includes(STAGE_SHOPS.barber.files.info)) ?? removeButtons[0]!;
+    await click(removeBarber);
+    await sendPrompt();
+    expect(await screen.findByText(/Create a voice calling agent for this pizza place/)).toBeTruthy();
   });
 
   it('removes one attached file with its token', async () => {
@@ -229,7 +261,7 @@ describe('Demo run: the build step', {timeout: 30000}, () => {
     renderDemo(0.02);
     expect(await screen.findByRole('button', {name: 'Use the suggested prompt'})).toBeTruthy();
     expect(requests).toHaveLength(0);
-    await sendPrompt('Pizza place');
+    await sendPrompt('pizza');
     expect(await screen.findByText(/Create a voice calling agent for this pizza place/)).toBeTruthy();
     expect(screen.getByText('Reading the menu')).toBeTruthy();
     expect(screen.getByText('Getting a phone number')).toBeTruthy();
@@ -246,7 +278,7 @@ describe('Demo run: the build step', {timeout: 30000}, () => {
 
   it("shows the barbershop's own number and its services", async () => {
     renderDemo();
-    await reachNumber('Barbershop');
+    await reachNumber('barber');
     expect(screen.getByText(STAGE_SHOPS.barber.name)).toBeTruthy();
     expect(screen.getByText('(805) 555-0124')).toBeTruthy();
     expect(screen.getByText('Beard trim')).toBeTruthy();
@@ -414,7 +446,7 @@ describe('Demo run: the finale', {timeout: 30000}, () => {
 describe('Demo run: the booking finale', {timeout: 30000}, () => {
   async function bookingOnScreen(approveHoldMs = 0) {
     renderDemo(0, approveHoldMs);
-    await reachNumber('Barbershop');
+    await reachNumber('barber');
     let approvalId = '';
     await act(async () => {
       ({approvalId} = await mockControls.startBookingCall());

@@ -40,8 +40,8 @@ export function missingNumberText(key: StageShopKey): string {
   return `The phone number of this shop is not set. Set ${PHONE_SETTING[key]} and build the app again.`;
 }
 
-/** Shown under the picker while no attached file selects a shop. */
-export const NO_SHOP_TEXT = 'Pick a business above, or attach its two files, to use the suggested prompt.';
+/** Shown next to the suggested prompt while no attached file selects a shop. */
+export const NO_SHOP_TEXT = 'Attach your business files to use the suggested prompt.';
 
 /** Shown when the chosen shop is not one of the owner's businesses. The steps do not start. */
 export function shopNotFoundText(shop: StageShop): string {

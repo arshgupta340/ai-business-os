@@ -4,11 +4,11 @@
 // "ChatComposerFullFeatured" block: one composer with a suggestion, and an
 // attachment drawer that shows one token per attached file. Heroicons and the model menus
 // were removed. The message is plain text: pasted menus are data, never markup.
-// Above the composer, a picker of the three stage shops: the judge picks one,
-// and its two file names are attached as if the PDFs had been picked.
+// The shop is chosen only by the files attached: the first file whose name is
+// a stage shop's file decides it. Nothing on screen lists the shops.
 
 import {useState} from 'react';
-import {stageShops, type StageShop, type StageShopKey} from '@abos/contracts/fixtures';
+import type {StageShopKey} from '@abos/contracts/fixtures';
 import {Button} from '@astryxdesign/core/Button';
 import {Card} from '@astryxdesign/core/Card';
 import {
@@ -19,10 +19,7 @@ import {
   ChatMessageBubble,
   ChatMessageList,
 } from '@astryxdesign/core/Chat';
-import {ClickableCard} from '@astryxdesign/core/ClickableCard';
 import {FileInput} from '@astryxdesign/core/FileInput';
-import {Grid} from '@astryxdesign/core/Grid';
-import {Heading} from '@astryxdesign/core/Heading';
 import {HStack} from '@astryxdesign/core/HStack';
 import {Text} from '@astryxdesign/core/Text';
 import {Token} from '@astryxdesign/core/Token';
@@ -53,14 +50,6 @@ export function addFiles(current: readonly File[], picked: File | File[] | null)
   return next;
 }
 
-/**
- * The two files of a shop, as if they had been attached. They are empty
- * stand-ins: on stage nothing is uploaded, only the names show and select the shop.
- */
-export function shopFiles(shop: StageShop): File[] {
-  return [shop.files.info, shop.files.faq].map((name) => new File([], name, {type: 'application/pdf'}));
-}
-
 export function DemoChat({message, onSend, error}: DemoChatProps) {
   const [draft, setDraft] = useState('');
   const [files, setFiles] = useState<File[]>([]);
@@ -82,7 +71,7 @@ export function DemoChat({message, onSend, error}: DemoChatProps) {
               value={draft}
               onChange={setDraft}
               onSubmit={submit}
-              placeholder="Attach the shop's two files, then send"
+              placeholder="Attach your files, then send"
               drawer={
                 files.length ? (
                   <ChatComposerDrawer count={files.length}>
@@ -94,7 +83,7 @@ export function DemoChat({message, onSend, error}: DemoChatProps) {
               }
               footerActions={
                 <FileInput
-                  label="Attach the shop's files"
+                  label="Attach your files"
                   isLabelHidden
                   isMultiple
                   // The tokens above list the files, so the field always reads "Attach files".
@@ -132,8 +121,7 @@ export function DemoChat({message, onSend, error}: DemoChatProps) {
             <ChatMessage sender="assistant" name={null}>
               <ChatMessageBubble variant="ghost" width="100%">
                 <VStack gap={3}>
-                  <ShopPicker selected={shop?.key ?? null} onPick={(picked) => setFiles(shopFiles(picked))} />
-                  <Text type="large">Attach the shop&apos;s two files, then send.</Text>
+                  <Text type="large">Attach your menu or service list and your FAQs, then send.</Text>
                   <HStack gap={3} vAlign="center" wrap="wrap">
                     <Button
                       label="Use the suggested prompt"
@@ -156,25 +144,3 @@ export function DemoChat({message, onSend, error}: DemoChatProps) {
   );
 }
 
-/** The judge's choice: three shops, each with its kind and one line. Picking one replaces the attached files. */
-export function ShopPicker({selected, onPick}: {selected: StageShopKey | null; onPick: (shop: StageShop) => void}) {
-  return (
-    <VStack gap={2}>
-      <Heading level={2}>Pick a business</Heading>
-      <Grid columns={{minWidth: 180, max: 3}} gap={3}>
-        {stageShops.map((s) => (
-          <ClickableCard key={s.key} label={s.kindLabel} onClick={() => onPick(s)} variant={selected === s.key ? 'blue' : 'default'}>
-            <VStack gap={1}>
-              <Text type="large" weight="semibold">
-                {s.kindLabel}
-              </Text>
-              <Text type="body" color="secondary">
-                {s.blurb}
-              </Text>
-            </VStack>
-          </ClickableCard>
-        ))}
-      </Grid>
-    </VStack>
-  );
-}

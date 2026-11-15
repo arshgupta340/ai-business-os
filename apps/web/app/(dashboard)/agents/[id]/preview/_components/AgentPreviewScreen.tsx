@@ -205,7 +205,7 @@ export function AgentPreviewScreen({agentId}: {agentId: string}) {
   const timeZone = business?.timezone ?? 'UTC';
 
   if (!businessId) {
-    return <EmptyState title="Choose a business" description="Pick a business in the top bar to see its agents." />;
+    return <EmptyState title="Choose a business" description="Choose a business in the top bar to see its agents." />;
   }
   if (agent.isPending) return <LoadingState label="Loading the agent" />;
   if (agent.error) {
