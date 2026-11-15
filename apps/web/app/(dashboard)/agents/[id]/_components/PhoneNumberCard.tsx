@@ -9,7 +9,8 @@ import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {LoadingState} from '@/components/LoadingState';
 import {StatusBadge} from '@/components/StatusBadge';
-import {useAgents, useLiveAgent, useSetLiveAgent, type Agent} from '@/lib/api';
+import {useAgents, useSetLiveAgent, type Agent} from '@/lib/api';
+import {useShopLiveAgent} from '@/lib/demo-shop-line';
 import {formatRelative} from '@/lib/format';
 import {useBusiness} from '@/lib/session';
 import {ErrorNotice} from '../../_components/ErrorNotice';
@@ -24,7 +25,7 @@ import {ConfirmDialog} from './ConfirmDialog';
  */
 export function PhoneNumberCard({businessId, agent, timeZone}: {businessId: string; agent: Agent; timeZone: string}) {
   const {businesses} = useBusiness();
-  const liveAgent = useLiveAgent();
+  const liveAgent = useShopLiveAgent();
   const agents = useAgents(businessId);
   const setLive = useSetLiveAgent();
   const [isOpen, setOpen] = useState(false);

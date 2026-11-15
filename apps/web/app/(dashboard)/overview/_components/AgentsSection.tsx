@@ -10,7 +10,8 @@ import {VStack} from '@astryxdesign/core/VStack';
 import {EmptyState} from '@/components/EmptyState';
 import {LoadingState} from '@/components/LoadingState';
 import {StatusBadge} from '@/components/StatusBadge';
-import {useAgents, useLiveAgent, type Agent, type LiveAgent} from '@/lib/api';
+import {useAgents, type Agent, type LiveAgent} from '@/lib/api';
+import {useShopLiveAgent} from '@/lib/demo-shop-line';
 import {lastFour} from '@/lib/format';
 import {useDemoHidesAgents} from '@/lib/demo-stage';
 import {useBusiness} from '@/lib/session';
@@ -70,7 +71,7 @@ function NumberNote({agents, liveAgent}: {agents: Agent[]; liveAgent?: LiveAgent
 
 export function AgentsSection({businessId}: {businessId: string}) {
   const agents = useAgents(businessId);
-  const liveAgent = useLiveAgent();
+  const liveAgent = useShopLiveAgent();
   // The scripted demo shows no agent until its build step has reached the phone number.
   const hidden = useDemoHidesAgents(businessId);
 
