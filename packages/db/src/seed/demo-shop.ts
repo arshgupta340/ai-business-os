@@ -1,12 +1,13 @@
 // npm run seed:demo-shop (issue #161): loads the demo shop for the pizza business. The menu goes to the
 // Square SANDBOX catalog and to catalog_items (seedSquareCatalog with `menu`), and the shop's facts
-// (hours, address, policies, FAQs) become the verified facts. Safe to run twice.
+// (hours, address, policies, FAQs) become the verified facts, and the business is named after the shop.
+// Safe to run twice.
 //
 // Facts are versioned, never edited: a fact whose value differs gets a new verified row that supersedes
 // the old one, as an owner edit does. A reset (npm run reset) puts the two-pizza seed facts back; run this
 // again after one.
 
-import { demoShopCatalog, demoShopFacts, demoShopRetiredFacts, pizzaBusiness, type DemoShopFact } from '@abos/contracts/fixtures';
+import { DEMO_SHOP_NAME, demoShopCatalog, demoShopFacts, demoShopRetiredFacts, pizzaBusiness, type DemoShopFact } from '@abos/contracts/fixtures';
 import { inTransaction, tally, type SeedDb, type TableTally } from './db';
 import { seedSquareCatalog, type SquareSeedOptions, type SquareSeedSummary } from './square';
 
@@ -28,6 +29,9 @@ export async function applyDemoShopFacts(db: SeedDb, now: () => Date = () => new
   const tables: TableTally = {};
   let retired = 0;
   await inTransaction(db, async () => {
+    // The business row carries the name the dashboard shows and the phone agent says.
+    const renamed = await db.query('update public.businesses set name = $2 where id = $1 and name is distinct from $2 returning id', [businessId, DEMO_SHOP_NAME]);
+    tally(tables, 'businesses', renamed.rows.length > 0 ? 'updated' : 'unchanged');
     for (const f of facts) {
       const value = JSON.stringify(f.value);
       const cur = (await db.query<{ id: string; same: boolean }>(

@@ -10,6 +10,9 @@
 import { PIZZA_BUSINESS_ID, type CatalogItem, type HoursKey, type HoursValue } from '../src/index';
 import { CATALOG_SYNCED_AT } from './catalog';
 
+/** The shop's name (Arsh, 2026-11-14). The seed writes it to the business row; the phone agent reads it from there. */
+export const DEMO_SHOP_NAME = "Woodstock's Pizza";
+
 export const DEMO_SHOP_SIZES = [
   { code: 'SM', name: 'Small', inches: 8, priceMinor: 1495 },
   { code: 'MD', name: 'Medium', inches: 12, priceMinor: 2595 },

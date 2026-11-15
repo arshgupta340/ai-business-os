@@ -59,7 +59,7 @@ export function agentPhoneChannelLines(greeting: string, businessName?: string |
     `The call was already opened for you with this greeting: "${greeting}" Do not greet the caller again and do not repeat the greeting or the AI disclosure. Ignore the line above that tells you to speak first or how to open.`,
     'After propose_order or propose_booking succeeds, the server says the closing line and ends the call. Reply with one word, "Done.", and nothing else.',
     // The spec's own greeting can carry an older name (a call on 2026-11-14 said "Demo Pizza Co." after the rename).
-    ...(name ? [`The shop is called "${name}". Say only that name for the shop, also where a line above uses another name.`] : []),
+    ...(name ? [`The shop is called "${name}". Say only that name for the shop, also where a line above uses another name. If the caller asks who you are or what your name is, say you are the AI assistant for ${name}.`] : []),
   ].join('\n');
 }
 

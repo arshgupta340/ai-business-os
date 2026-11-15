@@ -75,6 +75,7 @@ describe('AgentPhone on the realtime turn engine', () => {
     expect(session.instructions).toContain('Never write a dollar sign');
     // The business record's name is the one the agent says, whatever the spec's greeting carries.
     expect(session.instructions).toContain('The shop is called "Demo Pizza Co.". Say only that name for the shop');
+    expect(session.instructions).toContain('say you are the AI assistant for Demo Pizza Co.');
 
     const t2 = await signed(w, voiceTurn('call_rt_1', 'How much is a large pepperoni?'));
     expect(finalChunk(t2.payload)).toEqual({ text: 'A large pepperoni is fifteen dollars.' });

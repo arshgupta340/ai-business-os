@@ -13,7 +13,7 @@
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { REALTIME_MODEL, type ToolName } from '@abos/contracts';
-import { demoShopCatalog, demoShopFacts, pizzaCatalog, pizzaSpecV2, pizzaVerifiedFacts } from '@abos/contracts/fixtures';
+import { DEMO_SHOP_NAME, demoShopCatalog, demoShopFacts, pizzaCatalog, pizzaSpecV2, pizzaVerifiedFacts } from '@abos/contracts/fixtures';
 import { createMockToolset } from '../../apps/server/src/tools/mock/index';
 import { buildInstructions } from '../../apps/server/src/voice/prompt';
 import { checkSessionCapabilities, createWsOpenAISocketFactory } from '../../apps/server/src/voice/relay';
@@ -32,7 +32,7 @@ const callerLines = process.argv.length > 2 ? process.argv.slice(2) : DEFAULT_LI
 
 // DEMO_SHOP=1 runs the call on the demo shop's menu and facts (issue #161) in place of the two-pizza fixture.
 const demoShop = process.env.DEMO_SHOP === '1';
-const businessName = demoShop ? 'Pizza Co.' : 'Demo Pizza Co.';
+const businessName = demoShop ? DEMO_SHOP_NAME : 'Demo Pizza Co.';
 const spec = pizzaSpecV2;
 const menu = demoShop ? demoShopCatalog : pizzaCatalog;
 const facts: FactsSnapshot = {

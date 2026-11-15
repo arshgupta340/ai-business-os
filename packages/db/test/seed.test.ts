@@ -345,6 +345,9 @@ describe('seed:demo-shop (issue #161)', () => {
     const second = await seedDemoShop(sdb, { env: BASE_ENV, client: square, now: () => new Date('2026-11-14T10:00:00Z') });
     expect(second.catalog.upserted).toBe(false);
     expect(second.facts.business_facts).toEqual({ created: 0, updated: 0, unchanged: demoShopFacts.length });
+    expect(first.facts.businesses).toEqual({ created: 0, updated: 1, unchanged: 0 });
+    expect(second.facts.businesses).toEqual({ created: 0, updated: 0, unchanged: 1 });
+    expect((await db.query<{ name: string }>("select name from public.businesses where id = 'biz_pizza_01'")).rows[0]!.name).toBe("Woodstock's Pizza");
     expect(second.retired).toBe(0);
     expect(await checksum(db)).toEqual(sum);
   });
