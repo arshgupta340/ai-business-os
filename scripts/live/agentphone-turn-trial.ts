@@ -51,7 +51,7 @@ if (!check.ok) throw new Error('the fixture spec has a capability that is not al
 const tools: readonly ToolName[] = check.tools;
 const toolset = createMockToolset({ businessId: spec.businessId, now: () => now,
   ...(stage ? { catalog: stage.catalog, facts: stageFactList.map((f) => ({ ...f, businessId: stage.businessId, status: 'verified' })) as never } : {}) });
-const greeting = agentPhoneGreeting(businessName, spec.template, process.env.AGENTPHONE_GREETING);
+const greeting = agentPhoneGreeting(businessName, spec.template, process.env.AGENTPHONE_GREETING, stage?.services.map((x) => x.name));
 const instructions = `${buildInstructions(spec, { businessName, messageChannel: 'qr_only', facts, menu, nowMs: now.getTime() })}\n${agentPhoneChannelLines(greeting, businessName)}`;
 const words = (t: string) => t.split(/\s+/).filter(Boolean).length;
 

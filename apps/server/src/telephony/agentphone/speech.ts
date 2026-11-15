@@ -13,15 +13,33 @@ function nameSentence(businessName: string): string {
   return name.endsWith('.') ? name : `${name}.`;
 }
 
+/** "a haircut", "an updo": the service name as it is said in a sentence. */
+function aService(name: string): string {
+  const said = name.trim().toLowerCase();
+  return `${/^[aeiou]/.test(said) ? 'an' : 'a'} ${said}`;
+}
+
+/** At most this many services are named in the greeting; a longer list is not read out at pickup. */
+export const GREETING_MAX_SERVICES = 5;
+
 /**
- * The short opening line, about 14 words, with the AI disclosure. `override` is AGENTPHONE_GREETING; it is
- * used only when it carries the words "AI assistant" (any case), otherwise the default is used.
+ * The opening line, with the AI disclosure. `override` is AGENTPHONE_GREETING; it is used only when it
+ * carries the words "AI assistant" (any case), otherwise the default is used.
+ *
+ * A booking line names its services and asks what the caller wants (Arsh, 2026-11-15: after "How can I help
+ * you?" the caller had to ask what the shop offers, and the call began with a silence). `services` are the
+ * shop's service names; with none, or more than GREETING_MAX_SERVICES, the short line is used.
  */
-export function agentPhoneGreeting(businessName: string, template: AgentSpec['template'] | undefined, override?: string | undefined): string {
+export function agentPhoneGreeting(businessName: string, template: AgentSpec['template'] | undefined, override?: string | undefined, services?: readonly string[] | undefined): string {
   const custom = override?.trim();
   if (custom && /\bAI assistant\b/i.test(custom) && custom.length <= 300) return custom;
-  const ask = template === 'appointment_booker' ? 'How can I help you?' : 'What can I get you?';
-  return `Thanks for calling ${nameSentence(businessName)} ${GREETING_DISCLOSURE} ${ask}`;
+  const lead = `Thanks for calling ${nameSentence(businessName)} ${GREETING_DISCLOSURE}`;
+  if (template !== 'appointment_booker') return `${lead} What can I get you?`;
+  const names = (services ?? []).map((n) => n.trim()).filter((n) => n !== '' && /^[\p{L}][\p{L} '-]*$/u.test(n) && n.length <= 40);
+  if (names.length === 0 || names.length > GREETING_MAX_SERVICES) return `${lead} How can I help you?`;
+  const said = names.map(aService);
+  const list = said.length === 1 ? said[0] : `${said.slice(0, -1).join(', ')}, or ${said[said.length - 1]}`;
+  return `${lead} I can book you ${list}, and answer any questions. What would you like to do?`;
 }
 
 /**
