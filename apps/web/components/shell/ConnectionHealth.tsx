@@ -4,6 +4,7 @@ import {HStack} from '@astryxdesign/core/HStack';
 import {Link} from '@astryxdesign/core/Link';
 import {isDemoScript, isMockMode} from '@/lib/env';
 import {hideEverythingUntil} from '@/lib/demo-reset';
+import {clearDemoAgentBuilt} from '@/lib/demo-stage';
 import {clearDemoRun} from '@/app/(dashboard)/build/demo/demo-run-store';
 import {useIntegrationsHealth, type IntegrationHealth, type IntegrationProvider} from '@/lib/api';
 import {useBusiness} from '@/lib/session';
@@ -88,12 +89,15 @@ export function summarizeHealth(health: IntegrationHealth): HealthSummary {
 /**
  * The demo reset (Arsh, 2026-11-15). On the scripted demo build the badge
  * keeps its look and, when pressed, puts the app back to its starting page:
- * the saved Build run is dropped, the lists of calls, orders, bookings,
+ * the saved Build run is dropped, the agent card is hidden again until the
+ * next build, the lists of calls, orders, bookings,
  * approvals and activity leave out everything up to now, and the Build page is
  * loaded afresh. Nothing is deleted on the server (lib/demo-reset.ts).
  */
 export function resetDemo(now: number = Date.now(), go: (url: string) => void = (url) => window.location.assign(url)): void {
   clearDemoRun();
+  // Overview and My Agents show no agent again until the next build reaches its number.
+  clearDemoAgentBuilt();
   hideEverythingUntil(now);
   go('/build');
 }

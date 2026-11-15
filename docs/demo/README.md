@@ -10,6 +10,8 @@ The demo offers three made-up businesses. A judge says which one they want. The 
 | Classic Cuts Barbershop (barbershop) | `ClassicCutsServices.pdf`, `ClassicCutsFAQs.pdf` | Books an appointment |
 | Glow Hair Salon (salon) | `GlowHairSalonServices.pdf`, `GlowHairSalonFAQs.pdf` | Books an appointment |
 
+To run the demo screen on another laptop, follow `RUN-ON-A-LAPTOP.md`.
+
 `DemoScript.md` is the script. It was written for the one-shop demo and its lines still name the old shop; see the note at its top.
 
 ## How the files are used
@@ -39,7 +41,7 @@ NEXT_PUBLIC_DEMO_PHONE_BARBER=<the barbershop line>
 NEXT_PUBLIC_DEMO_PHONE_SALON=<the salon line>
 ```
 
-Sign in and open Build. Load the page once before presenting. Use "Start over" between rehearsals.
+Sign in and open Build. Load the page once before presenting. Between rehearsals, press "Integrations OK" in the top right: it puts the app back to the empty Build page and clears the lists on this laptop, without deleting anything. "Start over" clears only the Build page.
 
 ## Before presenting
 

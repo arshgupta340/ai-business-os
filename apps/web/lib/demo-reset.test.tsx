@@ -13,6 +13,7 @@ import {BusinessProvider} from '@/lib/session';
 import {useMockServer} from '@/mocks/test-setup';
 import {ConnectionHealth, resetDemo} from '@/components/shell/ConnectionHealth';
 import {DEMO_RUN_STORAGE_KEY} from '@/app/(dashboard)/build/demo/demo-run-store';
+import {markDemoAgentBuilt} from './demo-stage';
 import {HIDDEN_BEFORE_STORAGE_KEY, hideEverythingUntil, newerThan, readHiddenBefore, showEverythingAgain} from './demo-reset';
 
 vi.mock('next/navigation', () => ({
@@ -85,9 +86,14 @@ describe('demo reset: the lists', () => {
 describe('demo reset: the badge', () => {
   it('drops the saved Build run, stores the moment and loads the Build page afresh', () => {
     window.sessionStorage.setItem(DEMO_RUN_STORAGE_KEY, '{"shopKey":"barber"}');
+    // The last build reached its number, so Overview and My Agents show that shop's agent.
+    markDemoAgentBuilt('biz_barber_01');
+    expect(window.sessionStorage.getItem('abos.demo.agentBuilt')).toBe('biz_barber_01');
     const go = vi.fn();
     resetDemo(1_794_700_000_000, go);
     expect(window.sessionStorage.getItem(DEMO_RUN_STORAGE_KEY)).toBeNull();
+    // After a reset the agent card is gone until the next build (Arsh, 2026-11-15).
+    expect(window.sessionStorage.getItem('abos.demo.agentBuilt')).toBeNull();
     expect(readHiddenBefore()).toBe(1_794_700_000_000);
     expect(go).toHaveBeenCalledWith('/build');
   });
