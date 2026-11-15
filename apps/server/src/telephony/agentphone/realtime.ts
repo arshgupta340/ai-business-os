@@ -93,6 +93,8 @@ type Pending = {
   tools: ToolEvent[];
   hooks: TurnHooks;
   busy: boolean;
+  /** An answer with no words and no function call was asked for once more. */
+  retriedEmpty: boolean;
 };
 
 /** Opens the session and waits until it confirms its settings. Rejects if it does not in time. */
@@ -206,7 +208,18 @@ export function openRealtimeCall(deps: RealtimeCallDeps): Promise<RealtimeCall> 
       .map((o) => (Array.isArray(o.content) ? (o.content as unknown[]).map((c) => str(obj(c), 'text') ?? str(obj(c), 'transcript') ?? '').join(' ') : ''))
       .join(' ').replace(/\s+/g, ' ').trim();
     const calls = output.filter((o) => o.type === OAI_ITEM.functionCall);
-    if (calls.length === 0) { finish({ kind: 'reply', text, toolCalls: p.toolCalls, tools: p.tools }); return; }
+    if (calls.length === 0) {
+      // No words and no function call (seen on a call on 2026-11-14, where the caller then heard "I did not
+      // catch that"): the model is asked once more before the turn ends with nothing to say.
+      if (text === '' && !p.retriedEmpty && !p.hooks.abandoned?.() && p.rounds < MAX_ROUNDS_PER_TURN) {
+        p.retriedEmpty = true;
+        p.rounds += 1;
+        send({ type: OAI_CLIENT.responseCreate });
+        return;
+      }
+      finish({ kind: 'reply', text, toolCalls: p.toolCalls, tools: p.tools });
+      return;
+    }
     p.busy = true;
     let limitHit = false;
     for (const call of calls) {
@@ -260,7 +273,7 @@ export function openRealtimeCall(deps: RealtimeCallDeps): Promise<RealtimeCall> 
       const run = chain.then(() => new Promise<RealtimeTurnResult>((resolve, reject) => {
         if (closed) { reject(new RealtimeEngineError('closed')); return; }
         if (idleTimer) clearTimeout(idleTimer);
-        pending = { resolve, reject, rounds: 1, toolCalls: 0, tools: [], hooks, busy: false };
+        pending = { resolve, reject, rounds: 1, toolCalls: 0, tools: [], hooks, busy: false, retriedEmpty: false };
         turnTimer = setTimeout(() => close('turn_limit'), deps.turnLimitMs ?? REALTIME_TURN_LIMIT_MS);
         (turnTimer as { unref?: () => void }).unref?.();
         send({ type: OAI_CLIENT.itemCreate, item: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } });

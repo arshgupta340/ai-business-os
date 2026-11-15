@@ -5,6 +5,7 @@ import type { AgentSpec, CatalogItem, MessageChannelSetting } from '@abos/contra
 import type { CallDecision, FactsSnapshot } from './types';
 import { buildKnowledge } from './knowledge';
 import { spokenText } from './logic';
+import { ORDER_PREP_MINUTES } from '../tools/real/time';
 
 export type InstructionFacts = {
   businessName: string;
@@ -195,6 +196,18 @@ function knownLine(topics: string[]): string {
   return `You already know the shop data at the end of these instructions. Answer questions about ${list} from it at once, with no tool call.`;
 }
 
+// From the owner's call of 2026-11-14 on the AgentPhone line: the agent refused to give a total before it
+// had a name and a time, asked for a clock time after "in twenty minutes", and let the call end with the
+// order read back and never sent.
+const TOTAL_ON_REQUEST_LINE = 'If the caller asks for the price or the total at any point, call quote_order at once with the items so far and say the total with tax. Never ask for a name or a time first. Then ask the next missing question. A total you already have stays good while the cart is unchanged: do not call quote_order for the same cart twice.';
+function prepLine(knowsNow: boolean): string {
+  const base = `An order takes ${ORDER_PREP_MINUTES} minutes to prepare, so the earliest pickup is ${ORDER_PREP_MINUTES} minutes from now. If the caller asks for sooner, say the earliest time as a clock time and ask if it works.`;
+  if (!knowsNow) return base;
+  return `${base} Work the pickup time out yourself from the "Now" line in the shop data: "in twenty minutes", "in half an hour" and "as soon as possible" are answers, so never ask for a clock time after one of them. "As soon as possible" means ${ORDER_PREP_MINUTES} minutes from now. In the read-back say the pickup time as a clock time.`;
+}
+const CONFIRM_LINE = 'The order is sent only after a yes to that question. "Yes", "sure", "okay", "sounds good" and "go ahead" are a yes. If the caller answers with something that is not a yes, a no or a change, such as "thank you" or "that is it", ask again: "Shall I send it to the shop?" Do not let the call end with an order read back and neither sent nor refused.';
+const NO_OPTION_LINE = 'If the caller asks for a change the menu has no option for, such as leaving an ingredient off, say once: "I cannot add that here. Please ask at the counter at pickup." Keep the order as it is and go back to the question you were on.';
+
 /** How the agent talks. The same for every template. */
 const STYLE_LINES = [
   'Talk like a quick, friendly person at the counter. One short sentence at a time.',
@@ -236,6 +249,9 @@ export function buildInstructions(spec: AgentSpec, facts: InstructionFacts): str
       knowledge?.hasHours === true
         ? 'If the pickup time is in the past or outside the opening hours, say when the shop is open that day and ask for another time.'
         : 'Check the pickup time against the opening hours.',
+      prepLine(known),
+      TOTAL_ON_REQUEST_LINE,
+      NO_OPTION_LINE,
     );
     if (offer !== undefined) {
       lines.push(TEXT_STEP_LINE, TEXT_CHANGE_ORDER_LINE);
@@ -249,6 +265,7 @@ export function buildInstructions(spec: AgentSpec, facts: InstructionFacts): str
     }
     lines.push(
       'As soon as you have the items, the name and the time, call quote_order and do not announce it. When the total comes back, read the order back in one sentence, with every item, the total, the name, the pickup time and the number if there is one, and ask: "Shall I send this to the shop for approval?" The pattern is: "One large pepperoni, {total} with tax, for {name} at {time}. Shall I send this to the shop for approval?" Call propose_order only after a yes.',
+      CONFIRM_LINE,
       offer !== undefined ? TEXT_READBACK_LINE : READBACK_LINE,
       CANNOT_TAKE_LINE,
       offer !== undefined

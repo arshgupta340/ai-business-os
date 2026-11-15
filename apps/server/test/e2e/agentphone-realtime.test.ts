@@ -17,6 +17,7 @@ const CART: Cart = { lines: [{ catalogItemId: 'SQ_ITEM_PEP', variationId: 'SQ_VA
 const AP_ENV = { TELEPHONY_PROVIDER: 'agentphone', AGENTPHONE_API_KEY: 'test-agentphone-key', AGENTPHONE_WEBHOOK_SECRET: SECRET,
   AGENTPHONE_NUMBER_ID: 'num_e2e', AGENTPHONE_PHONE_NUMBER: PHONE };
 const GREETING = 'Thanks for calling Demo Pizza Co. This is an AI assistant. What can I get you?';
+const LEAD = 'Thanks for calling Demo Pizza Co. This is an AI assistant.';
 
 type Line = { level: string; data: Record<string, unknown>; msg: string };
 function capturingLog(lines: Line[]): SeamDeps['log'] {
@@ -63,8 +64,8 @@ describe('AgentPhone on the realtime turn engine', () => {
     );
     const t1 = await signed(w, voiceTurn('call_rt_1', 'What time do you close tonight?'));
     expect(t1.statusCode).toBe(200);
-    // The first event of the call carried words: the server's greeting comes first, then the answer.
-    expect(finalChunk(t1.payload)).toEqual({ text: `${GREETING} We close at ten tonight.` });
+    // The first event of the call carried a request: the shop name and the AI disclosure, then the answer.
+    expect(finalChunk(t1.payload)).toEqual({ text: `${LEAD} We close at ten tonight.` });
     expect(w.app.composed.agentphone.voice!.engineOf('call_rt_1')).toBe('realtime');
     // One session, opened with the phone prompt, the shop data and this channel's lines.
     const session = fake.session()!.session as { instructions: string; output_modalities: string[] };
@@ -123,12 +124,25 @@ describe('AgentPhone on the realtime turn engine', () => {
     expect(finalChunk(third.payload).text).toBe('Sorry, I did not catch that. Could you say it again?');
   });
 
+  it('a caller who only says hello hears the greeting alone, with no model turn, and the next reply does not greet again', async () => {
+    const before = fake.userTexts.length;
+    for (const [id, hello] of [['call_rt_h1', 'Hello?'], ['call_rt_h2', 'Hi, is anyone there?'], ['call_rt_h3', 'Hello. Hello?']] as const) {
+      const first = await signed(w, voiceTurn(id, hello));
+      expect(chunks(first.payload)).toEqual([{ text: GREETING }]);
+    }
+    expect(fake.userTexts.length).toBe(before);
+    fake.push(() => ({ text: 'Sure, what size?' }));
+    const second = await signed(w, voiceTurn('call_rt_h1', 'Hello, I want a pizza.'));
+    expect(finalChunk(second.payload)).toEqual({ text: 'Sure, what size?' });
+    expect(fake.userTexts.slice(before)).toEqual(['Hello, I want a pizza.']);
+  });
+
   it('a repeated delivery of a turn runs once and hears the same reply', async () => {
     fake.push(() => ({ text: 'Hello there.' }));
     const before = fake.userTexts.length;
-    const a = await signed(w, voiceTurn('call_rt_3', 'Hi'), { id: 'whd_rt_retry' });
-    const b = await signed(w, voiceTurn('call_rt_3', 'Hi'), { id: 'whd_rt_retry' });
-    expect(finalChunk(a.payload)).toEqual({ text: `${GREETING} Hello there.` });
+    const a = await signed(w, voiceTurn('call_rt_3', 'Do you have pizza?'), { id: 'whd_rt_retry' });
+    const b = await signed(w, voiceTurn('call_rt_3', 'Do you have pizza?'), { id: 'whd_rt_retry' });
+    expect(finalChunk(a.payload)).toEqual({ text: `${LEAD} Hello there.` });
     expect(finalChunk(b.payload)).toEqual(finalChunk(a.payload));
     expect(fake.userTexts.length).toBe(before + 1);
   });
@@ -142,9 +156,19 @@ describe('AgentPhone on the realtime turn engine', () => {
     expect(fake.userTexts.slice(start)).toEqual(['first question', 'second question']);
   });
 
+  it('an answer with no words is asked for once more, and only once', async () => {
+    fake.push(() => ({ text: '' }), () => ({ text: 'Anything else?' }));
+    await signed(w, voiceTurn('call_rt_e', '')); // greeting
+    const again = await signed(w, voiceTurn('call_rt_e', 'One large pepperoni.'));
+    expect(finalChunk(again.payload)).toEqual({ text: 'Anything else?' });
+    fake.push(() => ({ text: '' }), () => ({ text: '' }));
+    const nothing = await signed(w, voiceTurn('call_rt_e', 'No.'));
+    expect(finalChunk(nothing.payload).text).toBe('Sorry, I did not catch that. Could you say it again?');
+  });
+
   it('a session error mid-call falls back to the builder runner for that call, and the log names the engine', async () => {
     fake.push(() => ({ text: 'Hi, what can I get you?' }), () => 'error');
-    await signed(w, voiceTurn('call_rt_5', 'Hello'));
+    await signed(w, voiceTurn('call_rt_5', 'Do you sell pizza?'));
     let instructions = '';
     w.model.push(async ({ instructions: i }) => { instructions = i; return 'We close at ten.'; }, async () => 'Anything else?');
     const failed = await signed(w, voiceTurn('call_rt_5', 'When do you close?'));
@@ -166,8 +190,8 @@ describe('AgentPhone realtime engine: session cannot open, idle close, and begin
     const w = await createWorld({ executor: notWiredExecutor, telephony: { http, interimAfterMs: 60_000, openaiSocketFactory: broken.factory } }, AP_ENV);
     try {
       w.model.push(async () => 'Hello from the builder.');
-      const r = await signed(w, voiceTurn('call_rt_open', 'Hi'));
-      expect(finalChunk(r.payload)).toEqual({ text: `${GREETING} Hello from the builder.` });
+      const r = await signed(w, voiceTurn('call_rt_open', 'Do you deliver?'));
+      expect(finalChunk(r.payload)).toEqual({ text: `${LEAD} Hello from the builder.` });
       expect(w.app.composed.agentphone.voice!.engineOf('call_rt_open')).toBe('builder');
     } finally { await w.close(); }
   }, 120_000);

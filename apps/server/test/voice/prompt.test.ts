@@ -71,8 +71,18 @@ describe('voice prompt', () => {
     expect(text).toContain('You are speaking with an AI assistant');
   });
 
+  it('gives a total on request, sets the 20 minute minimum, and keeps asking until the order is sent or refused', () => {
+    const text = buildInstructions(pizzaSpecV2, pizza);
+    expect(text).toContain('If the caller asks for the price or the total at any point, call quote_order at once with the items so far');
+    expect(text).toContain('Never ask for a name or a time first.');
+    expect(text).toContain('An order takes 20 minutes to prepare, so the earliest pickup is 20 minutes from now.');
+    expect(text).toContain('ask again: "Shall I send it to the shop?"');
+    expect(text).toContain('If the caller asks for a change the menu has no option for');
+  });
+
   it('stays short for latency', () => {
-    expect(buildInstructions(pizzaSpecV2, pizza).length).toBeLessThan(4500);
+    // Raised from 4500 on 2026-11-14 for the order-flow lines added after the owner's AgentPhone call.
+    expect(buildInstructions(pizzaSpecV2, pizza).length).toBeLessThan(5400);
     expect(channelWord('android_gateway')).toBe('text message');
     expect(channelWord('qr_only')).toBe('message');
   });
@@ -100,7 +110,7 @@ describe('voice prompt: the text step', () => {
     expect(text).toContain(orderWaitScript('surge').declined);
     expect(text).toContain('Never claim a message will follow unless a server status said the caller agreed');
     expect(text).not.toContain('{last4}');
-    expect(text.length).toBeLessThan(5000);
+    expect(text.length).toBeLessThan(6200);
   });
 
   // The qr_only default is compared with origin/main's own output in golden.test.ts.

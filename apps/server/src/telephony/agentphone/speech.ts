@@ -25,12 +25,34 @@ export function agentPhoneGreeting(businessName: string, template: AgentSpec['te
   return `Thanks for calling ${nameSentence(businessName)} ${GREETING_DISCLOSURE} ${ask}`;
 }
 
+/**
+ * The opening for a call whose first words are already a request: the shop name and the AI disclosure,
+ * without the question, so the answer that follows is not a second question.
+ */
+export function agentPhoneGreetingLead(businessName: string): string {
+  return `Thanks for calling ${nameSentence(businessName)} ${GREETING_DISCLOSURE}`;
+}
+
+const HELLO_WORDS = new Set(['hello', 'hi', 'hey', 'hiya', 'yo', 'yes', 'yeah', 'um', 'uh', 'ok', 'okay', 'good', 'morning', 'afternoon', 'evening',
+  'is', 'are', 'you', 'there', 'anyone', 'anybody', 'somebody', 'someone', 'can', 'hear', 'me']);
+/**
+ * True when a caller's first words are only a hello ("Hello?", "Hi, is anyone there?"). AgentPhone stays
+ * silent until the caller speaks, so most calls start this way; the server then answers with the greeting
+ * alone, at once, without a model turn.
+ */
+export function isHelloOnly(text: string): boolean {
+  const words = text.toLowerCase().replace(/[^a-z ]+/g, ' ').split(' ').filter(Boolean);
+  return words.length > 0 && words.length <= 6 && words.every((w) => HELLO_WORDS.has(w));
+}
+
 /** The lines this channel needs, after the phone prompt. */
 export function agentPhoneChannelLines(greeting: string): string {
   return [
     'Channel rules for this call. They replace any line above that disagrees.',
     'A phone service reads your reply aloud with a speech engine. Write only words to be said: plain short sentences, no symbols, no lists, no Markdown, no emoji.',
     'Write numbers, prices and times the way a person says them: "twelve dollars and fifty cents", "six thirty tonight", "two large pizzas". Never write a dollar sign, a percent sign, a decimal point or a digit.',
+    // A scripted call on 2026-11-14: "close tonight" reached the server as other words and the model asked which month.
+    'The caller\'s words reach you through speech recognition, which makes mistakes. Read them by sound and by what a caller of this shop would mean: after "close" or "open", "the ninth" or "to ninth" means "tonight"; a menu item that is almost right is that item. Answer the likely meaning. Ask the caller to say it again only when you cannot tell what they meant.',
     'There are no server status messages on this call. No message or payment link is sent to the caller by text; the payment link is shown at the counter.',
     `The call was already opened for you with this greeting: "${greeting}" Do not greet the caller again and do not repeat the greeting or the AI disclosure. Ignore the line above that tells you to speak first or how to open.`,
     'After propose_order or propose_booking succeeds, the server says the closing line and ends the call. Reply with one word, "Done.", and nothing else.',

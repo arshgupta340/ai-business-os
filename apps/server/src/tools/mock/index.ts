@@ -44,6 +44,7 @@ import {
   pizzaCatalog,
 } from '@abos/contracts/fixtures';
 import { isoUtc, localDateTime, localToEpoch, weekdayOfLocalDate } from './time';
+import { pickupTooSoon, PICKUP_TOO_SOON } from '../real/time';
 
 export type MockToolsetOptions = {
   businessId: string;
@@ -260,6 +261,7 @@ export function createMockToolset(options: MockToolsetOptions): MockToolset {
 
       const pickup = Date.parse(input.fulfillment.pickupAt);
       if (pickup < now().getTime()) return fail('VALIDATION_FAILED', 'The pickup time is in the past.');
+      if (pickupTooSoon(pickup, now().getTime())) return fail('VALIDATION_FAILED', PICKUP_TOO_SOON);
       const local = localDateTime(pickup, timezone);
       const window = openWindow(local.date);
       if (window === undefined || pickup < window.open || pickup > window.close) return fail('VALIDATION_FAILED', 'The pickup time is outside opening hours.');

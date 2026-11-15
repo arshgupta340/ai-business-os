@@ -3,6 +3,9 @@
 // exact inputs, so the comparison is with main's output, not with this branch's code. On 2026-11-14 it was
 // regenerated from the interruption gate's output: the only differences from main's file are the session's
 // audio.input turn_detection and noise_reduction and three new prompt lines (voice/NOTES.md).
+// Regenerated again on 2026-11-14 for the order-flow lines added after the owner's AgentPhone call (a total
+// on request, the 20 minute minimum, asking until the order is sent or refused, a change the menu cannot
+// take): only the three pizza prompts changed.
 // Fixtures are passed in so the same cases run against main's copy and this branch.
 type Fx = {
   barberFacts: { kind: string; key: string; value: unknown; version: number; status: string }[];
