@@ -4,7 +4,7 @@
 // gets them. The greeting, the closing line after a stored proposal and the line for a later stray turn
 // come from the server, never from the model, so the AI disclosure and the hangup do not depend on its words.
 import type { AgentSpec } from '@abos/contracts';
-import { bookingWaitScript, orderWaitScript } from '../../voice/prompt';
+import { bookingWaitScript } from '../../voice/prompt';
 
 /** The disclosure the greeting must carry. An override without it is not used. */
 export const GREETING_DISCLOSURE = 'This is an AI assistant.';
@@ -72,12 +72,18 @@ function withName(line: string, name: string | undefined): string {
 }
 
 /**
- * The reply of the turn whose proposal was stored: the wait line with no message channel (the
- * `.declined` script, as no message is sent on this path), then a short goodbye. The webhook answer
- * carries hangup with it.
+ * The order wait line on this path (Arsh, 2026-11-14): short, for the demo call. It says the order waits
+ * for the shop and claims nothing more (not placed, not paid). The Twilio path keeps orderWaitScript.
+ */
+export const ORDER_CLOSING_WAIT = "Thanks, {name}. Your order is awaiting the shop's confirmation.";
+
+/**
+ * The reply of the turn whose proposal was stored: the wait line, then a short goodbye. The webhook answer
+ * carries hangup with it. A booking keeps the wait script with no message channel (the `.declined` script,
+ * as no message is sent on this path).
  */
 export function closingLine(template: AgentSpec['template'], businessName: string, name: string | undefined): string {
-  const wait = template === 'appointment_booker' ? bookingWaitScript('qr_only').declined : orderWaitScript('qr_only').declined;
+  const wait = template === 'appointment_booker' ? bookingWaitScript('qr_only').declined : ORDER_CLOSING_WAIT;
   return `${withName(wait, name)} Thanks for calling ${nameSentence(businessName)} Goodbye.`;
 }
 
