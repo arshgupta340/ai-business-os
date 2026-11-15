@@ -352,3 +352,24 @@ What to say: "The payment page is a demo. The payment that the dashboard shows i
 ### 9.5 Turn it off
 
 In Render, set `DEMO_PAY_FIRST=0` or delete it, and save. After the deploy, the log shows `demo mode is off`. The demo pages then answer 404, the menu tool is not offered, and no demo message is sent. The demo tables stay; `npm run reset -- --yes` empties them.
+
+## 10. Phone line for the demo (AgentPhone)
+
+For the judges' call the phone line is AgentPhone, not Twilio. AgentPhone listens, decides when the caller has finished, handles interruptions and speaks. Our server writes each reply, with the same agent, tools and approvals as on Twilio. Setup, in order: docs/DEPLOY.md, "Switch the phone line to AgentPhone on Render, in order".
+
+Before the demo:
+
+1. Check that the server log shows `agentphone: voice turn engine` with `engine: realtime`.
+2. Make one test call from your own phone and order a pizza. Each answer should come in about a second.
+
+The call, as a judge hears it:
+
+1. The agent opens: "Thanks for calling Demo Pizza Co. This is an AI assistant. What can I get you?"
+2. The judge asks a question or orders, for example "One large pepperoni for Sam, pickup at six thirty."
+3. The agent reads the order and the total back and asks: "Shall I send this to the shop for approval?"
+4. The judge says yes. The agent says the order is with the shop for approval, that the payment link will be shown at the counter and that the order is not placed until it is paid, then says goodbye, and the call ends.
+5. The order appears on the Approvals screen as pending. Approve it there.
+
+What to say: "The phone service speaks and listens. Our agent decides every answer, and nothing happens until the owner approves."
+
+Limits: demo mode's WhatsApp messages (section 9) are sent only on Twilio calls. On AgentPhone no message is sent; the payment link is shown at the counter. If calls go silent or the answers come slowly, switch back to Twilio as docs/DEPLOY.md describes.

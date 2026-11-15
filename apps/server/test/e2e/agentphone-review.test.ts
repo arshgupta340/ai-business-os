@@ -19,7 +19,7 @@ const PIZZA = 'biz_pizza_01';
 /** Test-only webhook secret. Not a credential. */
 const SECRET = 'whsec_e2e_review_only';
 const CART: Cart = { lines: [{ catalogItemId: 'SQ_ITEM_PEP', variationId: 'SQ_VAR_PEP_LG', quantity: 1, modifierIds: [] }] };
-const AP_ENV = { TELEPHONY_PROVIDER: 'agentphone', AGENTPHONE_API_KEY: 'test-agentphone-key', AGENTPHONE_WEBHOOK_SECRET: SECRET,
+const AP_ENV = { TELEPHONY_PROVIDER: 'agentphone', AGENTPHONE_TURN_ENGINE: 'builder', AGENTPHONE_API_KEY: 'test-agentphone-key', AGENTPHONE_WEBHOOK_SECRET: SECRET,
   AGENTPHONE_NUMBER_ID: 'num_e2e', AGENTPHONE_PHONE_NUMBER: PHONE };
 const silentLog: SeamDeps['log'] = { info() {}, warn() {}, error() {} };
 const noHttp: HttpPort = async () => ({ status: 404, json: async () => ({}) });
@@ -60,8 +60,9 @@ describe('AgentPhone webhook: replay, rule 6 and the processed mark', () => {
     expect(replay.json()).toEqual({});
     expect(turns).toBe(1);
     // The provider's own retry (same ID, a later timestamp, so a new signature) is still one delivery.
+    // It runs nothing and hears the reply of the first delivery again.
     const retry = await signed(w, body, { id: 'whd_original', ts: ts + 20 });
-    expect(retry.json()).toEqual({});
+    expect(chunks(retry.payload)).toEqual([{ text: 'Hello.' }]);
     expect(turns).toBe(1);
     // A different turn in the same second is a different delivery and runs.
     const next = await signed(w, voiceTurn('call_rp_1', 'What are your hours?'), { ts });

@@ -13,7 +13,7 @@ import {
 } from '@abos/contracts';
 import { pizzaCatalogRows } from '@abos/contracts/fixtures';
 import {
-  ALL_TABLES, ResetRefusedError, SEEDED_FACTS, TRUNCATED_TABLES, countRows, runReset, seedDatabase, seedSquareCatalog,
+  ALL_TABLES, ResetRefusedError, SEEDED_FACTS, TRUNCATED_TABLES, countRows, liveAgentNumberVars, runReset, seedDatabase, seedSquareCatalog,
   type AuthAdmin, type SeedDb, type SeedEnv, type SquareCatalogClient, type SquareCatalogObject,
 } from '../src/seed';
 import { createApprovedApproval, createExecution, createMigratedDb, createOrder, insert, type Owner } from './helpers';
@@ -227,6 +227,29 @@ describe('seed', () => {
     const s = await seedDatabase(sdb, { env: { ...BASE_ENV, TWILIO_PHONE_NUMBER: '' }, auth: fakeAuth(db), envFilePath: undefined });
     expect((await countRows(sdb, ['live_agent'])).live_agent).toBe(0);
     expect(s.notes.join(' ')).toContain('TWILIO_PHONE_NUMBER is empty');
+  });
+
+  it('D-12: with TELEPHONY_PROVIDER=agentphone the pizza agent is also live on AGENTPHONE_PHONE_NUMBER, and a second run changes nothing', async () => {
+    const AP = '+15555550123';
+    const env = { ...BASE_ENV, TELEPHONY_PROVIDER: 'agentphone', AGENTPHONE_PHONE_NUMBER: AP };
+    await seedDatabase(sdb, { env, auth: fakeAuth(db), envFilePath: undefined });
+    const rows = async () => (await db.query<Record<string, unknown>>('select phone_number, business_id, agent_id, agent_version_id from public.live_agent order by phone_number')).rows;
+    const first = await rows();
+    expect(first).toEqual([
+      { phone_number: AP, business_id: 'biz_pizza_01', agent_id: 'agt_pizza_01', agent_version_id: 'agv_pizza_01_v2' },
+      { phone_number: PHONE, business_id: 'biz_pizza_01', agent_id: 'agt_pizza_01', agent_version_id: 'agv_pizza_01_v2' },
+    ].sort((a, b) => a.phone_number.localeCompare(b.phone_number)));
+    const again = await seedDatabase(sdb, { env, auth: fakeAuth(db), envFilePath: undefined });
+    expect(await rows()).toEqual(first);
+    expect(again.tables.live_agent).toMatchObject({ unchanged: 2 });
+    // With the provider unset, AGENTPHONE_PHONE_NUMBER alone adds no row (Twilio behaviour unchanged).
+    expect(liveAgentNumberVars({ AGENTPHONE_PHONE_NUMBER: AP })).toEqual(['TWILIO_PHONE_NUMBER']);
+  });
+
+  it('D-12: agentphone selected with no AGENTPHONE_PHONE_NUMBER seeds the Twilio row and says what is missing', async () => {
+    const s = await seedDatabase(sdb, { env: { ...BASE_ENV, TELEPHONY_PROVIDER: 'agentphone' }, auth: fakeAuth(db), envFilePath: undefined });
+    expect((await countRows(sdb, ['live_agent'])).live_agent).toBe(1);
+    expect(s.notes.join(' ')).toContain('AGENTPHONE_PHONE_NUMBER is empty');
   });
 
   it('generates a password, writes it only to the given env file, and never prints or returns it', async () => {

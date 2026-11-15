@@ -10,9 +10,10 @@ import type { Db } from '../db/index';
 import { emitActivity } from '../policy/activity';
 import type { RealToolset } from '../tools/real/types';
 import type { CallDecisionsPort } from '../voice/types';
+import type { FactsSnapshot } from '../tools/real/types';
 import { agentPhoneWebhookPlugin } from '../telephony/agentphone/plugin';
 import { pollAgentPhoneReceipts, type ReceiptPollResult } from '../telephony/agentphone/receipts';
-import { createAgentPhoneVoice, type AgentPhoneVoice } from '../telephony/agentphone/voice';
+import { createAgentPhoneVoice, type AgentPhoneRealtimeOptions, type AgentPhoneVoice, type TurnEngine } from '../telephony/agentphone/voice';
 import type { Telephony } from '../telephony/index';
 import { dbLiveAgentPort, type CallsStore } from './ports';
 import type { SeamDeps } from './seams';
@@ -41,8 +42,13 @@ export function createAgentPhoneWiring(deps: {
   db: Db;
   hasDb: boolean;
   calls: CallsStore;
-  toolsetFor(ctx: { businessId: string; agentVersionId: string; callId: string; capabilities: readonly CapabilityId[] }): RealToolset;
-  model: AgentModel;
+  toolsetFor(ctx: { businessId: string; agentVersionId: string; callId: string; capabilities: readonly CapabilityId[]; facts?: FactsSnapshot | undefined }): RealToolset;
+  /** The builder text model, or undefined when only the recorded stand-in exists (never used on a phone call). */
+  model: AgentModel | undefined;
+  /** AGENTPHONE_TURN_ENGINE. */
+  engine: TurnEngine;
+  /** The realtime engine's ports, or undefined when no OpenAI socket can be opened (the builder runner answers). */
+  realtime: AgentPhoneRealtimeOptions | undefined;
   /** The server's MESSAGE_CHANNEL setting, for the phone prompt. */
   messageChannel: MessageChannelSetting;
   decisions: CallDecisionsPort;
@@ -60,8 +66,13 @@ export function createAgentPhoneWiring(deps: {
   const missing = selected && ap ? [...ap.missing, ...(deps.hasDb ? [] : ['DATABASE_URL']), ...(deps.modelMissing ?? [])] : [];
   const enabled = selected && !!ap && missing.length === 0;
   const liveAgent = dbLiveAgentPort(deps.db);
+  // The realtime engine needs an OpenAI socket; without one every call uses the builder runner.
+  const engine: TurnEngine = deps.engine === 'realtime' && deps.realtime ? 'realtime' : 'builder';
+  if (selected && deps.engine === 'realtime' && !deps.realtime) deps.log.warn({}, 'agentphone: the realtime turn engine needs OPENAI_API_KEY; calls use the builder runner');
+  if (enabled) deps.log.info({ engine }, 'agentphone: voice turn engine');
   const voice = enabled ? createAgentPhoneVoice({ db: deps.db, liveAgent, calls: deps.calls, toolsetFor: deps.toolsetFor, model: deps.model, messageChannel: deps.messageChannel,
-    decisions: deps.decisions, now: deps.now, newId: deps.newId, log: deps.log, ...(deps.turnTimeoutMs !== undefined ? { turnTimeoutMs: deps.turnTimeoutMs } : {}) }) : undefined;
+    decisions: deps.decisions, now: deps.now, newId: deps.newId, log: deps.log, engine, ...(engine === 'realtime' ? { realtime: deps.realtime } : {}),
+    ...(deps.turnTimeoutMs !== undefined ? { turnTimeoutMs: deps.turnTimeoutMs } : {}) }) : undefined;
 
   const off: FastifyPluginAsync = async (app) => {
     // Own parser scope: the body is never read. 503 tells the provider to retry later.

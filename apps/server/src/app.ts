@@ -104,7 +104,8 @@ export async function buildApp(env: Env, options: BuildAppOptions = {}): Promise
   app.addHook('preHandler', createAuthGuard(composed.db, composed.verifier));
 
   await app.register(healthRoutes, { env, ...(composed.databaseProbe ? { database: composed.databaseProbe } : {}) });
-  await app.register(withAuthPolicy('owner', apiRoutes), { db: composed.db, ports: composed.enginePorts, env, catalog: composed.catalogSync, providerStatus: composed.providers.status, health: composed.health });
+  await app.register(withAuthPolicy('owner', apiRoutes), { db: composed.db, ports: composed.enginePorts, env, catalog: composed.catalogSync, providerStatus: composed.providers.status, health: composed.health,
+    phoneLine: () => composed.telephony.active.phoneNumber });
   await app.register(withAuthPolicy('owner', async (scope) => {
     registerSimCall(scope, { db: composed.db, calls: composed.calls, toolsetFor: composed.toolsetFor, model: composed.agentModel, messageChannel: composed.providers.messageChannel, now: composed.now, newId: composed.newId, log: composed.log });
   }));
