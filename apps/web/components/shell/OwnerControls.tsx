@@ -27,9 +27,7 @@ export function OwnerControls() {
         </VStack>
       }
       renderTrigger={(props) => (
-        <Button label="Account" variant="ghost" size="sm" isIconOnly {...props}>
-          <Avatar name={owner.displayName} size="md" />
-        </Button>
+        <Button label="Account" variant="ghost" isIconOnly icon={<Avatar name={owner.displayName} size="md" />} {...props} />
       )}
       items={[
         {
