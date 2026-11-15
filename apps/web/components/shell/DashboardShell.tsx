@@ -10,6 +10,7 @@ import {useRouter} from 'next/navigation';
 import {AppShell} from '@astryxdesign/core/AppShell';
 import {TopNav, TopNavHeading} from '@astryxdesign/core/TopNav';
 import {LoadingState} from '@/components/LoadingState';
+import {isDemoScript} from '@/lib/env';
 import {BusinessListGate} from '@/lib/session';
 import {useAuth} from '@/lib/session/auth';
 import {ApprovalsBadgeSync} from './ApprovalsBadgeSync';
@@ -35,7 +36,10 @@ function ShellFrame({children}: {children: ReactNode}) {
   return (
     <AppShell
       contentPadding={6}
-      banner={<SandboxBanner />}
+      // The bar is hidden while the scripted demo is on (NEXT_PUBLIC_DEMO_SCRIPT=1), so it is not on
+      // the projector for the whole demo. Every payment amount keeps its own "Sandbox" badge, on the
+      // order card, the approvals list and the menu, so payment data is still labelled (AGENTS.md rule 4).
+      banner={isDemoScript() ? undefined : <SandboxBanner />}
       topNav={
         <TopNav
           label="Main navigation"

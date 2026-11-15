@@ -9,6 +9,7 @@ import {ApiBusinessProvider} from '@/lib/session';
 import {server} from '@/mocks/server';
 import {TEST_BASE_URL, useMockServer} from '@/mocks/test-setup';
 import {DashboardShell} from './DashboardShell';
+import {SANDBOX_BANNER_TEXT} from './SandboxBanner';
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({replace: vi.fn(), push: vi.fn()}),
@@ -87,5 +88,19 @@ describe('DashboardShell and the business list', () => {
     expect(await screen.findByLabelText('page')).toBeTruthy();
     expect(selector().textContent).toContain('Demo Pizza Co.');
     expect(selector().getAttribute('aria-disabled')).not.toBe('true');
+  });
+});
+
+describe('DashboardShell and the sandbox bar', () => {
+  it('shows the bar by default', async () => {
+    renderShell();
+    expect(await screen.findByText(SANDBOX_BANNER_TEXT)).toBeTruthy();
+  });
+
+  it('hides the bar while the scripted demo is on', async () => {
+    vi.stubEnv('NEXT_PUBLIC_DEMO_SCRIPT', '1');
+    renderShell();
+    expect(await screen.findByLabelText('page')).toBeTruthy();
+    expect(screen.queryByText(SANDBOX_BANNER_TEXT)).toBeNull();
   });
 });
