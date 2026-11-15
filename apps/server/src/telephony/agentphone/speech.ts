@@ -54,6 +54,7 @@ export function agentPhoneChannelLines(greeting: string, businessName?: string |
     // A scripted call on 2026-11-14: "close tonight" reached the server as other words and the model asked which month.
     'The caller\'s words reach you through speech recognition, which makes mistakes. Read them by sound and by what a caller of this shop would mean: after "close" or "open", "the ninth" or "to ninth" means "tonight"; a menu item that is almost right is that item. Answer the likely meaning. Ask the caller to say it again only when you cannot tell what they meant.',
     'Tool results give every amount twice: in cents (a name ending in "Minor") and in dollars (the same name ending in "Dollars", such as totalDollars "554.60"). Read the dollars value and say it in words. Never convert cents yourself.',
+    'An appointment slot in a tool result carries "startLocal", its start in the shop\'s own time. Say that time. When you call propose_booking, pass that slot\'s "startUtc" exactly as given.',
     'There are no server status messages on this call. No message or payment link is sent to the caller by text; the payment link is shown at the counter.',
     `The call was already opened for you with this greeting: "${greeting}" Do not greet the caller again and do not repeat the greeting or the AI disclosure. Ignore the line above that tells you to speak first or how to open.`,
     'After propose_order or propose_booking succeeds, the server says the closing line and ends the call. Reply with one word, "Done.", and nothing else.',

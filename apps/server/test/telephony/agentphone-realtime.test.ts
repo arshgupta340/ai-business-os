@@ -169,6 +169,12 @@ describe('AgentPhone realtime engine', () => {
       lines: [{ quantity: 20, unitPriceMinor: 2550, unitPriceDollars: '25.50', lineTotalMinor: 51000, lineTotalDollars: '510.00' }] } });
     expect(result.quote).not.toHaveProperty('totalDollars');
     expect(withDollars('text')).toBe('text');
+    // A slot gets its start in the shop's own time beside the UTC instant.
+    const slot = (withDollars({ slots: [{ serviceId: 'svc_haircut', startUtc: '2026-11-16T00:00:00Z', endUtc: '2026-11-16T00:30:00Z', timezone: 'America/Los_Angeles' }] }) as
+      { slots: Record<string, string>[] }).slots[0]!;
+    expect(slot.startUtc).toBe('2026-11-16T00:00:00Z');
+    expect(slot.startLocal).toMatch(/^Sunday, November 15.* 4:00 PM$/);
+    expect(withDollars({ startUtc: 'not a time', timezone: 'America/Los_Angeles' })).toEqual({ startUtc: 'not a time', timezone: 'America/Los_Angeles' });
     expect(withDollars({ noteMinor: 'x' })).toEqual({ noteMinor: 'x' });
   });
 
