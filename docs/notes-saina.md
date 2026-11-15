@@ -236,7 +236,7 @@ The sections above stay as they were written. These statements in them were true
 ### Not verified
 
 - **The web app against the real server with a real sign-in.** No Supabase sign-in was done from the web app, and no call was made from it to the deployed server. Every real-mode statement in these notes comes from reading the code and from tests that use the mock or hand-built error objects. Which commit the deployed server runs was not checked.
-- **Voice with a real microphone (U-12, issue #50, still open).** The voice path ran end to end on 2026-11-14 with a recorded sentence in place of the microphone (see "U-12 voice, live run" below). Nobody has spoken into a real microphone and listened to the answer with their own ears yet.
+- **Voice with a real microphone (U-12, issue #50, closed).** Done on 2026-11-14: first a run with a recorded sentence, then Saina's own spoken test (see "U-12 voice, live run" below).
 - **The outside owner test (U-11, issue #49, still open).** No small-business owner outside the team has tried the builder yet.
 - Supabase Realtime delivery to `useActivityFeed` on a real project.
 - The price editor, conflict resolution, publish and rollback from the web app against a real server. Their error texts were written from the server code and the contract.
@@ -256,10 +256,15 @@ What happened, in order:
 
 The event order from this run is replayed in `apps/web/app/(dashboard)/build/voice/voiceSession.test.ts` ("follows the event order a real session sent").
 
+Spoken test by Saina, the same day, in Chrome, with a real microphone and the laptop speakers on. All seven steps posted on issue #50 passed:
+
+- Voice connected and said "Listening."
+- A spoken sentence appeared in the chat marked "Spoken", and the reply was read aloud.
+- The builder's own voice from the speakers was not picked up as something the owner said.
+- The session still worked after two minutes, so it outlives the 60 seconds the client secret lives.
+- Typed chat worked after "Stop voice".
+
 Still not verified:
 
-- A person speaking into a real microphone, and hearing the answer through speakers. The audio was confirmed by events, not by ear. Echo from speakers into the microphone was not tested.
-- With a source that goes completely silent after speech, OpenAI never sent `speech_stopped` and nothing was transcribed. A real microphone always carries some room noise, so this should not happen to a person, but a muted or virtual input device could show it.
-- Whether the session survives well past the 60 seconds the client secret lives. The run lasted under a minute after connecting.
-- The demo browser itself. The run used the browser pane of the desktop app, not Chrome or Safari.
-
+- With a source that goes completely silent after speech, OpenAI never sent `speech_stopped` and nothing was transcribed. A real microphone always carries some room noise, so this did not happen in the spoken test, but a muted or virtual input device could show it.
+- Any browser other than Chrome. If the demo uses a different one, repeat the test in it.
