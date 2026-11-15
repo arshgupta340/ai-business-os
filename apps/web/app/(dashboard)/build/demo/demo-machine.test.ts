@@ -109,8 +109,8 @@ describe('the timed steps', () => {
     vi.useRealTimers();
   });
 
-  it('take about 24 seconds in all', () => {
-    expect(totalDurationMs()).toBe(24000);
+  it('take 30 seconds in all', () => {
+    expect(totalDurationMs()).toBe(30000);
     expect(DEMO_STEPS.map((s) => s.label)).toEqual([
       'Reading the menu',
       'Reading the questions and answers',

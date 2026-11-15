@@ -8,7 +8,14 @@ import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
 import {useAuth} from '@/lib/session/auth';
 
-/** The profile circle in the top bar, with the owner's initials. Its menu shows who is signed in and has Sign out. */
+/**
+ * The picture in the profile circle: `public/owner-avatar.jpg`, a generated
+ * face of a person who does not exist. If the file fails to load, the circle
+ * shows the owner's initials.
+ */
+export const OWNER_AVATAR_SRC = '/owner-avatar.jpg';
+
+/** The profile circle in the top bar. Its menu shows who is signed in and has Sign out. */
 export function OwnerControls() {
   const {owner, status, signOut} = useAuth();
   const router = useRouter();
@@ -27,7 +34,7 @@ export function OwnerControls() {
         </VStack>
       }
       renderTrigger={(props) => (
-        <Button label="Account" variant="ghost" isIconOnly icon={<Avatar name={owner.displayName} size="md" />} {...props} />
+        <Button label="Account" variant="ghost" isIconOnly icon={<Avatar name={owner.displayName} src={OWNER_AVATAR_SRC} size="md" />} {...props} />
       )}
       items={[
         {
