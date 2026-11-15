@@ -25,6 +25,12 @@ export const MAX_ROUNDS_PER_TURN = 6;
 
 const LIMIT_REACHED = 'The limit for this call is reached.';
 const UNAVAILABLE = 'That information is not available right now.';
+/**
+ * What the model reads for a function call that an abandoned turn did not start. It must not read as an
+ * outage: the old text ("This turn has ended", reason INTEGRATION_UNAVAILABLE) made the agent say the
+ * ordering system was down (a call on 2026-11-14).
+ */
+export const TOOL_NOT_RUN = 'This tool call was not run because the caller spoke again first. Nothing is wrong with the system. Call the tool again now if it is still needed.';
 const RECOVERABLE_ERRORS = new Set(['response_cancel_not_active', 'conversation_already_has_active_response']);
 
 type Json = Record<string, unknown>;
@@ -34,6 +40,23 @@ const failure = (reason: ToolFailure['reason'], message: string): ToolFailure =>
 const isPropose = (t: ToolName) => t === 'propose_order' || t === 'propose_booking';
 /** A stored proposal: ok with both IDs (a result with missing fields has neither). */
 export const isStoredProposal = (r: unknown): boolean => { const o = obj(r); return o?.ok === true && typeof o.proposalId === 'string' && typeof o.approvalId === 'string'; };
+
+/**
+ * Adds a dollars string beside every amount in cents (a key ending in "Minor"), so the model reads the
+ * amount instead of converting it. A text trial on 2026-11-14 read 55460 cents back as "fifty five dollars
+ * and forty six cents". Only the copy the model reads is changed; the tool result itself is not.
+ */
+export function withDollars(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(withDollars);
+  const o = obj(v);
+  if (!o) return v;
+  const out: Json = {};
+  for (const [k, val] of Object.entries(o)) {
+    out[k] = withDollars(val);
+    if (k.endsWith('Minor') && typeof val === 'number' && Number.isFinite(val)) out[`${k.slice(0, -'Minor'.length)}Dollars`] = (val / 100).toFixed(2);
+  }
+  return out;
+}
 
 export type ToolEvent = { tool: ToolName; args: unknown; result: unknown; ok: boolean; latencyMs: number };
 export type RefusalCode = 'unknown_tool' | 'tool_not_allowed' | 'tool_call_limit' | 'proposal_limit';
@@ -155,7 +178,7 @@ export function openRealtimeCall(deps: RealtimeCallDeps): Promise<RealtimeCall> 
     if (!named.success) { deps.onRefused?.({ reasonCode: 'unknown_tool' }); return failure('CAPABILITY_NOT_ALLOWED', 'There is no such tool.'); }
     const tool = named.data;
     if (!allowed.has(tool)) { deps.onRefused?.({ reasonCode: 'tool_not_allowed', tool }); return failure('CAPABILITY_NOT_ALLOWED', 'There is no such tool.'); }
-    if (p.hooks.abandoned?.()) return failure('INTEGRATION_UNAVAILABLE', 'This turn has ended.');
+    if (p.hooks.abandoned?.()) return failure('VALIDATION_FAILED', TOOL_NOT_RUN);
     let args: unknown;
     try {
       const raw = str(call, 'arguments') ?? '';
@@ -237,7 +260,7 @@ export function openRealtimeCall(deps: RealtimeCallDeps): Promise<RealtimeCall> 
       }
       if (closed || pending !== p) return;
       const callId = str(call, 'call_id');
-      if (callId !== undefined) send({ type: OAI_CLIENT.itemCreate, item: { type: OAI_ITEM.functionCallOutput, call_id: callId, output: JSON.stringify(result) } });
+      if (callId !== undefined) send({ type: OAI_CLIENT.itemCreate, item: { type: OAI_ITEM.functionCallOutput, call_id: callId, output: JSON.stringify(withDollars(result)) } });
     }
     p.busy = false;
     if (limitHit) { finish({ kind: 'tool_limit', toolCalls: p.toolCalls, tools: p.tools }); return; }

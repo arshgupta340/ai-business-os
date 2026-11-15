@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ToolName } from '@abos/contracts';
 import type { CancellableToolHandler } from '../../src/tools/real/types';
-import { openRealtimeCall, type RealtimeCallDeps } from '../../src/telephony/agentphone/realtime';
+import { openRealtimeCall, TOOL_NOT_RUN, withDollars, type RealtimeCallDeps } from '../../src/telephony/agentphone/realtime';
 import { fakeRealtime, type FakeRealtime } from './fake-realtime';
 
 const TOOLS: ToolName[] = ['read_catalog', 'read_business_facts', 'quote_order', 'propose_order', 'get_order_status'];
@@ -163,6 +163,15 @@ describe('AgentPhone realtime engine', () => {
     expect(fake.userTexts).toEqual(['one', 'two']);
   });
 
+  it('adds a dollars string beside every amount in cents, at any depth, and changes nothing else', () => {
+    const result = { ok: true, quote: { quoteId: 'q1', totalMinor: 55460, taxMinor: 4460, lines: [{ quantity: 20, unitPriceMinor: 2550, lineTotalMinor: 51000 }] } };
+    expect(withDollars(result)).toEqual({ ok: true, quote: { quoteId: 'q1', totalMinor: 55460, totalDollars: '554.60', taxMinor: 4460, taxDollars: '44.60',
+      lines: [{ quantity: 20, unitPriceMinor: 2550, unitPriceDollars: '25.50', lineTotalMinor: 51000, lineTotalDollars: '510.00' }] } });
+    expect(result.quote).not.toHaveProperty('totalDollars');
+    expect(withDollars('text')).toBe('text');
+    expect(withDollars({ noteMinor: 'x' })).toEqual({ noteMinor: 'x' });
+  });
+
   it('an abandoned turn starts no further tool call and asks for no further response', async () => {
     const fake = fakeRealtime();
     fake.push(() => ({ calls: [{ name: 'read_catalog', args: {} }] }));
@@ -170,7 +179,7 @@ describe('AgentPhone realtime engine', () => {
     const rt = await open(fake, h);
     const r = await rt.turn('x', { abandoned: () => true });
     expect(calls).toHaveLength(0);
-    expect(fake.outputs[0]).toMatchObject({ ok: false, message: 'This turn has ended.' });
+    expect(fake.outputs[0]).toMatchObject({ ok: false, reason: 'VALIDATION_FAILED', message: TOOL_NOT_RUN });
     expect(r.kind).toBe('reply');
     expect(fake.sent.filter((e) => e.type === 'response.create')).toHaveLength(1);
   });

@@ -201,7 +201,7 @@ function knownLine(topics: string[]): string {
 // order read back and never sent.
 const TOTAL_ON_REQUEST_LINE = 'If the caller asks for the price or the total at any point, call quote_order at once with the items so far and say the total with tax. Never ask for a name or a time first. Then ask the next missing question. A total you already have stays good while the cart is unchanged: do not call quote_order for the same cart twice.';
 function prepLine(knowsNow: boolean): string {
-  const base = `An order takes ${ORDER_PREP_MINUTES} minutes to prepare, so the earliest pickup is ${ORDER_PREP_MINUTES} minutes from now. If the caller asks for sooner, say the earliest time as a clock time and ask if it works.`;
+  const base = `An order takes ${ORDER_PREP_MINUTES} minutes to prepare, so the earliest pickup is ${ORDER_PREP_MINUTES} minutes from now. If the caller asks for sooner, say the earliest time as a clock time and ask if it works. A pickup on a later day is fine when the shop is open then: take the day and the time.`;
   if (!knowsNow) return base;
   return `${base} Work the pickup time out yourself from the "Now" line in the shop data: "in twenty minutes", "in half an hour" and "as soon as possible" are answers, so never ask for a clock time after one of them. "As soon as possible" means ${ORDER_PREP_MINUTES} minutes from now. In the read-back say the pickup time as a clock time.`;
 }
