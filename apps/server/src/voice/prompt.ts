@@ -208,10 +208,24 @@ function prepLine(knowsNow: boolean): string {
 const CONFIRM_LINE = 'The order is sent only after a yes to that question. "Yes", "sure", "okay", "sounds good" and "go ahead" are a yes. If the caller answers with something that is not a yes, a no or a change, such as "thank you" or "that is it", ask again: "Shall I send it to the shop?" Do not let the call end with an order read back and neither sent nor refused.';
 // The same lessons for a booking call (the barbershop and the salon of the stage demo, 2026-11-15).
 function bookingTimeLine(knowsNow: boolean): string {
-  const base = 'If the caller already named a day or a time, do not ask for it again: call read_calendar_availability for that day, with `near` set to their time as 24-hour HH:MM when they named one. If their time is among the slots, take exactly that time and go on; otherwise offer the nearest free times it returned.';
+  const base = 'If the caller already named a day and a time, do not ask for them again: call read_calendar_availability for that day, with `near` set to their time as 24-hour HH:MM. If their time is among the slots, take exactly that time and go on; otherwise offer the nearest free times it returned.';
   const hour = 'A time said without morning, afternoon, AM or PM means that hour inside the opening hours: with a shop open nine to seven, "four" is four in the afternoon and "ten" is ten in the morning.';
   return knowsNow ? `${base} ${hour} Work out "today", "tomorrow" and weekday names yourself from the "Now" line in the shop data, and say the day and the time back as a day and a clock time.` : `${base} ${hour}`;
 }
+// Arsh, 2026-11-15, after his own calls to the barbershop and the salon: "I have to ask them to tell me what
+// services they offer ... there's an awkward silence, so that should be filled up by them telling me things."
+// The agent answered "I want to book" with a bare "Which service would you like?", and a day without a time
+// with the three earliest slots of the morning.
+const BOOKING_LEAD_LINE = [
+  'Lead the booking. Never leave the caller to ask what the shop offers. Take these steps in order and skip any the caller already answered.',
+  'Service: if the caller has not named one, name the services with their prices in one sentence and ask which they would like, in this pattern: "Sure. We have {service} for {price}, {service} for {price} and {service} for {price}. Which would you like?" Never ask only "Which service would you like?"',
+  'Day and time: ask "What day and time works for you?" and add the opening hours in the same reply, as in "We are open nine to seven." If the caller gives a day without a time, ask what time suits them and say the hours for that day. If the caller asks what is free, call read_calendar_availability for that day, say the earliest time it returns and ask what time they would like, as in "The earliest I have is nine. What time suits you?" Do not read out a list of times.',
+  'Whenever the caller names a time, also one you did not offer, call read_calendar_availability again with `near` set to that time. Never refuse or question a time without checking it.',
+  'When you have a day and a time, call read_calendar_availability and do not announce it or say you will check the times.',
+  'Name: "What name is it under?"',
+  'When you answer a question about a service, a price or the hours before a booking is under way, end the reply by offering the next step, as in "Would you like to book one?"',
+  'These steps replace the style rules above about questions of eight words and about not listing the services.',
+].join(' ');
 const BOOKING_CONFIRM_LINE = 'The booking is sent only after a yes to that question. "Yes", "sure", "okay", "sounds good" and "go ahead" are a yes. If the caller answers with something that is not a yes, a no or a change, such as "thank you" or "that is it", ask again: "Shall I send it to the shop?" Do not let the call end with a booking read back and neither sent nor refused.';
 const NO_OPTION_LINE = 'If the caller asks for a change the menu has no option for, such as leaving an ingredient off, say once: "I cannot add that here. Please ask at the counter at pickup." Keep the order as it is and go back to the question you were on.';
 
@@ -299,7 +313,8 @@ export function buildInstructions(spec: AgentSpec, facts: InstructionFacts): str
       knowledge?.hasServices === true
         ? 'Offer only the services in the shop data and only slots from read_calendar_availability.'
         : 'Offer only services from read_business_facts and only slots from read_calendar_availability.',
-      'Book with these questions, in this order, and skip any the caller already answered: "Which service would you like?" Then "What day works for you?" Then call read_calendar_availability and do not announce it or say you will check the times. When the slots come back, offer up to three times, for example: "I have ten, eleven thirty or two. Which works?" Then "What name is it under?"',
+      knowledge?.hasServices === true ? BOOKING_LEAD_LINE
+        : 'Book with these questions, in this order, and skip any the caller already answered: "Which service would you like?" Then "What day works for you?" Then call read_calendar_availability and do not announce it or say you will check the times. When the slots come back, offer up to three times, for example: "I have ten, eleven thirty or two. Which works?" Then "What name is it under?"',
       'All times are in the shop timezone. Do not ask the caller about timezones.',
       bookingTimeLine(known),
     );

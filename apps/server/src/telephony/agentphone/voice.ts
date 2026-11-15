@@ -134,6 +134,17 @@ type RunResult = { reply: string; hangup?: boolean; engine: TurnEngine; toolCall
 
 const isPropose = (t: ToolName) => t === 'propose_order' || t === 'propose_booking';
 /** The caller's name from a propose call's arguments (order contact or booking customer). */
+/** The names of the shop's services, in the order the pinned facts carry them, for the greeting. */
+function serviceNames(facts: FactsSnapshot | undefined): string[] {
+  const names: string[] = [];
+  for (const f of facts?.facts ?? []) {
+    if (f.kind !== 'service') continue;
+    const name = (f.value as { name?: unknown } | null)?.name;
+    if (typeof name === 'string' && name.trim() !== '') names.push(name);
+  }
+  return names;
+}
+
 function proposedName(args: unknown): string | undefined {
   const a = args as { contact?: { name?: unknown }; customer?: { name?: unknown } } | null;
   return sayableName(a?.contact?.name ?? a?.customer?.name);
@@ -271,7 +282,7 @@ export function createAgentPhoneVoice(deps: AgentPhoneVoiceDeps) {
       toolset: deps.toolsetFor({ businessId, agentVersionId, callId, capabilities: spec.data.capabilities, ...(facts ? { facts } : {}) }),
       history: [], stage,
       unsubscribe: () => undefined, closed: false,
-      channelRules: realtimeOn, engine, greeting: agentPhoneGreeting(businessName, spec.data.template, deps.realtime?.greeting),
+      channelRules: realtimeOn, engine, greeting: agentPhoneGreeting(businessName, spec.data.template, deps.realtime?.greeting, serviceNames(facts)),
       // The server speaks the greeting on the call's first event (first_reply, the default). A call
       // continued after a restart has heard it already.
       greeted: !realtimeOn || deps.realtime?.greetingMode === 'begin_message' || stage !== initialTurnStage(spec.data),
