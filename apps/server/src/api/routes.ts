@@ -19,7 +19,13 @@ import { createReplayCache } from './replay';
 export { setLiveAgent } from './live-agent';
 
 export type ProviderStatusMap = Record<'square' | 'twilio' | 'openai' | 'google_calendar' | 'google_sheets' | 'message_channel', { configured: boolean; detail: string; noProviderNeeded?: true }>;
-export interface ApiDependencies { db: Db; ports: EnginePorts; env: Env; catalog?: CatalogPort; providerStatus?: ProviderStatusMap; health?: HealthMonitor }
+export interface ApiDependencies { db: Db; ports: EnginePorts; env: Env; catalog?: CatalogPort; providerStatus?: ProviderStatusMap; health?: HealthMonitor;
+  /**
+   * D-12: the phone line the live agent answers, from the selected telephony provider (compose/index.ts
+   * telephony.active.phoneNumber): TWILIO_PHONE_NUMBER, or AGENTPHONE_PHONE_NUMBER with TELEPHONY_PROVIDER=agentphone.
+   * Absent: TWILIO_PHONE_NUMBER, as before.
+   */
+  phoneLine?: (() => string | undefined) | undefined }
 export const CORE_ENDPOINTS = Object.entries(ENDPOINTS).filter(([name, e]) =>
   e.owner === 'arsh' && e.tier === 'MUST' && name !== 'simCall') as [EndpointName, EndpointDefinition][];
 
@@ -213,6 +219,7 @@ const REPLAY_MAX_ENTRIES = 1000;
 
 export async function apiRoutes(app: FastifyInstance, deps: ApiDependencies): Promise<void> {
   const { db, ports, env } = deps;
+  const phoneLine = deps.phoneLine ?? (() => env.TWILIO_PHONE_NUMBER);
   const replays = createReplayCache<Promise<unknown>>({ ttlMs: REPLAY_TTL_MS, maxEntries: REPLAY_MAX_ENTRIES });
   const healthMonitor = deps.health ?? createHealthMonitor({ status: deps.providerStatus ?? envStatus(env), probes: {}, now: () => new Date() });
   async function execute(name: EndpointName, request: FastifyRequest, params: Record<string, unknown>, query: Record<string, unknown>, body: unknown): Promise<unknown> {
@@ -319,18 +326,20 @@ export async function apiRoutes(app: FastifyInstance, deps: ApiDependencies): Pr
       }
       case 'getIntegrationsHealth': return health(env, healthMonitor, query.refresh === '1');
       case 'getLiveAgent': {
-        if (!env.TWILIO_PHONE_NUMBER) throw new AppError('INTEGRATION_UNAVAILABLE', 'Phone number is not configured.');
+        const line = phoneLine();
+        if (!line) throw new AppError('INTEGRATION_UNAVAILABLE', 'Phone number is not configured.');
         const rows = await db.query(`select l.* from public.live_agent l join public.businesses b on b.id = l.business_id
-          where l.phone_number = $1 and b.owner_id = $2`, [env.TWILIO_PHONE_NUMBER, ownerUserId]);
+          where l.phone_number = $1 and b.owner_id = $2`, [line, ownerUserId]);
         if (rows.rows[0]) return mapRow(rows.rows[0]);
         const business = (await db.query('select * from public.businesses where owner_id = $1 order by id limit 1', [ownerUserId])).rows[0];
         if (!business) throw notFound();
         const fallback = mapRow(business);
-        return { phoneNumber: env.TWILIO_PHONE_NUMBER, businessId: fallback.id, updatedAt: fallback.updatedAt };
+        return { phoneNumber: line, businessId: fallback.id, updatedAt: fallback.updatedAt };
       }
       case 'putLiveAgent': {
-        if (!env.TWILIO_PHONE_NUMBER) throw new AppError('INTEGRATION_UNAVAILABLE', 'Phone number is not configured.');
-        return setLiveAgent(db, { agentId: String(object(body).agentId), ownerUserId, phoneNumber: env.TWILIO_PHONE_NUMBER, correlationId: request.correlationId });
+        const line = phoneLine();
+        if (!line) throw new AppError('INTEGRATION_UNAVAILABLE', 'Phone number is not configured.');
+        return setLiveAgent(db, { agentId: String(object(body).agentId), ownerUserId, phoneNumber: line, correlationId: request.correlationId });
       }
       default: throw new AppError('INTERNAL', 'Route is not implemented.');
     }

@@ -147,20 +147,29 @@ export async function seedWorld(db: SeedDb, opts: WorldOptions): Promise<WorldRe
     tally(t, 'agents', outcome);
   }
 
-  // The live_agent row for the one phone number (P-06).
-  const phone = envValue(opts.env, 'TWILIO_PHONE_NUMBER');
-  if (phone === undefined) {
-    notes.push('TWILIO_PHONE_NUMBER is empty, so no live_agent row was seeded; set it and run npm run seed again');
-  } else if (!E164.test(phone)) {
-    throw new Error('TWILIO_PHONE_NUMBER is not an E.164 number such as +15555550199.');
-  } else {
-    tally(t, 'live_agent', await upsertRow(db, 'live_agent', {
-      phone_number: phone, business_id: LIVE_AGENT_TARGET.businessId, agent_id: LIVE_AGENT_TARGET.agentId,
-      agent_version_id: LIVE_AGENT_TARGET.agentVersionId,
-    }, { conflict: ['phone_number'] }));
+  // The live_agent row for the phone number (P-06): the Twilio number, as before, and with
+  // TELEPHONY_PROVIDER=agentphone (D-12) also the AgentPhone number, so the server's phone line resolves the
+  // pizza agent whichever provider answers. Both are upserts on phone_number, so a second run changes nothing.
+  for (const name of liveAgentNumberVars(opts.env)) {
+    const phone = envValue(opts.env, name);
+    if (phone === undefined) {
+      notes.push(`${name} is empty, so no live_agent row was seeded for it; set it and run npm run seed again`);
+    } else if (!E164.test(phone)) {
+      throw new Error(`${name} is not an E.164 number such as +15555550199.`);
+    } else {
+      tally(t, 'live_agent', await upsertRow(db, 'live_agent', {
+        phone_number: phone, business_id: LIVE_AGENT_TARGET.businessId, agent_id: LIVE_AGENT_TARGET.agentId,
+        agent_version_id: LIVE_AGENT_TARGET.agentVersionId,
+      }, { conflict: ['phone_number'] }));
+    }
   }
 
   return { tables: t, notes };
+}
+
+/** The settings whose numbers get the seeded live agent: Twilio's, and AgentPhone's when it is the provider. */
+export function liveAgentNumberVars(env: SeedEnv): string[] {
+  return envValue(env, 'TELEPHONY_PROVIDER') === 'agentphone' ? ['TWILIO_PHONE_NUMBER', 'AGENTPHONE_PHONE_NUMBER'] : ['TWILIO_PHONE_NUMBER'];
 }
 
 export function factRow(f: BusinessFact): Record<string, Cell> {

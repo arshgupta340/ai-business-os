@@ -296,6 +296,27 @@ describe('core REST with migrated Postgres', () => {
     assertError(await app.inject({ method: 'PUT', url: '/api/live-agent', headers: { authorization: 'Bearer b' }, payload: { agentId: 'agt_b' } }), 'FORBIDDEN_BUSINESS');
   });
 
+  it('D-12: with TELEPHONY_PROVIDER=agentphone the live agent route reads and sets the AgentPhone number', async () => {
+    const apEnv = parseEnv({ TWILIO_PHONE_NUMBER: '+15555550199', TELEPHONY_PROVIDER: 'agentphone', AGENTPHONE_PHONE_NUMBER: '+15555550123' });
+    const isolated = await buildApp(apEnv, { db: h.db, verifier, ports });
+    try {
+      const empty = await isolated.inject({ url: '/api/live-agent', headers });
+      expect(ENDPOINTS.getLiveAgent.response.parse(empty.json())).toMatchObject({ phoneNumber: '+15555550123', businessId: 'biz_a' });
+      expect(empty.json().agentId).toBeUndefined();
+      const put = await isolated.inject({ method: 'PUT', url: '/api/live-agent', headers, payload: { agentId: 'agt_a' } });
+      expect(put.statusCode).toBe(200);
+      expect(put.json()).toMatchObject({ phoneNumber: '+15555550123', agentId: 'agt_a' });
+      const rows = await h.pg.query<{ phone_number: string }>("select phone_number from public.live_agent where phone_number = '+15555550123'");
+      expect(rows.rows).toHaveLength(1);
+      expect((await isolated.inject({ url: '/api/live-agent', headers })).json()).toMatchObject({ phoneNumber: '+15555550123', agentId: 'agt_a' });
+    } finally { await isolated.close(); }
+    // The Twilio app (provider unset) still answers for the Twilio number.
+    expect((await app.inject({ url: '/api/live-agent', headers })).json().phoneNumber).toBe('+15555550199');
+    // AgentPhone selected without its number: the route refuses rather than falling back to Twilio.
+    const noNumber = await buildApp(parseEnv({ TWILIO_PHONE_NUMBER: '+15555550199', TELEPHONY_PROVIDER: 'agentphone' }), { db: h.db, verifier, ports });
+    try { assertError(await noNumber.inject({ url: '/api/live-agent', headers }), 'INTEGRATION_UNAVAILABLE'); } finally { await noNumber.close(); }
+  });
+
   it('returns INTEGRATION_UNAVAILABLE when a required optional integration is missing', async () => {
     const isolated = await buildApp(parseEnv({}), { db: h.db, verifier, ports });
     try { assertError(await isolated.inject({ url: '/api/live-agent', headers }), 'INTEGRATION_UNAVAILABLE'); } finally { await isolated.close(); }

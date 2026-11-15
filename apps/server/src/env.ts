@@ -46,6 +46,18 @@ const EnvSchema = z.object({
   AGENTPHONE_WEBHOOK_SECRET: z.string().min(1).optional(),
   AGENTPHONE_NUMBER_ID: z.string().min(1).optional(),
   AGENTPHONE_PHONE_NUMBER: z.string().regex(/^\+[1-9][0-9]{6,14}$/).optional(),
+  // The AgentPhone voice path's turn engine (docs/notes-agentphone.md, "The turn engine"): `realtime`, one
+  // OpenAI Realtime text session per call, or `builder`, the slower shared sim-call runner.
+  AGENTPHONE_TURN_ENGINE: z.enum(['realtime', 'builder']).default('realtime'),
+  // The opening line. Used only when it says "AI assistant"; otherwise the default greeting is used.
+  AGENTPHONE_GREETING: z.string().min(1).max(300).optional(),
+  // first_reply (default): the server speaks the greeting on the call's first event. begin_message: AgentPhone is
+  // trusted to speak the agent's beginMessage (its schema calls that field hosted mode only).
+  AGENTPHONE_GREETING_MODE: z.enum(['first_reply', 'begin_message']).default('first_reply'),
+  // Read by scripts/register-webhooks.ts --agentphone-only, not by the server: the agent's barge-in setting
+  // (default 0.3) and which agent to update (default: the agent on AGENTPHONE_NUMBER_ID).
+  AGENTPHONE_INTERRUPTION_SENSITIVITY: z.coerce.number().min(0).max(1).optional(),
+  AGENTPHONE_AGENT_ID: z.string().min(1).optional(),
   SURGE_API_KEY: z.string().min(1).optional(),
   SURGE_ACCOUNT_ID: z.string().min(1).optional(),
   ANDROID_GATEWAY_URL: z.url().optional(),

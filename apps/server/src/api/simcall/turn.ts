@@ -88,6 +88,8 @@ export interface TurnInput {
   abandoned?: () => boolean;
   /** Optional. Called with each tool call the turn starts; the promise settles when that call is over. */
   onToolCall?: (settled: Promise<void>) => void;
+  /** Optional lines after the instructions (the AgentPhone channel rules, D-12). Sim-call does not pass it. */
+  extraInstructions?: string | undefined;
 }
 
 export type TurnResult = { reply: string; toolTrace: ToolTraceEntry[]; refused?: GuardrailRule };
@@ -160,7 +162,7 @@ export async function runAgentTurn(deps: TurnDeps, input: TurnInput): Promise<Tu
   let reply: string;
   try {
     ({ reply } = await deps.model.respond({
-      instructions: simCallInstructions(spec, { businessName: input.businessName, messageChannel: deps.messageChannel }, session.stage),
+      instructions: simCallInstructions(spec, { businessName: input.businessName, messageChannel: deps.messageChannel }, session.stage) + (input.extraInstructions ? `\n${input.extraInstructions}` : ''),
       history: session.history, message: input.message, tools, now: deps.now(), executeTool,
     }));
   } catch {

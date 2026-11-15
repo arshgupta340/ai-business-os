@@ -14,7 +14,7 @@
 import { PassThrough } from 'node:stream';
 import { ERROR_CODE_INFO, WEBHOOK_ENDPOINTS, makeApiError } from '@abos/contracts';
 import { markWebhookProcessed } from '@abos/db';
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import type { QueryDb } from '../../db/index';
 import type { TelephonyEvent, TelephonyProvider, TurnReply } from '../types';
 import { SPEECH, type AgentPhoneVoice } from './voice';
@@ -25,6 +25,8 @@ export const DEFAULT_INTERIM_AFTER_MS = 1500;
 export const REJECTED_EVENTS_PER_MINUTE = 30;
 /** event_type of the row that remembers a delivery's signed content. It carries no payload and is never acted on. */
 export const REPLAY_GUARD_EVENT = 'replay_guard';
+/** Voice turns whose reply this process remembers, so a repeated delivery hears the same reply (FIFO bound). */
+export const REMEMBERED_TURNS = 500;
 
 /** The documented voice reply fields: text, hangup, interim (docs/notes-agentphone.md). */
 export function formatTurnChunks(chunks: { text: string; interim?: boolean; hangup?: boolean }[]): string {
@@ -108,6 +110,23 @@ export const agentPhoneWebhookPlugin: FastifyPluginAsync<AgentPhoneWebhookDeps> 
     return true;
   };
 
+  // A voice turn's reply, by delivery ID. The provider's own repeat of a turn (same X-Webhook-ID; the vendor's
+  // docs say voice turns are not retried, so this is a guard) runs nothing and hears the same reply. The same
+  // signed bytes under another ID are a replay, not a retry: they run nothing and get an empty answer, so a
+  // captured delivery never reads a reply back. Per process and in memory only: the turn itself is
+  // deduplicated in the database before anything runs.
+  const turns = new Map<string, Promise<TurnReply>>();
+  const remember = (deliveryId: string, reply: Promise<TurnReply>) => {
+    turns.set(deliveryId, reply);
+    while (turns.size > REMEMBERED_TURNS) turns.delete(turns.keys().next().value as string);
+  };
+  const speak = async (reply: FastifyReply, text: Promise<TurnReply>) => {
+    const stream = new PassThrough();
+    reply.code(200).type(AGENTPHONE_NDJSON).send(stream);
+    const final = await text;
+    stream.end(formatTurnChunks([{ text: final.text, ...(final.hangup ? { hangup: true } : {}) }]));
+  };
+
   app.post(WEBHOOK_ENDPOINTS.agentphone.path, async (req, reply) => {
     reply.header('X-Correlation-Id', req.id);
     const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
@@ -124,8 +143,12 @@ export const agentPhoneWebhookPlugin: FastifyPluginAsync<AgentPhoneWebhookDeps> 
     const routed = event.kind === 'incoming_call' || event.kind === 'incoming_text' ? await deps.ownerOf(event.to) : undefined;
     const stored = await recordOnce(deps.db, { deliveryId: verified.deliveryId, replayKey: verified.replayKey, eventType: verified.eventType, businessId: routed, providerId: providerIdOf(event),
       ...(event.kind === 'call_status' ? { reason: event.reason } : {}) });
-    // A repeated delivery changes nothing. For a voice turn the caller hears nothing new.
-    if (!stored) return reply.code(200).send({});
+    // A repeated delivery changes nothing. A voice turn this process answered hears the same reply again.
+    if (!stored) {
+      const seen = event.kind === 'incoming_call' ? turns.get(verified.deliveryId) : undefined;
+      if (seen) { await speak(reply, seen); return reply; }
+      return reply.code(200).send({});
+    }
     if (verified.test) { await mark(stored.id, routed); return reply.code(200).send({}); }
 
     if (event.kind === 'incoming_call') {
@@ -134,6 +157,8 @@ export const agentPhoneWebhookPlugin: FastifyPluginAsync<AgentPhoneWebhookDeps> 
       let finished = false;
       const interim = setTimeout(() => { if (!finished) stream.write(formatTurnChunks([{ text: SPEECH.oneMoment, interim: true }])); }, deps.interimAfterMs ?? DEFAULT_INTERIM_AFTER_MS);
       let final: TurnReply = { text: SPEECH.trouble };
+      let settle!: (r: TurnReply) => void;
+      remember(verified.deliveryId, new Promise<TurnReply>((resolve) => { settle = resolve; }));
       // If the provider drops the request before the reply (a barge-in or its own timeout; whether it does is
       // not documented), nobody hears this turn: it is abandoned like a turn past its bound.
       const gone = new AbortController();
@@ -146,6 +171,7 @@ export const agentPhoneWebhookPlugin: FastifyPluginAsync<AgentPhoneWebhookDeps> 
         finished = true;
         clearTimeout(interim);
       }
+      settle(final);
       stream.end(formatTurnChunks([{ text: final.text, ...(final.hangup ? { hangup: true } : {}) }]));
       // Marked with the scope the row was stored under (the business of the dialed number, or none),
       // which mark_webhook_processed checks; the call's own business can differ after an unpublish.

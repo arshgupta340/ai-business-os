@@ -80,7 +80,10 @@ export interface ComposeOptions {
   /** Bound on each integration health probe (tests use a short one). */
   healthProbeTimeoutMs?: number;
   /** D-12: the AgentPhone HTTP ports and voice-turn timings (tests inject fakes and short times). */
-  telephony?: { http?: HttpPort; interimAfterMs?: number; turnTimeoutMs?: number };
+  telephony?: { http?: HttpPort; interimAfterMs?: number; turnTimeoutMs?: number;
+    /** The OpenAI Realtime socket for the AgentPhone realtime engine (tests pass a fake). Default: the provider's. */
+    openaiSocketFactory?: import('../voice/types').OpenAISocketFactory;
+    realtimeLimits?: import('../telephony/agentphone/voice').AgentPhoneRealtimeOptions['limits'] };
   /** D-13 demo mode test seams (a fake WhatsApp adapter, a fake Square sandbox HTTP). Production passes none. */
   demo?: DemoOverrides;
 }
@@ -305,8 +308,12 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     twilio: { validator: providers.twilioValidator, probe: providers.probes?.twilio, missing: voiceMissing },
     ...(options.telephony?.http ? { http: options.telephony.http } : {}) });
   const phoneLine = telephony.active.phoneNumber;
-  // The AgentPhone path answers with the text agent model; without one it stays off (never the recorded stand-in).
-  const modelMissing = options.agentModel || (env.OPENAI_API_KEY && env.OPENAI_BUILDER_MODEL) ? [] : ['OPENAI_API_KEY', 'OPENAI_BUILDER_MODEL'].filter((k) => !env[k as keyof Env]);
+  // The AgentPhone path answers with the realtime engine (an OpenAI socket) or the text agent model; with
+  // neither it stays off (never the recorded stand-in).
+  const realtimeSocket = options.telephony?.openaiSocketFactory ?? providers.openaiSocketFactory;
+  const builderModelReady = Boolean(options.agentModel || (env.OPENAI_API_KEY && env.OPENAI_BUILDER_MODEL));
+  const realtimeReady = env.AGENTPHONE_TURN_ENGINE === 'realtime' && realtimeSocket !== undefined;
+  const modelMissing = builderModelReady || realtimeReady ? [] : ['OPENAI_API_KEY', 'OPENAI_BUILDER_MODEL'].filter((k) => !env[k as keyof Env]);
 
   const agentModel: AgentModel = options.agentModel
     ?? (env.OPENAI_API_KEY && env.OPENAI_BUILDER_MODEL ? new OpenAiAgentModel({ apiKey: env.OPENAI_API_KEY, model: env.OPENAI_BUILDER_MODEL }) : new RecordedAgentModel());
@@ -403,7 +410,15 @@ export function composeServer(env: Env, options: ComposeOptions = {}): ComposedS
     } : undefined,
   };
 
-  const agentphone = createAgentPhoneWiring({ telephony, db, hasDb, calls, toolsetFor, model: agentModel, messageChannel, decisions, now, newId, log,
+  const agentphone = createAgentPhoneWiring({ telephony, db, hasDb, calls, toolsetFor, model: builderModelReady ? agentModel : undefined, messageChannel, decisions, now, newId, log,
+    engine: env.AGENTPHONE_TURN_ENGINE,
+    realtime: realtimeSocket ? {
+      socketFactory: realtimeSocket, ...(env.OPENAI_REALTIME_MODEL ? { model: env.OPENAI_REALTIME_MODEL } : {}),
+      facts: { snapshot: (businessId) => facts.readVerified({ businessId, signal: NO_SIGNAL }) },
+      menu: { snapshot: (businessId) => toolsetPorts.catalog.search({ businessId, limit: VOICE_MENU_LIMIT, signal: NO_SIGNAL }) },
+      greeting: env.AGENTPHONE_GREETING, greetingMode: env.AGENTPHONE_GREETING_MODE,
+      ...(options.telephony?.realtimeLimits ? { limits: options.telephony.realtimeLimits } : {}),
+    } : undefined,
     ...(options.telephony?.interimAfterMs !== undefined ? { interimAfterMs: options.telephony.interimAfterMs } : {}),
     ...(options.telephony?.turnTimeoutMs !== undefined ? { turnTimeoutMs: options.telephony.turnTimeoutMs } : {}),
     receiptsEnabled: messageChannel === 'agentphone', modelMissing });

@@ -24,11 +24,13 @@
 // - NOT verified: that list and filter behavior hold on a real account. Nothing here was run against a real service.
 import { createHash } from 'node:crypto';
 import { WEBHOOK_ENDPOINTS } from '@abos/contracts';
+import { pizzaBusiness } from '@abos/contracts/fixtures';
+import { agentPhoneGreeting } from '../apps/server/src/telephony/agentphone/speech';
 
 // Ports.
 
 export interface HttpRequest {
-  method: 'GET' | 'POST' | 'PUT';
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH';
   headers: Record<string, string>;
   body?: string;
 }
@@ -385,18 +387,34 @@ async function writeSquareEnv(ports: Ports, key: string, url: string): Promise<v
   await ports.envFile.write(rewriteEnvContent(current, [['SQUARE_WEBHOOK_SIGNATURE_KEY', key], ['SQUARE_WEBHOOK_URL', url]]));
 }
 
-// AgentPhone (D-12). From the vendor's documentation, not tested against a live account
+// AgentPhone (D-12). From the vendor's documentation and OpenAPI file, not tested against a live account
 // (docs/notes-agentphone.md): GET and POST https://api.agentphone.ai/v1/webhooks with Bearer auth; POST takes
-// { url } and returns { id, url, secret, status }. "A new secret is generated each time", so this script
-// never posts when the URL is already right, and on --apply writes the new secret to .env.local (hidden),
-// because the old one stops matching. A per-agent webhook would override the project one: not checked here.
+// { url, timeout } (WebhookCreateRequest) and returns { id, url, secret, status, contextLimit, timeout }.
+// "A new secret is generated each time", so this script never posts when the URL and timeout are already
+// right, and on --apply writes a returned secret to .env.local (hidden), because the old one stops matching.
+// When no secret comes back (or the webhook was set elsewhere, for example through AgentPhone's connector),
+// the owner copies it by hand from the AgentPhone dashboard into AGENTPHONE_WEBHOOK_SECRET; the script only
+// says whether that setting is present. A per-agent webhook would override the project one: not checked here.
+//
+// The agent's voice settings (UpdateAgentRequest, PATCH /v1/agents/{agent_id}; read with GET): voiceMode,
+// beginMessage, interruptionSensitivity (0 to 1) and enableBackchannel. The agent is AGENTPHONE_AGENT_ID, or
+// the agentId of the number AGENTPHONE_NUMBER_ID (GET /v1/numbers/{number_id}). Only changed fields are sent.
 
 export const AGENTPHONE_API_BASE = 'https://api.agentphone.ai';
 export const AGENTPHONE_WEBHOOK_PATH = WEBHOOK_ENDPOINTS.agentphone.path;
 
+/** The webhook timeout for these turns, in seconds (AgentPhone allows 5 to 120; its default is 30). */
+export const AGENTPHONE_WEBHOOK_TIMEOUT_S = 10;
+/** The barge-in setting for the demo: low, so the agent is not easily interrupted (AgentPhone's default is 0.8). */
+export const AGENTPHONE_DEFAULT_SENSITIVITY = 0.3;
+
 export interface AgentPhoneResult {
   before: string | undefined;
   after: string;
+  timeoutBefore: number | undefined;
+  timeoutAfter: number;
+  /** --apply posted the webhook but AgentPhone returned no secret: it must be copied by hand. */
+  secretMissing: boolean;
   changed: boolean;
   applied: boolean;
   envWritten: boolean;
@@ -418,17 +436,77 @@ export async function registerAgentPhone(ports: Ports, opts: { base: string; app
   const body = await readJson(res);
   if (res.status !== 200 && res.status !== 404) throw new RegisterError(agentphoneError(body, res.status));
   const before = res.status === 200 ? str(record(body)?.url) : undefined;
-  if (before === url) return { before, after: url, changed: false, applied: false, envWritten: false, envPath };
-  if (!opts.apply) return { before, after: url, changed: true, applied: false, envWritten: false, envPath };
-  const post = await ports.fetch(`${AGENTPHONE_API_BASE}/v1/webhooks`, { method: 'POST', headers, body: JSON.stringify({ url }) });
+  const t = record(body)?.timeout;
+  const timeoutBefore = res.status === 200 && typeof t === 'number' ? t : undefined;
+  const timeoutAfter = AGENTPHONE_WEBHOOK_TIMEOUT_S;
+  const base = { before, after: url, timeoutBefore, timeoutAfter, secretMissing: false, envPath };
+  if (before === url && timeoutBefore === timeoutAfter) return { ...base, changed: false, applied: false, envWritten: false };
+  if (!opts.apply) return { ...base, changed: true, applied: false, envWritten: false };
+  const post = await ports.fetch(`${AGENTPHONE_API_BASE}/v1/webhooks`, { method: 'POST', headers, body: JSON.stringify({ url, timeout: timeoutAfter }) });
   const created = await readJson(post);
   if (post.status !== 200 && post.status !== 201) throw new RegisterError(agentphoneError(created, post.status));
   const secret = str(record(created)?.secret);
   if (str(record(created)?.url) !== url) throw new RegisterError('AgentPhone did not return the new webhook URL.');
-  if (!secret) throw new RegisterError('AgentPhone set the webhook but returned no secret. Read it in the AgentPhone dashboard and set AGENTPHONE_WEBHOOK_SECRET.');
+  // No secret in the answer: the webhook is set, and the owner copies the secret from the dashboard by hand.
+  if (!secret) return { ...base, changed: true, applied: true, envWritten: false, secretMissing: true };
   const current = (await ports.envFile.read()) ?? '';
   await ports.envFile.write(rewriteEnvContent(current, [['AGENTPHONE_WEBHOOK_SECRET', secret]]));
-  return { before, after: url, changed: true, applied: true, envWritten: true, envPath };
+  return { ...base, changed: true, applied: true, envWritten: true };
+}
+
+/** The agent voice settings this script manages, as AgentPhone names them. */
+export type AgentVoiceSettings = { voiceMode: string | undefined; beginMessage: string | undefined; interruptionSensitivity: number | undefined; enableBackchannel: boolean | undefined };
+
+export interface AgentPhoneAgentResult {
+  agentId: string;
+  before: AgentVoiceSettings;
+  after: { voiceMode: 'webhook'; beginMessage: string; interruptionSensitivity: number; enableBackchannel: false };
+  /** The fields that differ, which --apply sends. */
+  changes: (keyof AgentVoiceSettings)[];
+  applied: boolean;
+}
+
+/** AGENTPHONE_INTERRUPTION_SENSITIVITY, or the demo default. Refuses a value outside 0 to 1. */
+export function interruptionSensitivity(env: Ports['env']): number {
+  const raw = env.AGENTPHONE_INTERRUPTION_SENSITIVITY?.trim();
+  if (raw === undefined || raw === '') return AGENTPHONE_DEFAULT_SENSITIVITY;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 1) throw new RegisterError('AGENTPHONE_INTERRUPTION_SENSITIVITY must be a number from 0 to 1.');
+  return n;
+}
+
+/** The agent's settings for the demo: webhook voice mode, the short greeting, low interruption sensitivity, no backchannel. */
+export async function configureAgentPhoneAgent(ports: Ports, opts: { apply: boolean; businessName: string }): Promise<AgentPhoneAgentResult> {
+  const key = required(ports.env, 'AGENTPHONE_API_KEY');
+  const headers = { Authorization: `Bearer ${key}`, Accept: 'application/json', 'Content-Type': 'application/json' };
+  const after = { voiceMode: 'webhook' as const, beginMessage: agentPhoneGreeting(opts.businessName, 'restaurant_order_taker', ports.env.AGENTPHONE_GREETING),
+    interruptionSensitivity: interruptionSensitivity(ports.env), enableBackchannel: false as const };
+  let agentId = ports.env.AGENTPHONE_AGENT_ID?.trim() || undefined;
+  if (!agentId) {
+    const numberId = required(ports.env, 'AGENTPHONE_NUMBER_ID');
+    const res = await ports.fetch(`${AGENTPHONE_API_BASE}/v1/numbers/${encodeURIComponent(numberId)}`, { method: 'GET', headers });
+    const body = await readJson(res);
+    if (res.status !== 200) throw new RegisterError(agentphoneError(body, res.status));
+    agentId = str(record(body)?.agentId);
+    if (!agentId) throw new RegisterError('The AgentPhone number has no agent. Attach an agent to the number, or set AGENTPHONE_AGENT_ID.');
+  }
+  const path = `${AGENTPHONE_API_BASE}/v1/agents/${encodeURIComponent(agentId)}`;
+  const res = await ports.fetch(path, { method: 'GET', headers });
+  const read = await readJson(res);
+  const agent = record(read);
+  if (res.status !== 200 || !agent) throw new RegisterError(agentphoneError(read, res.status));
+  const before: AgentVoiceSettings = {
+    voiceMode: str(agent.voiceMode), beginMessage: str(agent.beginMessage),
+    interruptionSensitivity: typeof agent.interruptionSensitivity === 'number' ? agent.interruptionSensitivity : undefined,
+    enableBackchannel: typeof agent.enableBackchannel === 'boolean' ? agent.enableBackchannel : undefined,
+  };
+  const changes = (Object.keys(after) as (keyof AgentVoiceSettings)[]).filter((k) => before[k] !== after[k]);
+  if (!opts.apply || changes.length === 0) return { agentId, before, after, changes, applied: false };
+  const patch = Object.fromEntries(changes.map((k) => [k, after[k]]));
+  const updated = await ports.fetch(path, { method: 'PATCH', headers, body: JSON.stringify(patch) });
+  const answer = await readJson(updated);
+  if (updated.status !== 200) throw new RegisterError(agentphoneError(answer, updated.status));
+  return { agentId, before, after, changes, applied: true };
 }
 
 // Command line.
@@ -439,6 +517,8 @@ export interface Options {
   square: boolean;
   /** Only with --agentphone-only; the default run is Twilio and Square as before. */
   agentphone?: true;
+  /** --business "Name": the business name in the AgentPhone greeting (default: the seeded pizza shop). */
+  business?: string;
   base: string | undefined;
 }
 
@@ -449,6 +529,7 @@ export function parseArgs(argv: readonly string[]): Options {
   let squareOnly = false;
   let agentphoneOnly = false;
   let base: string | undefined;
+  let business: string | undefined;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--apply') apply = true;
@@ -462,12 +543,18 @@ export function parseArgs(argv: readonly string[]): Options {
       base = next;
       i += 1;
     } else if (arg !== undefined && arg.startsWith('--base=')) base = arg.slice('--base='.length);
-    else throw new RegisterError(`Unknown option "${arg ?? ''}". Use --dry-run, --apply, --twilio-only, --square-only, --agentphone-only or --base <url>.`);
+    else if (arg === '--business') {
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith('--')) throw new RegisterError('--business needs a name, for example --business "Demo Pizza Co."');
+      business = next;
+      i += 1;
+    } else throw new RegisterError(`Unknown option "${arg ?? ''}". Use --dry-run, --apply, --twilio-only, --square-only, --agentphone-only, --base <url> or --business <name>.`);
   }
   if (apply && dry) throw new RegisterError('Use --dry-run or --apply, not both.');
   if (twilioOnly && squareOnly) throw new RegisterError('Use --twilio-only or --square-only, not both.');
   if (agentphoneOnly && (twilioOnly || squareOnly)) throw new RegisterError('Use --agentphone-only alone, not with --twilio-only or --square-only.');
-  if (agentphoneOnly) return { apply, twilio: false, square: false, agentphone: true, base };
+  if (business !== undefined && !agentphoneOnly) throw new RegisterError('--business goes with --agentphone-only.');
+  if (agentphoneOnly) return { apply, twilio: false, square: false, agentphone: true, base, ...(business !== undefined ? { business } : {}) };
   return { apply, twilio: !squareOnly, square: !twilioOnly, base };
 }
 
@@ -565,26 +652,51 @@ export async function run(ports: Ports, argv: readonly string[], log: (line: str
   }
 
   let agentphoneWritten = false;
+  let agentphoneSecretByHand = false;
   if (opts.agentphone) {
     say('');
     say('AgentPhone');
     try {
       const r = await registerAgentPhone(guardedPorts, { base, apply: opts.apply });
-      say(`  Webhook URL: ${show(r.before)} -> ${r.after}`);
+      say(`  Webhook URL:     ${show(r.before)} -> ${r.after}`);
+      say(`  Webhook timeout: ${r.timeoutBefore === undefined ? '(not set)' : `${r.timeoutBefore} s`} -> ${r.timeoutAfter} s`);
       if (!r.changed) say('  Already set. No change (the secret was not rotated).');
-      else if (r.applied) {
+      else if (r.applied && r.envWritten) {
         agentphoneWritten = true;
         say(`  Updated. AgentPhone generated a new secret; wrote AGENTPHONE_WEBHOOK_SECRET (value hidden) to ${r.envPath}. The old secret no longer matches.`);
+      } else if (r.applied) {
+        agentphoneSecretByHand = true;
+        say('  Updated. AgentPhone returned no secret: copy the signing secret from the AgentPhone dashboard into AGENTPHONE_WEBHOOK_SECRET on the host.');
       } else say('  Would update (dry run). Applying generates a new webhook secret.');
     } catch (err) {
       failed = true;
       say(`  Failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+    say(`  AGENTPHONE_WEBHOOK_SECRET here: ${ports.env.AGENTPHONE_WEBHOOK_SECRET?.trim() ? 'set' : 'not set'}${agentphoneWritten ? ' (a new one was written to the env file)' : ''}`);
+    // The webhook goes first: an agent switched to webhook mode with no webhook fails its calls.
+    if (!failed) {
+      say('');
+      say('AgentPhone agent voice settings');
+      try {
+        const a = await configureAgentPhoneAgent(guardedPorts, { apply: opts.apply, businessName: opts.business ?? pizzaBusiness.name });
+        const fmt = (v: unknown) => (v === undefined ? '(not set)' : typeof v === 'string' ? JSON.stringify(v) : String(v));
+        say(`  Agent: ${a.agentId}`);
+        for (const k of ['voiceMode', 'beginMessage', 'interruptionSensitivity', 'enableBackchannel'] as const) say(`  ${k.padEnd(24)}${fmt(a.before[k])} -> ${fmt(a.after[k])}`);
+        if (a.changes.length === 0) say('  Already set. No change.');
+        else if (a.applied) say(`  Updated: ${a.changes.join(', ')}.`);
+        else say(`  Would update (dry run): ${a.changes.join(', ')}.`);
+        say('  Note: AgentPhone documents beginMessage for hosted mode; the server speaks the greeting itself (AGENTPHONE_GREETING_MODE=first_reply).');
+      } catch (err) {
+        failed = true;
+        say(`  Failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
   say('');
   if (agentphoneWritten) say(`Next: copy AGENTPHONE_WEBHOOK_SECRET from ${ports.envFile.path} into the host's environment settings, then redeploy.`);
-  else if (opts.agentphone) say('Next: after --apply, copy AGENTPHONE_WEBHOOK_SECRET into the host environment settings, then redeploy. The AgentPhone agent must use voiceMode "webhook".');
+  else if (agentphoneSecretByHand) say('Next: copy the signing secret from the AgentPhone dashboard into AGENTPHONE_WEBHOOK_SECRET on the host, then redeploy. The server refuses AgentPhone webhooks until it is set.');
+  else if (opts.agentphone) say('Next: after --apply, make sure AGENTPHONE_WEBHOOK_SECRET on the host is the secret AgentPhone shows for this webhook, then redeploy. The AgentPhone agent must use voiceMode "webhook".');
   else if (squareWritten) say(`Next: copy SQUARE_WEBHOOK_SIGNATURE_KEY and SQUARE_WEBHOOK_URL from ${squarePath} into the host's environment settings, then redeploy.`);
   else if (opts.square) say(`Next: after --apply, copy SQUARE_WEBHOOK_SIGNATURE_KEY and SQUARE_WEBHOOK_URL from ${squarePath} into the host's environment settings, then redeploy.`);
   else say('Next: nothing to copy to the host for Twilio.');

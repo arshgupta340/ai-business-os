@@ -216,9 +216,27 @@ describe('the TELEPHONY_PROVIDER switch', () => {
       expect(a.statusCode).toBe(503);
       const health = await app.composed.health.read({ refresh: true });
       expect(health.twilio).toMatchObject({ state: 'disconnected', detail: expect.stringContaining('telephony provider agentphone: missing AGENTPHONE_WEBHOOK_SECRET, AGENTPHONE_NUMBER_ID, AGENTPHONE_PHONE_NUMBER') });
-      expect(health.twilio.detail).toContain('OPENAI_BUILDER_MODEL');
+      // The realtime turn engine (the default) needs only OPENAI_API_KEY, which is set here.
+      expect(health.twilio.detail).not.toContain('OPENAI_BUILDER_MODEL');
       expect(app.composed.agentphone.enabled).toBe(false);
     } finally { await app.close(); }
+  });
+
+  it('with the builder turn engine, the AgentPhone line also needs OPENAI_BUILDER_MODEL', async () => {
+    const app = await buildApp(parseEnv({ TELEPHONY_PROVIDER: 'agentphone', AGENTPHONE_TURN_ENGINE: 'builder', AGENTPHONE_API_KEY: 'k', TWILIO_AUTH_TOKEN: 't', OPENAI_API_KEY: 'o', PUBLIC_SERVER_URL: 'https://x.example.test' }));
+    try {
+      const health = await app.composed.health.read({ refresh: true });
+      expect(health.twilio.detail).toContain('OPENAI_BUILDER_MODEL');
+    } finally { await app.close(); }
+  });
+
+  it('AGENTPHONE_TURN_ENGINE and AGENTPHONE_GREETING_MODE are validated, with realtime and first_reply as defaults', () => {
+    expect(parseEnv({}).AGENTPHONE_TURN_ENGINE).toBe('realtime');
+    expect(parseEnv({}).AGENTPHONE_GREETING_MODE).toBe('first_reply');
+    expect(parseEnv({ AGENTPHONE_TURN_ENGINE: 'builder' }).AGENTPHONE_TURN_ENGINE).toBe('builder');
+    expect(() => parseEnv({ AGENTPHONE_TURN_ENGINE: 'fast' })).toThrow(/AGENTPHONE_TURN_ENGINE/);
+    expect(() => parseEnv({ AGENTPHONE_GREETING_MODE: 'never' })).toThrow(/AGENTPHONE_GREETING_MODE/);
+    expect(() => parseEnv({ AGENTPHONE_INTERRUPTION_SENSITIVITY: '1.5' })).toThrow(/AGENTPHONE_INTERRUPTION_SENSITIVITY/);
   });
 });
 

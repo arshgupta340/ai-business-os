@@ -15,7 +15,7 @@ const PIZZA = 'biz_pizza_01';
 /** Test-only webhook secret. Not a credential. */
 const SECRET = 'whsec_e2e_test_only';
 const CART: Cart = { lines: [{ catalogItemId: 'SQ_ITEM_PEP', variationId: 'SQ_VAR_PEP_LG', quantity: 1, modifierIds: [] }] };
-const AP_ENV = { TELEPHONY_PROVIDER: 'agentphone', AGENTPHONE_API_KEY: 'test-agentphone-key', AGENTPHONE_WEBHOOK_SECRET: SECRET,
+const AP_ENV = { TELEPHONY_PROVIDER: 'agentphone', AGENTPHONE_TURN_ENGINE: 'builder', AGENTPHONE_API_KEY: 'test-agentphone-key', AGENTPHONE_WEBHOOK_SECRET: SECRET,
   AGENTPHONE_NUMBER_ID: 'num_e2e', AGENTPHONE_PHONE_NUMBER: PHONE };
 const silentLog: SeamDeps['log'] = { info() {}, warn() {}, error() {} };
 
@@ -122,7 +122,7 @@ describe('AgentPhone voice turns (TELEPHONY_PROVIDER=agentphone)', () => {
     for (const t of tools) expect(['read', 'propose']).toContain(CAPABILITIES[TOOL_CAPABILITY[t]].effect);
   });
 
-  it('a replayed delivery ID runs no second turn', async () => {
+  it('a repeated delivery ID runs no second turn and hears the same reply', async () => {
     let turns = 0;
     w.model.push(async () => { turns += 1; return 'Hello.'; }, async () => { turns += 1; return 'Again.'; });
     const body = voiceTurn('call_ap_2', 'Hi there');
@@ -130,7 +130,7 @@ describe('AgentPhone voice turns (TELEPHONY_PROVIDER=agentphone)', () => {
     const b = await signed(w, body, { id: 'whd_replay_1' });
     expect(chunks(a.payload)).toEqual([{ text: 'Hello.' }]);
     expect(b.statusCode).toBe(200);
-    expect(b.json()).toEqual({});
+    expect(chunks(b.payload)).toEqual([{ text: 'Hello.' }]);
     expect(turns).toBe(1);
     // The second script is still queued; the next real turn uses it.
     await signed(w, voiceTurn('call_ap_2', 'drain'));
