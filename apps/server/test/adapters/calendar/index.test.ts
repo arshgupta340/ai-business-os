@@ -65,6 +65,15 @@ describe('calendar adapter: getAvailability', () => {
     expect(s.freebusy.mock.calls[0]![0].requestBody).toMatchObject({ timeMin, timeMax });
   });
 
+  // The `near` lookup of read_calendar_availability asks for every slot of the day and picks from it.
+  it('returns the whole day when asked for a day of slots', async () => {
+    const s = setup();
+    const result = await s.adapter.getAvailability({ ...query, maxSlots: 96 });
+    // 09:00 to 17:00, a 30 minute service on the 15 minute grid: the last start is 16:30.
+    expect(result.ok && result.slots).toHaveLength(31);
+    expect(result.ok && result.slots.at(-1)?.startUtc).toBe('2026-11-17T00:30:00.000Z');
+  });
+
   it('rejects bad input as VALIDATION_FAILED without calling Google', async () => {
     const s = setup();
     for (const bad of [
@@ -72,7 +81,7 @@ describe('calendar adapter: getAvailability', () => {
       { ...query, serviceDurationMinutes: 0 },
       { ...query, timezone: 'Mars/Olympus' },
       { ...query, date: '2026-02-30' },
-      { ...query, maxSlots: 6 },
+      { ...query, maxSlots: 97 },
     ]) expect(await s.adapter.getAvailability(bad)).toEqual({ ok: false, reason: 'VALIDATION_FAILED', retryable: false });
     expect(s.freebusy).not.toHaveBeenCalled();
   });

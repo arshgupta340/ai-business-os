@@ -159,6 +159,7 @@ describe('computeSlots: input checks', () => {
     expect(() => run({ serviceDurationMinutes: 0 })).toThrow(/serviceDurationMinutes/);
     expect(() => run({ bufferMinutes: -5 })).toThrow(/bufferMinutes/);
     expect(() => run({ maxSlots: 0 })).toThrow(/maxSlots/);
+    expect(() => run({ maxSlots: 97 })).toThrow(/maxSlots/);
     expect(() => run({ hours: { tue: open('22:00', '02:00') } })).toThrow(/cross midnight/);
     expect(() => run({ date: '2026-13-01' })).toThrow();
     expect(() => run({}, [{ start: 'later', end: 'soon' }])).toThrow(/busy/);
