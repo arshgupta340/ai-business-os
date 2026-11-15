@@ -6,6 +6,7 @@ import {Button} from '@astryxdesign/core/Button';
 import {DropdownMenu} from '@astryxdesign/core/DropdownMenu';
 import {Text} from '@astryxdesign/core/Text';
 import {VStack} from '@astryxdesign/core/VStack';
+import {withBasePath} from '@/lib/env';
 import {useAuth} from '@/lib/session/auth';
 
 /**
@@ -13,7 +14,7 @@ import {useAuth} from '@/lib/session/auth';
  * face of a person who does not exist. If the file fails to load, the circle
  * shows the owner's initials.
  */
-export const OWNER_AVATAR_SRC = '/owner-avatar.jpg';
+export const OWNER_AVATAR_SRC = withBasePath('/owner-avatar.jpg');
 
 /** The profile circle in the top bar. Its menu shows who is signed in and has Sign out. */
 export function OwnerControls() {

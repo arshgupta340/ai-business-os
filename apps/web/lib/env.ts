@@ -5,6 +5,15 @@
  * as literal `process.env.NAME` expressions, so keep each read below as is.
  */
 
+/**
+ * A path under the site's base path (NEXT_PUBLIC_BASE_PATH, set only for the
+ * GitHub Pages build). Next adds it to links and router calls by itself; this is
+ * for the rest: files in public/ and full-page loads.
+ */
+export function withBasePath(path: string): string {
+  return `${process.env.NEXT_PUBLIC_BASE_PATH ?? ''}${path}`;
+}
+
 /** True when the app runs on fixtures with no backend (NEXT_PUBLIC_MOCK=1). */
 export function isMockMode(): boolean {
   return process.env.NEXT_PUBLIC_MOCK === '1';
