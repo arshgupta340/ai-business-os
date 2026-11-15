@@ -33,7 +33,7 @@ export function BuildScreen() {
 
   let body;
   if (!businessId) {
-    body = <EmptyState title="Choose a business" description="Pick a business in the top bar to build an agent for it." />;
+    body = <EmptyState title="Choose a business" description="Choose a business in the top bar to build an agent for it." />;
   } else if (!sessionId && createError) {
     body = (
       <ErrorState
