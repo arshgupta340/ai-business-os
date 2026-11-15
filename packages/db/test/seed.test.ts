@@ -331,13 +331,13 @@ describe('seed:demo-shop (issue #161)', () => {
     expect(rows.some((r) => r.item_name === 'Margherita')).toBe(false);
     for (const r of rows) {
       expect(r.modifier_lists).toEqual([]);
-      expect([[`Small`, 1495], ['Medium', 2595], ['Large', 3445]]).toContainEqual([r.variation_name, r.price_minor]);
+      expect([['Small', 1500], ['Medium', 2500], ['Large', 3500]]).toContainEqual([r.variation_name, r.price_minor]);
       expect(String(r.square_variation_id)).toMatch(/^SQREAL/);
     }
     // The Pepperoni that was already in Square is updated in place: same variation ID, new price, no toppings.
     const pepperoni = rows.find((r) => r.item_name === 'Pepperoni' && r.variation_name === 'Large')!;
     expect(pepperoni.square_variation_id).toBe(oldPepperoni.rows[0]!.square_variation_id);
-    expect(pepperoni.price_minor).toBe(3445);
+    expect(pepperoni.price_minor).toBe(3500);
     const squareItem = [...square.store.values()].find((o) => o.type === 'ITEM' && o.item_data?.name === 'Pepperoni')!;
     expect(squareItem.item_data?.modifier_list_info).toEqual([]);
 

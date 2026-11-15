@@ -14,9 +14,9 @@ import { CATALOG_SYNCED_AT } from './catalog';
 export const DEMO_SHOP_NAME = "Woodstock's Pizza";
 
 export const DEMO_SHOP_SIZES = [
-  { code: 'SM', name: 'Small', inches: 8, priceMinor: 1495 },
-  { code: 'MD', name: 'Medium', inches: 12, priceMinor: 2595 },
-  { code: 'LG', name: 'Large', inches: 14, priceMinor: 3445 },
+  { code: 'SM', name: 'Small', inches: 8, priceMinor: 1500 },
+  { code: 'MD', name: 'Medium', inches: 12, priceMinor: 2500 },
+  { code: 'LG', name: 'Large', inches: 14, priceMinor: 3500 },
 ] as const;
 
 /** [slug for the placeholder IDs, name, what is on it]. */
@@ -79,7 +79,7 @@ export const demoShopFacts: DemoShopFact[] = [
   { kind: 'policy', key: 'special_requests', value: { allowed: false, text: 'Phone orders are for the pizzas as they are listed on the menu. For changes to toppings, crust or sauce, please ask at the counter.' } },
   faq('hours', 'When are you open?', 'Sunday to Thursday, 11 AM to midnight. Friday and Saturday, 11 AM to 1 AM. Phone pickup orders are taken until midnight.'),
   faq('sizes', 'What sizes do the pizzas come in?', 'Three sizes: Small is 8 inch, Medium is 12 inch and Large is 14 inch.'),
-  faq('price', 'How much is a pizza?', 'Every pizza costs the same. A Small is $14.95, a Medium is $25.95 and a Large is $34.45, before tax.'),
+  faq('price', 'How much is a pizza?', 'Every pizza costs the same. A Small is $15, a Medium is $25 and a Large is $35, before tax.'),
   faq('no_meat', 'Which pizzas have no meat?', "Cheese, Grateful Veg, Pesto Primavera and Woody's TGB."),
   faq('gluten_free', 'Do you have a gluten-free crust?', 'Yes. The shop offers white, wheat and gluten-free crusts. Crust choices are made at the counter, not on this phone line.'),
   faq('vegan_cheese', 'Do you have vegan cheese?', 'Yes. Vegan cheese can replace the mozzarella. Please ask at the counter.'),

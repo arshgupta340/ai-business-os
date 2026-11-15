@@ -199,7 +199,7 @@ describe('the demo shop menu (issue #161): 16 pizzas, every pizza the same price
   it('writes the size prices once and one line per pizza with its IDs and what is on it', () => {
     const lines = menuLines(demoShopCatalog);
     expect(lines).toHaveLength(17);
-    expect(lines[0]).toBe('Menu, 16 items, prices before tax. Every item costs the same: Small $14.95, Medium $25.95, Large $34.45.');
+    expect(lines[0]).toBe('Menu, 16 items, prices before tax. Every item costs the same: Small $15.00, Medium $25.00, Large $35.00.');
     expect(lines).toContain('Classic (item id SQ_ITEM_WS_CLASSIC; variation ids: Small SQ_VAR_WS_CLASSIC_SM, Medium SQ_VAR_WS_CLASSIC_MD, Large SQ_VAR_WS_CLASSIC_LG): Pepperoni, Italian sausage, black olives, mushrooms, white onions.');
     // A price appears in the header only, not on the 16 item lines.
     expect(lines.slice(1).some((l) => l.includes('$'))).toBe(false);
