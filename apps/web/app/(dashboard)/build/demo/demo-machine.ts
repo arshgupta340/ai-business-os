@@ -30,7 +30,7 @@ export type DemoState = {
   phase: DemoPhase;
   /** Goes up on every send and start over, so a timer from an earlier run is ignored. */
   run: number;
-  message: {text: string; fileName?: string} | null;
+  message: {text: string; fileNames: string[]} | null;
   steps: StepStatus[];
   /** When the number was shown (ms). Only orders created after it count. */
   numberShownAt: number | null;
@@ -39,7 +39,7 @@ export type DemoState = {
 };
 
 export type DemoAction =
-  | {type: 'send'; text: string; fileName?: string}
+  | {type: 'send'; text: string; fileNames: string[]}
   | {type: 'step_done'; run: number; index: number; now: number}
   | {type: 'order_arrived'; approvalId: string}
   | {type: 'decided'; approvalId: string; state: ApprovalState}
@@ -62,7 +62,7 @@ export function demoReducer(state: DemoState, action: DemoAction): DemoState {
       return {
         ...initialDemoState(state.run + 1),
         phase: 'progress',
-        message: {text, ...(action.fileName ? {fileName: action.fileName} : {})},
+        message: {text, fileNames: [...action.fileNames]},
         steps,
       };
     }

@@ -99,7 +99,7 @@ export function DemoScreen({stepScale = 1, pollMs = WAITING_POLL_MS}: DemoScreen
     return (
       <VStack gap={4}>
         {header}
-        <DemoChat message={null} onSend={(text, fileName) => dispatch({type: 'send', text, fileName})} />
+        <DemoChat message={null} onSend={(text, fileNames) => dispatch({type: 'send', text, fileNames})} />
       </VStack>
     );
   }

@@ -10,3 +10,26 @@ body {
 body {
   background-color: var(--color-background-body);
 }
+
+/* The demo order card: the Approved block grows in once the server confirms the decision. */
+@keyframes abos-approved-in {
+  from {
+    transform: scale(0.9);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  @keyframes abos-approved-in {
+    from {
+      opacity: 1;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+}
