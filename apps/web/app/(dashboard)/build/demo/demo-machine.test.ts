@@ -4,7 +4,7 @@ import {demoReducer, initialDemoState, isShowingResult, knownBeforeDemo, pickInc
 import {DEMO_STEPS, runSchedule, totalDurationMs} from './demo-steps';
 
 function sent(): DemoState {
-  return demoReducer(initialDemoState(), {type: 'send', text: '  Margherita 12  ', fileName: 'menu.pdf'});
+  return demoReducer(initialDemoState(), {type: 'send', text: '  Margherita 12  ', fileNames: ['WoodstocksPizzaMenu.pdf', 'WoodstocksCustomerFAQs.pdf']});
 }
 
 function finishAll(state: DemoState, now = 5000): DemoState {
@@ -16,16 +16,16 @@ function finishAll(state: DemoState, now = 5000): DemoState {
 }
 
 describe('demoReducer', () => {
-  it('starts the sequence on one message and keeps the text and file name', () => {
+  it('starts the sequence on one message and keeps the text and file names', () => {
     const s = sent();
     expect(s.phase).toBe('progress');
-    expect(s.message).toEqual({text: 'Margherita 12', fileName: 'menu.pdf'});
+    expect(s.message).toEqual({text: 'Margherita 12', fileNames: ['WoodstocksPizzaMenu.pdf', 'WoodstocksCustomerFAQs.pdf']});
     expect(s.steps[0]).toBe('running');
     expect(s.steps.slice(1).every((x) => x === 'pending')).toBe(true);
   });
 
   it('ignores an empty message', () => {
-    expect(demoReducer(initialDemoState(), {type: 'send', text: '   '}).phase).toBe('compose');
+    expect(demoReducer(initialDemoState(), {type: 'send', text: '   ', fileNames: []}).phase).toBe('compose');
   });
 
   it('runs the steps in order and shows the number after the last one', () => {

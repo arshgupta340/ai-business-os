@@ -22,6 +22,19 @@ import {subjectDiffers} from '../../approvals/_components/ApprovalDecisionConten
 import {WAITING_POLL_MS} from './demo-machine';
 import {DEMO_MENU, demoSizeName, type DemoMenu} from './demo-menu';
 
+/**
+ * The block that takes the place of the Approve button once the server has
+ * confirmed the decision, so the room sees the button turn green. Green is
+ * allowed here because the decision is confirmed (see StatusBadge). The
+ * keyframes are in app/globals.css.
+ */
+const APPROVED_STYLE = {
+  backgroundColor: 'var(--color-success)',
+  borderColor: 'var(--color-success)',
+  color: 'var(--color-on-success)',
+  animation: 'abos-approved-in var(--duration-medium) var(--ease-entrance) both',
+} as const;
+
 /** Order states after which nothing else happens on its own. */
 const SETTLED_ORDER_STATES: readonly Order['status'][] = [
   'PAID_VERIFIED',
@@ -186,9 +199,11 @@ export function OrderCard({businessId, approvalId, timeZone, onDecided, pollMs =
                     <HStack key={`${line.variationId}-${i}`} gap={3} justify="between" vAlign="start">
                       <VStack gap={0}>
                         <Text type="display-3">{`${line.quantity} x ${title}`}</Text>
-                        <Text type="large" weight="normal" color="secondary">
-                          {toppings ? `Toppings: ${toppings}` : 'No toppings'}
-                        </Text>
+                        {toppings ? (
+                          <Text type="large" weight="normal" color="secondary">
+                            {`Toppings: ${toppings}`}
+                          </Text>
+                        ) : null}
                       </VStack>
                       <Text type="large" hasTabularNumbers>
                         {formatMoney(line.lineTotalMinor, order.data!.quote.currency)}
@@ -279,12 +294,14 @@ function Decision({
   // "Approved" only from the server's answer to this decision or a stored decision it reports.
   if (shownState === 'APPROVED') {
     return (
-      <HStack gap={3} vAlign="center">
-        <Icon icon="success" color="success" size="lg" />
-        <Text type="display-1" weight="semibold">
-          Approved
-        </Text>
-      </HStack>
+      <Card padding={4} style={APPROVED_STYLE} role="status">
+        <HStack gap={3} vAlign="center" justify="center">
+          <Icon icon="success" size="lg" />
+          <Text type="display-1" weight="semibold" color="inherit">
+            Approved
+          </Text>
+        </HStack>
+      </Card>
     );
   }
   if (confirmed || shownState !== 'PENDING') {

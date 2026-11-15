@@ -11,6 +11,7 @@ import {advanceMockClock, mockControls, server} from '@/mocks/server';
 import {requests, TEST_BASE_URL, useMockServer} from '@/mocks/test-setup';
 import BuildPage from '../page';
 import {DemoScreen, SERVER_UNREACHABLE_TEXT} from './DemoScreen';
+import {addFiles} from './DemoChat';
 import {MISSING_NUMBER_TEXT} from './ResultPanel';
 
 vi.mock('next/navigation', () => ({
@@ -93,6 +94,53 @@ describe('Build screen switch', () => {
   });
 });
 
+const pdf = (name: string) => new File(['%PDF'], name, {type: 'application/pdf'});
+const MENU_PDF = 'WoodstocksPizzaMenu.pdf';
+const FAQ_PDF = 'WoodstocksCustomerFAQs.pdf';
+
+async function attach(...files: File[]) {
+  const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
+  await act(async () => {
+    fireEvent.change(input, {target: {files}});
+  });
+}
+
+describe('Demo composer attachments', {timeout: 30000}, () => {
+  it('adds a second pick to the list and skips a name already there', () => {
+    const first = addFiles([], [pdf(MENU_PDF)]);
+    const second = addFiles(first, [pdf(FAQ_PDF), pdf(MENU_PDF)]);
+    expect(second.map((f) => f.name)).toEqual([MENU_PDF, FAQ_PDF]);
+    expect(addFiles(second, null)).toHaveLength(2);
+  });
+
+  it('accepts several files, shows one removable token each, and sends both names without a request', async () => {
+    renderDemo(0.02);
+    await screen.findByRole('button', {name: 'Use the suggested prompt'});
+    expect(document.querySelector<HTMLInputElement>('input[type="file"]')!.multiple).toBe(true);
+    await attach(pdf(MENU_PDF));
+    await attach(pdf(FAQ_PDF), pdf(MENU_PDF));
+    expect(screen.getAllByText(MENU_PDF)).toHaveLength(1);
+    expect(screen.getAllByText(FAQ_PDF)).toHaveLength(1);
+    expect(screen.getAllByRole('button', {name: /remove/i}).length).toBeGreaterThanOrEqual(2);
+    await sendPrompt();
+    expect(await screen.findByText(/Create a voice calling agent for this pizza shop/)).toBeTruthy();
+    expect(screen.getByText(MENU_PDF)).toBeTruthy();
+    expect(screen.getByText(FAQ_PDF)).toBeTruthy();
+    expect(requests).toHaveLength(0);
+  });
+
+  it('removes one attached file with its token', async () => {
+    renderDemo(0.02);
+    await screen.findByRole('button', {name: 'Use the suggested prompt'});
+    await attach(pdf(MENU_PDF), pdf(FAQ_PDF));
+    const removeButtons = screen.getAllByRole('button', {name: /remove/i});
+    const removeMenu = removeButtons.find((b) => (b.getAttribute('aria-label') ?? '').includes(MENU_PDF)) ?? removeButtons[0]!;
+    await click(removeMenu);
+    expect(screen.queryByText(MENU_PDF)).toBeNull();
+    expect(screen.getByText(FAQ_PDF)).toBeTruthy();
+  });
+});
+
 describe('Demo run: the build step', {timeout: 30000}, () => {
   it('shows the message, plays the steps in order and makes no request before the number', async () => {
     renderDemo(0.02);
@@ -107,7 +155,9 @@ describe('Demo run: the build step', {timeout: 30000}, () => {
     // The only reads are the finale's pending approvals, after the number shows.
     expect(requests.every((r) => new URL(r.url).pathname === '/api/approvals')).toBe(true);
     expect(screen.getByText('+1 (805) 555 0123')).toBeTruthy();
-    expect(screen.getByText('Small $12.00, Medium $16.00, Large $20.00')).toBeTruthy();
+    expect(screen.getByText('$15.00')).toBeTruthy();
+    expect(screen.getByText('$35.00')).toBeTruthy();
+    expect(screen.getByText("Woody's Waui")).toBeTruthy();
     expect(screen.getByText('Waiting for the call')).toBeTruthy();
   });
 
