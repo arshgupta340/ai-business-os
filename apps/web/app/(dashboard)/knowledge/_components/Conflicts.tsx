@@ -23,6 +23,7 @@ import {
 } from '@/lib/api';
 import {formatMoney} from '@/lib/format';
 import {conflictView} from '@/lib/status';
+import {variationForConflict} from '../prices/_lib/price-row';
 import {ApiErrorBanner, isResolveOnFactsList} from './ApiErrorBanner';
 import {ProposalNotice} from './ProposalNotice';
 import {
@@ -77,7 +78,10 @@ export function ConflictCard({businessId, conflict, facts, catalog, onResolved, 
   const file = useFile(businessId, uploadedFact?.fileId);
   const price = isPriceConflict(conflict);
   const view = conflictView(conflict.state, conflict.required);
-  const match = price ? findVariation(catalog, conflictVariationId(conflict)) : undefined;
+  // By variationId or key first; a real server's conflict has neither, so then by item and variation name.
+  const match = price
+    ? (findVariation(catalog, conflictVariationId(conflict)) ?? variationForConflict(catalog, conflict, facts))
+    : undefined;
   const subject = match
     ? `${match.item.name}, ${match.variation.name}`
     : factKeyLabel(conflict.kind, conflict.key, uploadedFact?.value ?? uploaded?.value);

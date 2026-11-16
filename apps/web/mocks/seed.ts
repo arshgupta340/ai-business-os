@@ -2,19 +2,15 @@
  * Seeds the mock db from the shared demo world: materializeFixtures(now) from
  * @abos/contracts/fixtures. Every row comes from there with its times moved to
  * the current clock and its approval hashes recomputed. This file adds no data
- * of its own. It only does three things the shared world leaves open:
+ * of its own. It only adds the activity history the shared world leaves open:
+ * the shared timelines cover three calls, and for every other seeded call,
+ * order, booking, owner approval and file, the events the real server would
+ * have written are derived from the rows themselves, so Live operations,
+ * Overview and Integrations can show their state.
  *
- * 1. Activity history. The shared timelines cover three calls. For every other
- *    seeded call, order, booking, owner approval and file, the events the real
- *    server would have written are derived from the rows themselves, so Live
- *    operations, Overview and Integrations can show their state.
- * 2. One call per booking. Several shared bookings reuse the call of another
- *    booking (they are spread from it). Live operations shows one journey per
- *    call, so each reused booking gets its own call row here, copied from the
- *    call it names, and points at it. See giveEachBookingItsOwnCall().
- * 3. The resolution response event (factConflictResolvedEvent) is left out of
- *    the stored history: it answers a resolve request, and in the seeded world
- *    that conflict is still open.
+ * The shared world already gives each booking its own call and keeps the
+ * resolution response event (factConflictResolvedEvent) out of
+ * allActivityEvents (issue #103), so neither is handled here.
  */
 import {
   integrationHealth as baseHealth,
@@ -86,47 +82,13 @@ export async function buildSeed(now: number = Date.now()): Promise<MockState> {
     executions: w.executions,
     dispatches: w.messageDispatches,
     syncJobs: w.syncJobs,
-    activity: w.allActivityEvents.filter((e) => e.id !== w.factConflictResolvedEvent.id),
+    activity: [...w.allActivityEvents],
     liveAgent: w.liveAgent,
     health: w.integrationHealth,
   };
-  giveEachBookingItsOwnCall(state);
   state.activity.push(...deriveHistory(state));
   state.activity.sort((a, b) => Date.parse(a.occurredAt) - Date.parse(b.occurredAt));
   return state;
-}
-
-// ------------------------------------------------------------ one call each
-
-/**
- * A booking whose call already belongs to an earlier order or booking gets a
- * copy of that call under its own id (call_demo_<suffix>), timed around the
- * booking's proposal. Nothing else changes: approval payloads do not hold the
- * call id, so every hash stays as materializeFixtures computed it.
- */
-function giveEachBookingItsOwnCall(state: MockState): void {
-  const claimed = new Set(state.orders.map((o) => o.callId));
-  for (const booking of state.bookings) {
-    if (!booking.callId) continue;
-    if (!claimed.has(booking.callId)) {
-      claimed.add(booking.callId);
-      continue;
-    }
-    const source = state.calls.find((c) => c.id === booking.callId);
-    if (!source) continue;
-    const id = `call_demo_${booking.id.replace(/^bkg_demo_/, "")}`;
-    const proposedAt = Date.parse(booking.createdAt);
-    const copy: Call = {
-      ...source,
-      id,
-      startedAt: new Date(proposedAt - 120_000).toISOString(),
-      ...(source.endedAt ? { endedAt: new Date(proposedAt + 30_000).toISOString() } : {}),
-      ...(source.providerCallId ? { providerCallId: `CA${id.replace(/[^a-z0-9]/gi, "").padStart(32, "0").slice(-32)}` } : {}),
-    };
-    state.calls.push(copy);
-    booking.callId = id;
-    claimed.add(id);
-  }
 }
 
 // ---------------------------------------------------------- derived history

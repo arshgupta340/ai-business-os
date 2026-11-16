@@ -215,3 +215,22 @@ export function priceConflictFor(
   }
   return null;
 }
+
+/**
+ * The catalog variation an open menu price conflict is about, by the same
+ * match as priceConflictFor. A real server's menu_item conflict carries no
+ * variationId and its key is the item and variation names (CONTRACTS 3), so
+ * only the name match finds it.
+ */
+export function variationForConflict(
+  catalog: readonly CatalogItem[] | undefined,
+  conflict: FactConflict,
+  facts: readonly BusinessFact[],
+): {item: CatalogItem; variation: CatalogItem['variations'][number]} | undefined {
+  for (const item of catalog ?? []) {
+    for (const variation of item.variations) {
+      if (priceConflictFor(item, variation, [conflict], facts)) return {item, variation};
+    }
+  }
+  return undefined;
+}

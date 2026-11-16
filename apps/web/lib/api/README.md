@@ -191,8 +191,8 @@ The mock db is seeded from the shared demo world: `await materializeFixtures(now
 What `mocks/seed.ts` adds, and why:
 
 - Activity history. The shared timelines cover three calls (`call_demo_01`, `call_demo_b02`, `call_demo_b03`). For every other seeded call, order, booking, owner approval and file, the events the server would have written are derived from the rows themselves (call start and end, proposal, approval request and decision or expiry, each execution step, `checkout.created`, message sent, failed or `UNKNOWN`, payment, the Sheets sync job and its failed attempts). That is how Live operations shows the retrying Sheets report and the `RETRY_REQUIRED`, `NEEDS_REVIEW` and `UNKNOWN` rows. A step in `NEEDS_REVIEW` with no `errorCode` is written as `execution.failed` with `INTEGRATION_UNAVAILABLE`, because the event needs a code.
-- One call per booking. Several shared bookings name the call of another booking (`bkg_demo_b88r`, `b88e` and `b88t` name `call_demo_b01`; `b88u` names `call_demo_b02`). Live operations shows one journey per call, so each of them gets a copy of that call under its own ID (`call_demo_b88r` and so on) and points at it. Approval payloads hold no call ID, so no hash changes.
-- The shared `factConflictResolvedEvent` is not stored: it is the answer to a resolve request, and in the seeded world `cfl_pizza_01` is still open.
+
+The shared world already gives each booking its own call (`call_demo_b88r` and so on) and leaves `factConflictResolvedEvent` out of `allActivityEvents`, since in the seeded world `cfl_pizza_01` is still open (issue #103). The seed copies both as they are.
 
 What has no shared counterpart and stays scripted in `apps/web/mocks`: the builder interview turns and the test console and simulated call replies (`scripts.ts`; their specs, prices, quotes, services and appointment day come from the shared world, and the restaurant preview examples are the shared `previewResponse` examples), the drafts a new upload extracts (`db.ts`, shaped like the shared menu draft and priced from the catalog), and the timings of the scripted timelines (`scheduler.ts`).
 

@@ -9,6 +9,7 @@ import * as api from '@/lib/api/client';
 import {createApiQueryClient} from '@/lib/api/provider';
 import {BusinessProvider} from '@/lib/session';
 import {BUSINESS_STORAGE_KEY} from '@/lib/session/business-selection';
+import * as db from '@/mocks/db';
 import {server} from '@/mocks/server';
 import {requests, TEST_BASE_URL, useMockServer} from '@/mocks/test-setup';
 import {AgentPreviewScreen} from './AgentPreviewScreen';
@@ -359,7 +360,18 @@ describe('Agent preview', {timeout: 30000}, () => {
     renderScreen('agt_pizza_paused_88');
     expect(await screen.findByText('This agent is paused')).toBeTruthy();
     expect(screen.getByText(/Simulated call is off: This agent is paused/)).toBeTruthy();
-    // The live agent has the same name: it is told apart by its version, never by its raw ID.
+    // The live agent has another name, so it is named plainly.
+    expect(await screen.findByText(/^Phone\. Pizza Order Assistant answers/)).toBeTruthy();
+    expect(screen.queryByText(/The other/)).toBeNull();
+  });
+
+  it('tells a live agent with the same name apart by its version, never by its raw ID', async () => {
+    // The fixtures give each agent its own name, so the same-name case is made here.
+    const paused = db.getAgentRecord(PIZZA, 'agt_pizza_paused_88');
+    paused.name = 'Pizza Order Assistant';
+    paused.draftSpec = {...paused.draftSpec, name: 'Pizza Order Assistant'};
+    renderScreen('agt_pizza_paused_88');
+    expect(await screen.findByText('This agent is paused')).toBeTruthy();
     expect(await screen.findByText(/^Phone\. The other Pizza Order Assistant \(version 2\) answers/)).toBeTruthy();
     expect(screen.queryByText(/agt_pizza_01/)).toBeNull();
   });

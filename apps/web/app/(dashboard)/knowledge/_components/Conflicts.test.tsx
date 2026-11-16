@@ -5,6 +5,7 @@ import {cleanup, fireEvent, render, screen, waitFor, within} from '@testing-libr
 import {QueryClientProvider} from '@tanstack/react-query';
 import {http, HttpResponse} from 'msw';
 import {ApiError, createApiQueryClient} from '@/lib/api';
+import * as db from '@/mocks/db';
 import {server} from '@/mocks/server';
 import {requests, useMockServer} from '@/mocks/test-setup';
 import {ApiErrorBanner, errorText, isResolveOnFactsList} from './ApiErrorBanner';
@@ -58,6 +59,24 @@ describe('ApiErrorBanner for a conflict resolved from the facts list', () => {
     const outage = new ApiError({code: 'INTEGRATION_UNAVAILABLE', message: 'x', status: 503, retryable: true, details: {provider: 'square'}, kind: 'http'});
     expect(isResolveOnFactsList(outage)).toBe(false);
     expect(errorText(outage)).toBe('Square is not responding.');
+  });
+});
+
+describe('ConflictCard for a menu price conflict shaped like a real server one', () => {
+  it('finds the catalog variation by item and variation name when the conflict has no variationId', async () => {
+    // CONTRACTS 3: a real menu_item conflict has no value.variationId, and its key is the two names.
+    const conflict = db.getState().conflicts.find((c) => c.id === 'cfl_pizza_01')!;
+    conflict.candidates = conflict.candidates.map((c) => {
+      const {variationId: _drop, ...value} = c.value as Record<string, unknown>;
+      return {...c, value};
+    });
+    expect(conflict.key).toBe('margherita:large');
+    expect(conflict.candidates.some((c) => 'variationId' in (c.value as object))).toBe(false);
+
+    renderPizza();
+    expect(await screen.findByRole('heading', {level: 3, name: 'Margherita, Large'})).toBeTruthy();
+    // Only a matched catalog variation gives the card its current Square price.
+    expect(await screen.findByText(/^Catalog price now: \$20\.00/)).toBeTruthy();
   });
 });
 
