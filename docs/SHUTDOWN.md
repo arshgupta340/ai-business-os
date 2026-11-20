@@ -30,7 +30,7 @@ A scan of every commit on every branch and pull request, and of all issue and pu
 
 | Provider | Key state | Can it charge Arsh? |
 |---|---|---|
-| OpenAI | Key "Calpoly AI Hackathon" revoked. A separate key "AI BOS video fix" was made on Arsh's yes for the demo video; it expires 2026-11-26 and is kept only in an untracked local file. | Prepaid, auto-reload off: spend cannot go past the credit balance. |
+| OpenAI | Key "Calpoly AI Hackathon" revoked. A separate key "AI BOS video fix" was made on Arsh's yes for the demo video and revoked once the video was done. No OpenAI key from this project is active. | Prepaid, auto-reload off: spend cannot go past the credit balance. |
 | Twilio | Auth token rotated (the old one returns 401). The extra API key "AI Hachathon" deleted. No numbers. | Only by someone signed in to the console. The auto-recharge setting was not checked, because the console needs Arsh's login. |
 | AgentPhone | API key revoked (returns 401). No numbers, no webhook. | Auto-recharge is off. A saved payment method ("Link") remains. |
 | Google Cloud `ai-business-os-demo` | Service account key deleted. Billing disabled on the project. | No. |
